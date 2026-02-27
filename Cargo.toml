@@ -1,33 +1,29 @@
 [package]
 name = "glimpse-speech"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 rust-version = "1.76"
-description = "A transcription API powered by whisper-rs and FluidAudio"
+description = "A transcription API powered by whisper-rs and parakeet-rs"
 license = "MIT"
 
 [features]
 default = []
 whisper = ["dep:whisper-rs"]
-fluid = ["dep:libloading", "dep:serde", "dep:serde_json"]
-parakeet = ["fluid"]
-whisperfile = ["fluid"]
-all = ["whisper", "parakeet", "whisperfile"]
+parakeet = ["dep:parakeet-rs"]
+all = ["whisper", "parakeet"]
 
 [dependencies]
 hound = "3.5.1"
-libloading = { version = "0.8", optional = true }
-serde = { version = "1", features = ["derive"], optional = true }
-serde_json = { version = "1", optional = true }
+parakeet-rs = { version = "0.3.3", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-whisper-rs = { version = "0.13.2", features = ["metal"], optional = true }
+whisper-rs = { version = "0.15.1", features = ["metal"], optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-whisper-rs = { version = "0.13.2", features = ["vulkan"], optional = true }
+whisper-rs = { version = "0.15.1", features = ["vulkan"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-whisper-rs = { version = "0.13.2", features = ["vulkan"], optional = true }
+whisper-rs = { version = "0.15.1", features = ["vulkan"], optional = true }
 
 [[example]]
 name = "whisper"
@@ -36,7 +32,3 @@ required-features = ["whisper"]
 [[example]]
 name = "parakeet"
 required-features = ["parakeet"]
-
-[[example]]
-name = "whisperfile"
-required-features = ["whisperfile"]

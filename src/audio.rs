@@ -1,7 +1,6 @@
 use std::path::Path;
 
 /// Requirements: 16 kHz, mono, PCM int16 WAV file.
-
 pub fn read_wav_samples(wav_path: &Path) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
     let mut reader = hound::WavReader::open(wav_path)?;
     let spec = reader.spec();
