@@ -2,7 +2,7 @@
 
 `glimpse-speech` is a local transcription crate built around:
 - `whisper-rs` for GGML Whisper inference
-- `parakeet-rs` for ONNX Parakeet inference (TDT + CTC)
+- `parakeet-rs` for ONNX Parakeet TDT inference
 
 The public API is intentionally simple and engine-agnostic:
 - `TranscriptionEngine`
@@ -90,11 +90,6 @@ Model directory expectations:
   - `encoder-model.onnx.data`
   - `decoder_joint-model.onnx`
   - `vocab.txt`
-- CTC FP32:
-  - `model.onnx`
-  - `model.onnx_data`
-  - `tokenizer.json`
-
 ## Further notes
 
 Example commands:
