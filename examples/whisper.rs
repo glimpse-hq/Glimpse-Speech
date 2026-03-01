@@ -25,7 +25,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let result = engine.transcribe_file(
         &wav_path,
         Some(WhisperInferenceParams {
-            initial_prompt: Some("Glimpse speech transcription.".to_string()),
+            dictionary: vec!["Glimpse".to_string(), "Parakeet".to_string()],
             ..Default::default()
         }),
     )?;

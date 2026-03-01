@@ -11,7 +11,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let model_dir = PathBuf::from(
         args.get(1)
             .map(|value| value.as_str())
-            .unwrap_or("models/parakeet-tdt-0.6b-v3-coreml"),
+            .unwrap_or("models/parakeet-tdt-0.6b-v3-onnx-int8"),
     );
     let wav_path = PathBuf::from(
         args.get(2)

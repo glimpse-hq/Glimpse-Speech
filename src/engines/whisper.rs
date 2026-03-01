@@ -2,7 +2,10 @@ use std::path::{Path, PathBuf};
 
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
-use crate::{TranscriptionEngine, TranscriptionResult, TranscriptionSegment};
+use crate::{
+    dictionary::build_dictionary_prompt, TranscriptionEngine, TranscriptionResult,
+    TranscriptionSegment,
+};
 
 #[derive(Debug, Clone)]
 pub struct WhisperModelParams {
@@ -26,6 +29,7 @@ pub struct WhisperInferenceParams {
     pub suppress_blank: bool,
     pub suppress_non_speech_tokens: bool,
     pub no_speech_thold: f32,
+    pub dictionary: Vec<String>,
     pub initial_prompt: Option<String>,
 }
 
@@ -41,6 +45,7 @@ impl Default for WhisperInferenceParams {
             suppress_blank: true,
             suppress_non_speech_tokens: true,
             no_speech_thold: 0.2,
+            dictionary: Vec::new(),
             initial_prompt: None,
         }
     }
@@ -129,23 +134,35 @@ impl TranscriptionEngine for WhisperEngine {
         full_params.set_print_realtime(whisper_params.print_realtime);
         full_params.set_print_timestamps(whisper_params.print_timestamps);
         full_params.set_suppress_blank(whisper_params.suppress_blank);
-        full_params.set_suppress_non_speech_tokens(whisper_params.suppress_non_speech_tokens);
+        full_params.set_suppress_nst(whisper_params.suppress_non_speech_tokens);
         full_params.set_no_speech_thold(whisper_params.no_speech_thold);
 
-        if let Some(prompt) = whisper_params.initial_prompt.as_deref() {
+        let initial_prompt = whisper_params
+            .initial_prompt
+            .or_else(|| build_dictionary_prompt(&whisper_params.dictionary));
+
+        if let Some(prompt) = initial_prompt.as_deref() {
             full_params.set_initial_prompt(prompt);
         }
 
         state.full(full_params, &samples)?;
 
-        let num_segments = state.full_n_segments()?;
+        let num_segments = state.full_n_segments();
         let mut segments = Vec::new();
         let mut full_text = String::new();
 
         for i in 0..num_segments {
-            let text = state.full_get_segment_text(i)?;
-            let start = state.full_get_segment_t0(i)? as f32 / 100.0;
-            let end = state.full_get_segment_t1(i)? as f32 / 100.0;
+            let Some(segment) = state.get_segment(i) else {
+                continue;
+            };
+            let text = segment
+                .to_str_lossy()
+                .map_err(|error| {
+                    io_error(format!("failed to decode whisper segment text: {error}"))
+                })?
+                .to_string();
+            let start = segment.start_timestamp() as f32 / 100.0;
+            let end = segment.end_timestamp() as f32 / 100.0;
 
             segments.push(TranscriptionSegment {
                 start,

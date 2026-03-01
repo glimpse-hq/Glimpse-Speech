@@ -1,5 +1,3 @@
 /target
 .build
-swift-bridge/.build
-swift-bridge/.swiftpm
 .DS_Store
