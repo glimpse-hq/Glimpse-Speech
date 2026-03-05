@@ -228,7 +228,7 @@ fn map_timestamp_mode(granularity: TimestampGranularity) -> TimestampMode {
 
 fn normalize_inference_params(params: Option<ParakeetInferenceParams>) -> ParakeetInferenceParams {
     let mut params = params.unwrap_or_default();
-    params
+    params.dictionary = sanitize_dictionary_entries(&params.dictionary);
     params
 }
 
