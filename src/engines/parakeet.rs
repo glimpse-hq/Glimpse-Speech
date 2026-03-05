@@ -81,7 +81,6 @@ pub struct ParakeetInferenceParams {
     pub timestamp_granularity: TimestampGranularity,
     pub language: Option<String>,
     pub dictionary: Vec<String>,
-    pub enable_itn: bool,
 }
 
 impl Default for ParakeetInferenceParams {
@@ -90,7 +89,6 @@ impl Default for ParakeetInferenceParams {
             timestamp_granularity: TimestampGranularity::Token,
             language: None,
             dictionary: Vec::new(),
-            enable_itn: false,
         }
     }
 }
@@ -137,9 +135,7 @@ impl ParakeetEngine {
             .transcribe_samples(samples, SAMPLE_RATE, 1, Some(mode))
             .map_err(parakeet_error)?;
 
-        let mut result = map_result(raw_result, params.timestamp_granularity);
-        result.text = apply_itn_if_enabled(&result.text, params.enable_itn);
-        Ok(result)
+        Ok(map_result(raw_result, params.timestamp_granularity))
     }
 }
 
@@ -230,11 +226,6 @@ fn normalize_inference_params(params: Option<ParakeetInferenceParams>) -> Parake
     let mut params = params.unwrap_or_default();
     params.dictionary = sanitize_dictionary_entries(&params.dictionary);
     params
-}
-
-fn apply_itn_if_enabled(text: &str, enabled: bool) -> String {
-    let _ = enabled;
-    text.trim().to_string()
 }
 
 fn validate_model_path(
