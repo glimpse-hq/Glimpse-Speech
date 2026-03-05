@@ -1,5 +1,7 @@
 use std::path::Path;
 
+const PCM16_SCALE: f32 = 32_768.0;
+
 /// Requirements: 16 kHz, mono, PCM int16 WAV file.
 pub fn read_wav_samples(wav_path: &Path) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
     let mut reader = hound::WavReader::open(wav_path)?;
@@ -31,7 +33,7 @@ pub fn read_wav_samples(wav_path: &Path) -> Result<Vec<f32>, Box<dyn std::error:
 
     let samples: Result<Vec<f32>, _> = reader
         .samples::<i16>()
-        .map(|sample| sample.map(|s| s as f32 / i16::MAX as f32))
+        .map(|sample| sample.map(|s| s as f32 / PCM16_SCALE))
         .collect();
 
     Ok(samples?)
