@@ -122,12 +122,13 @@ impl TranscriptionEngine for WhisperEngine {
             .ok_or_else(|| io_error("Model not loaded. Call load_model() first."))?;
 
         let whisper_params = params.unwrap_or_default();
+        let language = normalize_whisper_language(whisper_params.language.as_deref())?;
 
         let mut full_params = FullParams::new(SamplingStrategy::BeamSearch {
             beam_size: 3,
             patience: -1.0,
         });
-        full_params.set_language(whisper_params.language.as_deref());
+        full_params.set_language(language.as_deref());
         full_params.set_translate(whisper_params.translate);
         full_params.set_print_special(whisper_params.print_special);
         full_params.set_print_progress(whisper_params.print_progress);
@@ -140,6 +141,7 @@ impl TranscriptionEngine for WhisperEngine {
         let initial_prompt = whisper_params
             .initial_prompt
             .or_else(|| build_dictionary_prompt(&whisper_params.dictionary));
+        let initial_prompt = normalize_whisper_prompt(initial_prompt.as_deref())?;
 
         if let Some(prompt) = initial_prompt.as_deref() {
             full_params.set_initial_prompt(prompt);
@@ -177,6 +179,43 @@ impl TranscriptionEngine for WhisperEngine {
             segments: Some(segments),
         })
     }
+}
+
+fn normalize_whisper_language(
+    language: Option<&str>,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    normalize_optional_whisper_text(language, "language", true)
+}
+
+fn normalize_whisper_prompt(
+    prompt: Option<&str>,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    normalize_optional_whisper_text(prompt, "initial prompt", false)
+}
+
+fn normalize_optional_whisper_text(
+    value: Option<&str>,
+    field: &str,
+    treat_auto_as_none: bool,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    if treat_auto_as_none && trimmed.eq_ignore_ascii_case("auto") {
+        return Ok(None);
+    }
+
+    if trimmed.contains('\0') {
+        return Err(io_error(format!("whisper {field} contains a null byte")));
+    }
+
+    Ok(Some(trimmed.to_string()))
 }
 
 fn io_error(message: impl Into<String>) -> Box<dyn std::error::Error> {

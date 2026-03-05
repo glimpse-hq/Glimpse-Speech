@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use parakeet_rs::{ParakeetTDT, TimestampMode, Transcriber};
 
 use crate::{
-    dictionary::sanitize_dictionary_entries, itn::apply_simple_english_itn, TranscriptionEngine,
-    TranscriptionResult, TranscriptionSegment,
+    dictionary::sanitize_dictionary_entries, TranscriptionEngine, TranscriptionResult,
+    TranscriptionSegment,
 };
 
 const REQUIRED_TDT_FP32_FILES: [&str; 4] = [
@@ -18,6 +18,14 @@ const REQUIRED_TDT_INT8_FILES: [&str; 3] = [
     "encoder-model.int8.onnx",
     "decoder_joint-model.int8.onnx",
     "vocab.txt",
+];
+
+const CONFLICTING_TDT_INT8_FILES: [&str; 5] = [
+    "encoder-model.onnx",
+    "encoder.onnx",
+    "decoder_joint-model.onnx",
+    "decoder_joint.onnx",
+    "decoder-model.onnx",
 ];
 
 const SAMPLE_RATE: u32 = 16_000;
@@ -73,7 +81,6 @@ pub struct ParakeetInferenceParams {
     pub timestamp_granularity: TimestampGranularity,
     pub language: Option<String>,
     pub dictionary: Vec<String>,
-    pub enable_itn: bool,
 }
 
 impl Default for ParakeetInferenceParams {
@@ -82,7 +89,6 @@ impl Default for ParakeetInferenceParams {
             timestamp_granularity: TimestampGranularity::Token,
             language: None,
             dictionary: Vec::new(),
-            enable_itn: false,
         }
     }
 }
@@ -129,31 +135,7 @@ impl ParakeetEngine {
             .transcribe_samples(samples, SAMPLE_RATE, 1, Some(mode))
             .map_err(parakeet_error)?;
 
-        let mut result = map_result(raw_result, params.timestamp_granularity);
-        result.text = apply_itn_if_enabled(&result.text, params.enable_itn);
-        Ok(result)
-    }
-
-    fn transcribe_file_inner(
-        &mut self,
-        wav_path: &Path,
-        params: Option<ParakeetInferenceParams>,
-    ) -> Result<TranscriptionResult, Box<dyn std::error::Error>> {
-        let runtime = self.runtime_mut()?;
-        let params = normalize_inference_params(params);
-        let mode = map_timestamp_mode(params.timestamp_granularity.clone());
-
-        // Current parakeet-rs TDT path does not expose explicit language forcing
-        // or dictionary boosting, so these are currently no-ops.
-        let _ = (&params.language, &params.dictionary);
-
-        let raw_result = runtime
-            .transcribe_file(wav_path, Some(mode))
-            .map_err(parakeet_error)?;
-
-        let mut result = map_result(raw_result, params.timestamp_granularity);
-        result.text = apply_itn_if_enabled(&result.text, params.enable_itn);
-        Ok(result)
+        Ok(map_result(raw_result, params.timestamp_granularity))
     }
 }
 
@@ -190,14 +172,6 @@ impl TranscriptionEngine for ParakeetEngine {
         params: Option<Self::InferenceParams>,
     ) -> Result<TranscriptionResult, Box<dyn std::error::Error>> {
         self.transcribe_inner(samples, params)
-    }
-
-    fn transcribe_file(
-        &mut self,
-        wav_path: &Path,
-        params: Option<Self::InferenceParams>,
-    ) -> Result<TranscriptionResult, Box<dyn std::error::Error>> {
-        self.transcribe_file_inner(wav_path, params)
     }
 }
 
@@ -250,16 +224,8 @@ fn map_timestamp_mode(granularity: TimestampGranularity) -> TimestampMode {
 
 fn normalize_inference_params(params: Option<ParakeetInferenceParams>) -> ParakeetInferenceParams {
     let mut params = params.unwrap_or_default();
+    params.dictionary = sanitize_dictionary_entries(&params.dictionary);
     params
-    params
-}
-
-fn apply_itn_if_enabled(text: &str, enabled: bool) -> String {
-    if enabled {
-        apply_simple_english_itn(text)
-    } else {
-        text.trim().to_string()
-    }
 }
 
 fn validate_model_path(
@@ -303,6 +269,28 @@ fn validate_model_path(
             model_path.display(),
             missing.join(", ")
         )));
+    }
+
+    if quantization == QuantizationType::Int8 {
+        let conflicting: Vec<String> = CONFLICTING_TDT_INT8_FILES
+            .iter()
+            .filter_map(|name| {
+                let path = model_path.join(name);
+                if path.exists() {
+                    Some((*name).to_string())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if !conflicting.is_empty() {
+            return Err(io_error(format!(
+                "Int8 Parakeet model directory {} contains preferred non-Int8 artifacts that parakeet-rs would load first: {}. Use a clean Int8-only directory.",
+                model_path.display(),
+                conflicting.join(", ")
+            )));
+        }
     }
 
     Ok(())
