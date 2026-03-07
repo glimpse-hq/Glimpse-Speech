@@ -1,10 +1,22 @@
+#[cfg(all(
+    feature = "parakeet",
+    not(all(target_os = "macos", target_arch = "x86_64"))
+))]
 use std::path::PathBuf;
 
+#[cfg(all(
+    feature = "parakeet",
+    not(all(target_os = "macos", target_arch = "x86_64"))
+))]
 use glimpse_speech::{
     engines::parakeet::{ParakeetEngine, ParakeetInferenceParams, ParakeetModelParams},
     TranscriptionEngine,
 };
 
+#[cfg(all(
+    feature = "parakeet",
+    not(all(target_os = "macos", target_arch = "x86_64"))
+))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
 
@@ -36,4 +48,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+#[cfg(not(all(
+    feature = "parakeet",
+    not(all(target_os = "macos", target_arch = "x86_64"))
+)))]
+fn main() {
+    eprintln!("The parakeet example is unavailable on Intel macOS builds.");
 }
