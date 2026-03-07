@@ -25,7 +25,7 @@ Parakeet is disabled on Intel macOS (`x86_64-apple-darwin`) because `parakeet-rs
 
 ```toml
 [dependencies]
-glimpse-speech = { git = "https://github.com/LegendarySpy/Glimpse-Speech.git", tag = "1.0.1", features = ["whisper", "parakeet"] }
+glimpse-speech = { git = "https://github.com/LegendarySpy/Glimpse-Speech.git", tag = "1.0.2", features = ["whisper", "parakeet"] }
 ```
 
 On Intel macOS, keep `whisper` enabled and treat `parakeet` as unavailable even if the feature is listed.
