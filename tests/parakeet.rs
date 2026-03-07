@@ -1,4 +1,7 @@
-#![cfg(feature = "parakeet")]
+#![cfg(all(
+    feature = "parakeet",
+    not(all(target_os = "macos", target_arch = "x86_64"))
+))]
 
 use glimpse_speech::engines::parakeet::{ParakeetModelParams, QuantizationType};
 

@@ -16,8 +16,10 @@ The public API is intentionally simple and engine-agnostic:
 | Feature | Purpose |
 | --- | --- |
 | `whisper` | Enable `engines::whisper::WhisperEngine` |
-| `parakeet` | Enable `engines::parakeet::ParakeetEngine` |
+| `parakeet` | Enable `engines::parakeet::ParakeetEngine` on supported targets |
 | `all` | Enables `whisper` and `parakeet` |
+
+Parakeet is disabled on Intel macOS (`x86_64-apple-darwin`) because `parakeet-rs` currently pulls an `ort` stack that does not ship the required prebuilt ONNX Runtime binary for that target.
 
 ## Installation
 
@@ -25,6 +27,8 @@ The public API is intentionally simple and engine-agnostic:
 [dependencies]
 glimpse-speech = { git = "https://github.com/LegendarySpy/Glimpse-Speech.git", tag = "1.0.0", features = ["whisper", "parakeet"] }
 ```
+
+On Intel macOS, keep `whisper` enabled and treat `parakeet` as unavailable even if the feature is listed.
 
 For local development in this repository:
 
@@ -98,6 +102,8 @@ Example commands:
 cargo run --example whisper --features whisper -- <model.bin> <audio.wav>
 cargo run --example parakeet --features parakeet -- <model-dir> <audio.wav>
 ```
+
+The Parakeet example is only available on non-Intel macOS targets.
 
 ## Acknowledgments
 

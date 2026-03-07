@@ -14,7 +14,6 @@ all = ["whisper", "parakeet"]
 
 [dependencies]
 hound = "3.5.1"
-parakeet-rs = { version = "0.3.3", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 whisper-rs = { version = "0.15.1", features = ["metal"], optional = true }
@@ -24,6 +23,9 @@ whisper-rs = { version = "0.15.1", features = ["vulkan"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 whisper-rs = { version = "0.15.1", features = ["vulkan"], optional = true }
+
+[target.'cfg(not(all(target_os = "macos", target_arch = "x86_64")))'.dependencies]
+parakeet-rs = { version = "0.3.3", optional = true }
 
 [[example]]
 name = "whisper"
