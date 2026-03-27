@@ -2,7 +2,7 @@
 name = "glimpse-speech"
 version = "1.0.3"
 edition = "2021"
-rust-version = "1.76"
+rust-version = "1.85"
 description = "A transcription API powered by whisper-rs and parakeet-rs"
 license = "MIT"
 
