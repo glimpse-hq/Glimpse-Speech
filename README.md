@@ -2,7 +2,7 @@
 
 `glimpse-speech` is a local transcription crate built around:
 - `whisper-rs` for GGML Whisper inference
-- `parakeet-rs` for ONNX Parakeet TDT inference
+- `parakeet-rs` for NVIDIA ONNX speech models, including Parakeet and Nemotron
 
 The public API is intentionally simple and engine-agnostic:
 - `TranscriptionEngine`
@@ -16,25 +16,27 @@ The public API is intentionally simple and engine-agnostic:
 | Feature | Purpose |
 | --- | --- |
 | `whisper` | Enable `engines::whisper::WhisperEngine` |
-| `parakeet` | Enable `engines::parakeet::ParakeetEngine` on supported targets |
-| `all` | Enables `whisper` and `parakeet` |
+| `nvidia` | Enable all NVIDIA-backed engines in this crate on supported targets, currently `engines::parakeet::ParakeetEngine` and `engines::nemotron::NemotronEngine` |
+| `all` | Enables `whisper` and `nvidia` |
 
-Parakeet is disabled on Intel macOS (`x86_64-apple-darwin`) because `parakeet-rs` currently pulls an `ort` stack that does not ship the required prebuilt ONNX Runtime binary for that target.
+NVIDIA-backed engines are disabled on Intel macOS (`x86_64-apple-darwin`) because `parakeet-rs` currently pulls an `ort` stack that does not ship the required prebuilt ONNX Runtime binary for that target.
+
+The legacy `parakeet` feature remains as a compatibility alias for `nvidia`.
 
 ## Installation
 
 ```toml
 [dependencies]
-glimpse-speech = { git = "https://github.com/LegendarySpy/Glimpse-Speech.git", tag = "1.0.2", features = ["whisper", "parakeet"] }
+glimpse-speech = { git = "https://github.com/LegendarySpy/Glimpse-Speech.git", tag = "1.0.3", features = ["whisper", "nvidia"] }
 ```
 
-On Intel macOS, keep `whisper` enabled and treat `parakeet` as unavailable even if the feature is listed.
+On Intel macOS, keep `whisper` enabled and treat `nvidia` as unavailable even if the feature is listed.
 
 For local development in this repository:
 
 ```toml
 [dependencies]
-glimpse-speech = { path = "../Glimpse-Speech", features = ["whisper", "parakeet"] }
+glimpse-speech = { path = "../Glimpse-Speech", features = ["whisper", "nvidia"] }
 ```
 
 ## Usage
@@ -94,18 +96,51 @@ Model directory expectations:
   - `encoder-model.onnx.data`
   - `decoder_joint-model.onnx`
   - `vocab.txt`
+
+### Nemotron (streaming ONNX)
+
+```rust
+use glimpse_speech::{
+    engines::nemotron::NemotronEngine,
+    TranscriptionEngine,
+};
+use std::path::PathBuf;
+
+let mut engine = NemotronEngine::new();
+engine.load_model(&PathBuf::from("models/nemotron-speech-streaming-en-0.6b"))?;
+let result = engine.transcribe_file(&PathBuf::from("audio.wav"), None)?;
+println!("{}", result.text);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Nemotron also exposes streaming helpers:
+
+- `transcribe_chunk(&[f32])`
+- `get_transcript()`
+- `reset()`
+
+Model directory expectations:
+
+- `encoder.onnx`
+- `encoder.onnx.data`
+- `decoder_joint.onnx`
+- `tokenizer.model`
+
 ## Further notes
 
 Example commands:
 
 ```bash
 cargo run --example whisper --features whisper -- <model.bin> <audio.wav>
-cargo run --example parakeet --features parakeet -- <model-dir> <audio.wav>
+cargo run --example nvidia --features nvidia -- parakeet <model-dir> <audio.wav>
+cargo run --example nvidia --features nvidia -- nemotron <model-dir> <audio.wav>
 ```
 
-The Parakeet example is only available on non-Intel macOS targets.
+If you omit the engine argument, the NVIDIA example defaults to `parakeet`.
+
+The NVIDIA-backed example is only available on non-Intel macOS targets.
 
 ## Acknowledgments
 
 - [whisper-rs](https://github.com/tazz4843/whisper-rs) (Unlicense) for Whisper bindings
-- [parakeet-rs](https://github.com/altunenes/parakeet-rs) (MIT OR Apache-2.0) for ONNX Parakeet support
+- [parakeet-rs](https://github.com/altunenes/parakeet-rs) (MIT OR Apache-2.0) for NVIDIA ONNX speech model support

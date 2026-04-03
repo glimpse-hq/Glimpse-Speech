@@ -1,5 +1,10 @@
 #[cfg(all(
-    feature = "parakeet",
+    feature = "nvidia",
+    not(all(target_os = "macos", target_arch = "x86_64"))
+))]
+pub mod nemotron;
+#[cfg(all(
+    feature = "nvidia",
     not(all(target_os = "macos", target_arch = "x86_64"))
 ))]
 pub mod parakeet;

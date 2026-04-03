@@ -1,16 +1,20 @@
 [package]
 name = "glimpse-speech"
-version = "1.0.3"
+version = "1.1.0"
 edition = "2021"
 rust-version = "1.85"
-description = "A transcription API powered by whisper-rs and parakeet-rs"
+description = "A transcription API powered by whisper-rs and NVIDIA speech models via parakeet-rs"
 license = "MIT"
+repository = "https://github.com/LegendarySpy/Glimpse-Speech"
+homepage = "https://github.com/LegendarySpy/Glimpse-Speech"
+documentation = "https://docs.rs/glimpse-speech"
 
 [features]
 default = []
 whisper = ["dep:whisper-rs"]
-parakeet = ["dep:parakeet-rs"]
-all = ["whisper", "parakeet"]
+nvidia = ["dep:parakeet-rs"]
+parakeet = ["nvidia"]
+all = ["whisper", "nvidia"]
 
 [dependencies]
 hound = "3.5.1"
@@ -32,5 +36,5 @@ name = "whisper"
 required-features = ["whisper"]
 
 [[example]]
-name = "parakeet"
-required-features = ["parakeet"]
+name = "nvidia"
+required-features = ["nvidia"]
