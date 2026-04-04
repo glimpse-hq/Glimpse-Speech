@@ -180,7 +180,7 @@ mod tests {
 
     #[test]
     fn default_params() {
-        let params = NemotronModelParams::default();
+        let params = NemotronModelParams;
         assert_eq!(params, NemotronModelParams);
     }
 }

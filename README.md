@@ -16,7 +16,7 @@ The public API is intentionally simple and engine-agnostic:
 | Feature | Purpose |
 | --- | --- |
 | `whisper` | Enable `engines::whisper::WhisperEngine` |
-| `nvidia` | Enable all NVIDIA-backed engines in this crate on supported targets, currently `engines::parakeet::ParakeetEngine` and `engines::nemotron::NemotronEngine` |
+| `nvidia` | Enable all NVIDIA-backed engines in this crate on supported targets, including `engines::parakeet::ParakeetEngine`, Sortformer-based diarization helpers, and `engines::nemotron::NemotronEngine` |
 | `all` | Enables `whisper` and `nvidia` |
 
 NVIDIA-backed engines are disabled on Intel macOS (`x86_64-apple-darwin`) because `parakeet-rs` currently pulls an `ort` stack that does not ship the required prebuilt ONNX Runtime binary for that target.
@@ -27,7 +27,7 @@ The legacy `parakeet` feature remains as a compatibility alias for `nvidia`.
 
 ```toml
 [dependencies]
-glimpse-speech = { git = "https://github.com/LegendarySpy/Glimpse-Speech.git", tag = "1.0.3", features = ["whisper", "nvidia"] }
+glimpse-speech = { git = "https://github.com/LegendarySpy/Glimpse-Speech.git", tag = "1.1.0", features = ["whisper", "nvidia"] }
 ```
 
 On Intel macOS, keep `whisper` enabled and treat `nvidia` as unavailable even if the feature is listed.
@@ -85,6 +85,52 @@ println!("{}", result.text);
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
+### Parakeet + Sortformer diarization
+
+`glimpse-speech` bundles Sortformer support into the `nvidia` feature, so downstream crates do not need a separate crate feature to access diarization.
+
+```rust
+use glimpse_speech::{
+    diarization::attribute_speakers,
+    engines::{
+        parakeet::{ParakeetEngine, ParakeetInferenceParams, ParakeetModelParams, TimestampGranularity},
+        sortformer::{SortformerEngine, SortformerModelParams},
+    },
+    SpeakerDiarizationEngine, TranscriptionEngine,
+};
+use std::path::PathBuf;
+
+let mut transcription_engine = ParakeetEngine::new();
+transcription_engine.load_model_with_params(
+    &PathBuf::from("models/parakeet-tdt-0.6b-v3-onnx-int8"),
+    ParakeetModelParams::int8(),
+)?;
+
+let mut diarization_engine = SortformerEngine::new();
+diarization_engine.load_model_with_params(
+    &PathBuf::from("models/diar_streaming_sortformer_4spk-v2.onnx"),
+    SortformerModelParams::callhome(),
+)?;
+
+let transcription = transcription_engine.transcribe_file(
+    &PathBuf::from("audio.wav"),
+    Some(ParakeetInferenceParams {
+        timestamp_granularity: TimestampGranularity::Segment,
+        ..Default::default()
+    }),
+)?;
+let speaker_segments = diarization_engine.diarize_file(&PathBuf::from("audio.wav"))?;
+let result = attribute_speakers(transcription, speaker_segments)?;
+
+for segment in result.segments {
+    println!(
+        "[{:.2}s - {:.2}s] speaker={:?} {}",
+        segment.start, segment.end, segment.speaker_id, segment.text
+    );
+}
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
 Model directory expectations:
 
 - TDT Int8:
@@ -96,6 +142,27 @@ Model directory expectations:
   - `encoder-model.onnx.data`
   - `decoder_joint-model.onnx`
   - `vocab.txt`
+- Sortformer diarization:
+  - `diar_streaming_sortformer_4spk-v2.onnx` or `diar_streaming_sortformer_4spk-v2.1.onnx`
+
+Diarization-specific pieces are model-agnostic:
+
+- `SpeakerDiarizationEngine`
+- `diarization::SpeakerDiarizationSegment`
+- `diarization::DiarizedTranscriptionResult`
+- `diarization::attribute_speakers()`
+- `engines::sortformer::SortformerEngine`
+
+`SortformerModelParams` defaults to the upstream CallHome tuning and reads streaming values from ONNX metadata when present. To lower latency, override the runtime window after construction:
+
+```rust
+use glimpse_speech::engines::sortformer::SortformerModelParams;
+
+let params = SortformerModelParams::callhome()
+    .with_streaming_overrides(62, 62, 94, 1);
+```
+
+Sortformer can stream arbitrarily long audio, but Parakeet-TDT still has sequence-length limits. For long recordings, run diarization across the full file and transcribe shorter chunks before merging timestamps back together.
 
 ### Nemotron (streaming ONNX)
 
@@ -134,6 +201,7 @@ Example commands:
 cargo run --example whisper --features whisper -- <model.bin> <audio.wav>
 cargo run --example nvidia --features nvidia -- parakeet <model-dir> <audio.wav>
 cargo run --example nvidia --features nvidia -- nemotron <model-dir> <audio.wav>
+cargo run --example diarization --features nvidia -- <parakeet-model-dir> <sortformer.onnx> <audio.wav>
 ```
 
 If you omit the engine argument, the NVIDIA example defaults to `parakeet`.

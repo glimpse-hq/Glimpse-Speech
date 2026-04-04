@@ -1,7 +1,9 @@
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use glimpse_speech::audio::read_wav_samples;
+
+static NEXT_TEMP_WAV_ID: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 fn reads_pcm16_mono_16khz_wav() {
@@ -24,12 +26,12 @@ fn rejects_non_16khz_wav() {
 }
 
 fn write_temp_wav(sample_rate: u32, samples: &[i16]) -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be monotonic")
-        .as_nanos();
+    let nonce = NEXT_TEMP_WAV_ID.fetch_add(1, Ordering::Relaxed);
     let mut path = std::env::temp_dir();
-    path.push(format!("glimpse-speech-test-{nonce}.wav"));
+    path.push(format!(
+        "glimpse-speech-test-{}-{nonce}.wav",
+        std::process::id()
+    ));
 
     let spec = hound::WavSpec {
         channels: 1,

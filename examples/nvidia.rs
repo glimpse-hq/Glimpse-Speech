@@ -62,8 +62,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     not(all(target_os = "macos", target_arch = "x86_64"))
 ))]
 fn transcribe_with_parakeet(
-    model_dir: &PathBuf,
-    wav_path: &PathBuf,
+    model_dir: &std::path::Path,
+    wav_path: &std::path::Path,
 ) -> Result<TranscriptionResult, Box<dyn std::error::Error>> {
     let mut engine = ParakeetEngine::new();
     engine.load_model_with_params(model_dir, ParakeetModelParams::int8())?;
@@ -75,8 +75,8 @@ fn transcribe_with_parakeet(
     not(all(target_os = "macos", target_arch = "x86_64"))
 ))]
 fn transcribe_with_nemotron(
-    model_dir: &PathBuf,
-    wav_path: &PathBuf,
+    model_dir: &std::path::Path,
+    wav_path: &std::path::Path,
 ) -> Result<TranscriptionResult, Box<dyn std::error::Error>> {
     let mut engine = NemotronEngine::new();
     engine.load_model(model_dir)?;
