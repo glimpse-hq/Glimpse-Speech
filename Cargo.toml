@@ -29,7 +29,7 @@ whisper-rs = { version = "0.16.0", features = ["vulkan"], optional = true }
 whisper-rs = { version = "0.16.0", features = ["vulkan"], optional = true }
 
 [target.'cfg(not(all(target_os = "macos", target_arch = "x86_64")))'.dependencies]
-parakeet-rs = { version = "0.3.4", optional = true }
+parakeet-rs = { version = "0.3.4", optional = true, features = ["sortformer"] }
 
 [[example]]
 name = "whisper"
@@ -37,4 +37,8 @@ required-features = ["whisper"]
 
 [[example]]
 name = "nvidia"
+required-features = ["nvidia"]
+
+[[example]]
+name = "diarization"
 required-features = ["nvidia"]

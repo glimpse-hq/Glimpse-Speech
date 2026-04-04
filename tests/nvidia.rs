@@ -20,6 +20,6 @@ fn fp32_constructor_sets_fp32_quantization() {
 
 #[test]
 fn nemotron_default_params_are_empty_marker_type() {
-    let params = NemotronModelParams::default();
+    let params = NemotronModelParams;
     assert_eq!(params, NemotronModelParams);
 }
