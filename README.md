@@ -27,7 +27,7 @@ The legacy `parakeet` feature remains as a compatibility alias for `nvidia`.
 
 ```toml
 [dependencies]
-glimpse-speech = { git = "https://github.com/LegendarySpy/Glimpse-Speech.git", tag = "1.1.0", features = ["whisper", "nvidia"] }
+glimpse-speech = { git = "https://github.com/LegendarySpy/Glimpse-Speech.git", tag = "1.2.5", features = ["whisper", "nvidia"] }
 ```
 
 On Intel macOS, keep `whisper` enabled and treat `nvidia` as unavailable even if the feature is listed.
