@@ -191,6 +191,11 @@ pub async fn serve_with_shutdown(
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
     let addr: SocketAddr = format!("{}:{}", config.host, config.port).parse()?;
+    let api_key = config.api_key.filter(|key| !key.trim().is_empty());
+    if !addr.ip().is_loopback() && api_key.is_none() {
+        return Err(anyhow!("an API key is required when listening on LAN"));
+    }
+
     let cors_enabled = config.cors;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let service = Arc::new(SpeechService::new(SpeechConfig {
@@ -208,10 +213,7 @@ pub async fn serve_with_shutdown(
 
     let state = ApiState {
         service,
-        api_key: config
-            .api_key
-            .filter(|key| !key.trim().is_empty())
-            .map(Arc::from),
+        api_key: api_key.map(Arc::from),
         event_sink: config.event_sink,
     };
     state.log("info", format!("Local API listening on http://{addr}"));
