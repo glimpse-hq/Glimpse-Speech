@@ -1,4 +1,7 @@
-use std::path::PathBuf;
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use clap::{Parser, Subcommand};
 
@@ -112,18 +115,77 @@ pub async fn run() -> anyhow::Result<()> {
             cors,
             no_cors,
         } => {
+            let cors_enabled = cors && !no_cors;
+            let event_sink = serve_event_sink(
+                cache_dir.clone(),
+                model.clone(),
+                api_key.as_deref().is_some_and(|key| !key.trim().is_empty()),
+                cors_enabled,
+            );
             crate::api::serve(crate::api::ApiConfig {
                 host,
                 port,
                 model_cache_dir: cache_dir,
                 warm_model: model,
                 api_key,
-                event_sink: None,
-                cors: cors && !no_cors,
+                event_sink: Some(event_sink),
+                cors: cors_enabled,
             })
             .await
         }
     }
+}
+
+fn serve_event_sink(
+    model_cache_dir: PathBuf,
+    warm_model: Option<String>,
+    api_key_required: bool,
+    cors_enabled: bool,
+) -> crate::api::ApiEventSink {
+    Arc::new(move |event| {
+        if let Some(base_url) = event.message.strip_prefix("Local API listening on ") {
+            println!(
+                "{}",
+                serve_banner(
+                    base_url,
+                    &model_cache_dir,
+                    warm_model.as_deref(),
+                    api_key_required,
+                    cors_enabled,
+                )
+            );
+        }
+    })
+}
+
+fn serve_banner(
+    base_url: &str,
+    model_cache_dir: &Path,
+    warm_model: Option<&str>,
+    api_key_required: bool,
+    cors_enabled: bool,
+) -> String {
+    let auth = if api_key_required {
+        "API key required"
+    } else {
+        "none"
+    };
+    let cors = if cors_enabled { "enabled" } else { "disabled" };
+
+    format!(
+        "Now serving Glimpse Speech API\n\
+         Base URL: {base_url}\n\
+         Serving:\n\
+         - Models: GET {base_url}/v1/models\n\
+         - Model install: POST {base_url}/v1/models/{{id}}/install\n\
+         - Transcriptions: POST {base_url}/v1/audio/transcriptions\n\
+         Model cache: {}\n\
+         Warm model: {}\n\
+         Auth: {auth}\n\
+         CORS: {cors}",
+        model_cache_dir.display(),
+        warm_model.unwrap_or("none")
+    )
 }
 
 async fn handle_models(
