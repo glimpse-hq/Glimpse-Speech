@@ -583,9 +583,9 @@ impl ModelInstallManager {
                         output.flush().await?;
                         drop(output);
                         if replace_unverified_existing {
-                            fs::rename(&download_path, &target_path).with_context(|| {
-                                format!("replace model file {}", target_path.display())
-                            })?;
+                            replace_existing_file(&download_path, &target_path).with_context(
+                                || format!("replace model file {}", target_path.display()),
+                            )?;
                         }
                         if needs_completion_marker {
                             mark_file_complete(&marker_path).with_context(|| {
@@ -688,6 +688,14 @@ fn mark_file_complete(path: &Path) -> io::Result<()> {
 }
 
 fn replacement_download_path(path: &Path) -> PathBuf {
+    sibling_temp_path(path, "download")
+}
+
+fn replacement_backup_path(path: &Path) -> PathBuf {
+    sibling_temp_path(path, "backup")
+}
+
+fn sibling_temp_path(path: &Path, purpose: &str) -> PathBuf {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
@@ -699,10 +707,35 @@ fn replacement_download_path(path: &Path) -> PathBuf {
         .map(|name| name.to_string_lossy())
         .unwrap_or_default();
     replacement.set_file_name(format!(
-        "{file_name}.download-{}-{timestamp}-{sequence}",
+        "{file_name}.{purpose}-{}-{timestamp}-{sequence}",
         std::process::id(),
     ));
     replacement
+}
+
+fn replace_existing_file(source: &Path, target: &Path) -> io::Result<()> {
+    if !target.exists() {
+        return fs::rename(source, target);
+    }
+
+    let backup = replacement_backup_path(target);
+    fs::rename(target, &backup)?;
+    match fs::rename(source, target) {
+        Ok(()) => {
+            let _ = fs::remove_file(&backup);
+            Ok(())
+        }
+        Err(rename_error) => {
+            if let Err(restore_error) = fs::rename(&backup, target) {
+                return Err(io::Error::other(format!(
+                    "failed to replace {}: {rename_error}; also failed to restore backup {}: {restore_error}",
+                    target.display(),
+                    backup.display()
+                )));
+            }
+            Err(rename_error)
+        }
+    }
 }
 
 fn calculate_dir_size(dir: &Path) -> io::Result<u64> {
@@ -836,6 +869,29 @@ mod tests {
         let status = manager.model_status("whisper_small_q5").unwrap();
         assert!(status.installed);
         assert!(status.missing_files.is_empty());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn replace_existing_file_restores_target_on_failed_swap() {
+        let root =
+            std::env::temp_dir().join(format!("glimpse-speech-replace-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let target = root.join("model.bin");
+        let missing_source = root.join("download.bin");
+        fs::write(&target, b"old").unwrap();
+
+        let result = replace_existing_file(&missing_source, &target);
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"old");
+        assert!(fs::read_dir(&root).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains(".backup-")));
 
         let _ = fs::remove_dir_all(&root);
     }
