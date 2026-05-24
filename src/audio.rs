@@ -1,6 +1,8 @@
 use std::{
+    fs, io,
     path::{Path, PathBuf},
     process::Command,
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -53,9 +55,9 @@ pub fn read_audio_samples(path: &Path) -> Result<Vec<f32>, Box<dyn std::error::E
                     path.display()
                 ))
             })?;
-            let converted = temp_wav_path();
+            let converted = temp_wav_path()?;
             let status = Command::new(&ffmpeg)
-                .arg("-y")
+                .arg("-n")
                 .arg("-nostdin")
                 .arg("-loglevel")
                 .arg("error")
@@ -67,21 +69,18 @@ pub fn read_audio_samples(path: &Path) -> Result<Vec<f32>, Box<dyn std::error::E
                 .arg("1")
                 .arg("-sample_fmt")
                 .arg("s16")
-                .arg(&converted)
+                .arg(&converted.path)
                 .status()
                 .map_err(|err| io_error(format!("Failed to run ffmpeg: {err}")))?;
 
             if !status.success() {
-                let _ = std::fs::remove_file(&converted);
                 return Err(io_error(format!(
                     "ffmpeg failed to decode {}",
                     path.display()
                 )));
             }
 
-            let result = read_wav_samples(&converted);
-            let _ = std::fs::remove_file(converted);
-            result
+            read_wav_samples(&converted.path)
         }
     }
 }
@@ -100,17 +99,51 @@ fn find_ffmpeg() -> Option<PathBuf> {
     })
 }
 
-fn temp_wav_path() -> PathBuf {
+static TEMP_DECODE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+struct TempWav {
+    dir: PathBuf,
+    path: PathBuf,
+}
+
+impl Drop for TempWav {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+        let _ = fs::remove_dir(&self.dir);
+    }
+}
+
+fn temp_wav_path() -> Result<TempWav, Box<dyn std::error::Error>> {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
-    std::env::temp_dir().join(format!(
-        "glimpse-speech-decode-{}-{timestamp}.wav",
-        std::process::id()
-    ))
+    for _ in 0..16 {
+        let sequence = TEMP_DECODE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "glimpse-speech-decode-{}-{timestamp}-{sequence}",
+            std::process::id(),
+        ));
+        match fs::create_dir(&dir) {
+            Ok(()) => {
+                return Ok(TempWav {
+                    path: dir.join("audio.wav"),
+                    dir,
+                });
+            }
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(err) => {
+                return Err(io_error(format!(
+                    "Failed to create temp decode directory {}: {err}",
+                    dir.display()
+                )));
+            }
+        }
+    }
+
+    Err(io_error("Failed to create a unique temp decode directory"))
 }
 
 fn io_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
-    std::io::Error::other(message.into()).into()
+    io::Error::other(message.into()).into()
 }

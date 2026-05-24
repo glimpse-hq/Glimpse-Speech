@@ -1,8 +1,13 @@
 use std::{
+    ffi::OsStr,
     future::Future,
+    io,
     net::SocketAddr,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -16,10 +21,11 @@ use axum::{
     Json, Router,
 };
 use serde::Serialize;
+use tokio::io::AsyncWriteExt;
 use tower_http::cors::CorsLayer;
 
 use crate::{
-    models::{InstallOptions, ModelDownloadProgress, ModelManifest},
+    models::{definition, InstallOptions, ModelDownloadProgress, ModelManifest},
     service::{
         AudioInput, SpeechConfig, SpeechService,
         TimestampGranularity as ServiceTimestampGranularity, TranscribeRequest, TranscribeResponse,
@@ -82,6 +88,21 @@ struct ParsedTranscriptionRequest {
     timestamp_granularities: Vec<TimestampGranularity>,
     uploaded_file: Option<PathBuf>,
 }
+
+struct TranscriptionRequestParts {
+    model: String,
+    audio: AudioInput,
+    language: Option<String>,
+    prompt: Option<String>,
+    response_format: Option<String>,
+    timestamp_granularities: Vec<String>,
+    dictionary: Vec<String>,
+    timestamps: bool,
+    stream: bool,
+    uploaded_file: Option<PathBuf>,
+}
+
+static TEMP_UPLOAD_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 struct TempUpload {
     path: PathBuf,
@@ -284,7 +305,7 @@ async fn transcribe(
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default();
 
-    if !content_type.starts_with("multipart/form-data") {
+    if !is_multipart_content_type(content_type) {
         return Err(map_error(anyhow!(
             "Use multipart/form-data with a `file` field for transcription"
         )));
@@ -298,7 +319,7 @@ async fn transcribe(
     let service = Arc::clone(&state.service);
     let result = tokio::task::spawn_blocking(move || service.transcribe(parsed.request))
         .await
-        .map_err(|err| map_error(anyhow!("transcription task failed: {err}")))?
+        .map_err(|err| map_server_error(anyhow!("transcription task failed: {err}")))?
         .map(|response| {
             state.log("info", format!("Transcribed with {}", response.model_id));
             state.log_model(
@@ -308,7 +329,7 @@ async fn transcribe(
             );
             format_transcription_response(response, response_format, &timestamp_granularities)
         })
-        .map_err(map_error);
+        .map_err(map_server_error);
 
     if let Some(path) = uploaded_file {
         let _ = std::fs::remove_file(path);
@@ -364,25 +385,38 @@ fn authorize(state: &ApiState, headers: &HeaderMap) -> Result<(), (StatusCode, J
     }
 }
 
+fn is_multipart_content_type(value: &str) -> bool {
+    value
+        .to_ascii_lowercase()
+        .starts_with("multipart/form-data")
+}
+
 fn build_transcription_request(
-    model: String,
-    audio: AudioInput,
-    language: Option<String>,
-    prompt: Option<String>,
-    response_format: Option<&str>,
-    timestamp_granularities: Vec<String>,
-    dictionary: Vec<String>,
-    timestamps: bool,
-    stream: bool,
-    uploaded_file: Option<PathBuf>,
+    parts: TranscriptionRequestParts,
 ) -> Result<ParsedTranscriptionRequest, (StatusCode, Json<ErrorBody>)> {
+    let TranscriptionRequestParts {
+        model,
+        audio,
+        language,
+        prompt,
+        response_format,
+        timestamp_granularities,
+        dictionary,
+        timestamps,
+        stream,
+        uploaded_file,
+    } = parts;
+
     if stream {
         return Err(map_error(anyhow!(
             "Streaming transcription responses are not supported"
         )));
     }
+    if definition(&model).is_none() {
+        return Err(map_error(anyhow!("Unknown model: {model}")));
+    }
 
-    let response_format = parse_response_format(response_format.unwrap_or("json"))?;
+    let response_format = parse_response_format(response_format.as_deref().unwrap_or("json"))?;
     let timestamp_granularities = parse_timestamp_granularities(timestamp_granularities)?;
     if !timestamp_granularities.is_empty() && response_format != ResponseFormat::VerboseJson {
         return Err(map_error(anyhow!(
@@ -475,22 +509,7 @@ fn verbose_response(
     response: TranscribeResponse,
     timestamp_granularities: &[TimestampGranularity],
 ) -> VerboseTranscriptionResponse {
-    let mut segments = verbose_segments(&response);
-    if segments.is_empty() && !response.text.is_empty() {
-        segments.push(VerboseSegment {
-            id: 0,
-            seek: 0,
-            start: 0.0,
-            end: response.duration_ms as f32 / 1000.0,
-            text: response.text.clone(),
-            tokens: Vec::new(),
-            temperature: 0.0,
-            avg_logprob: 0.0,
-            compression_ratio: 0.0,
-            no_speech_prob: 0.0,
-        });
-    }
-
+    let segments = verbose_segments(&response);
     let words = timestamp_granularities
         .contains(&TimestampGranularity::Word)
         .then(|| verbose_words(&response));
@@ -510,33 +529,50 @@ fn verbose_response(
 }
 
 fn verbose_words(response: &TranscribeResponse) -> Vec<VerboseWord> {
-    response
-        .segments
-        .as_deref()
-        .unwrap_or_default()
-        .iter()
-        .map(|segment| VerboseWord {
-            word: segment.text.trim().to_string(),
-            start: segment.start,
-            end: segment.end,
+    caption_segments(response)
+        .into_iter()
+        .flat_map(|segment| words_for_segment(&segment))
+        .collect()
+}
+
+fn words_for_segment(segment: &crate::TranscriptionSegment) -> Vec<VerboseWord> {
+    let words = segment.text.split_whitespace().collect::<Vec<_>>();
+    if words.is_empty() {
+        return Vec::new();
+    }
+
+    let word_count = words.len();
+    let duration = (segment.end - segment.start).max(0.0);
+    let step = duration / word_count as f32;
+    words
+        .into_iter()
+        .enumerate()
+        .map(|(idx, word)| {
+            let start = segment.start + step * idx as f32;
+            let end = if idx + 1 == word_count {
+                segment.end
+            } else {
+                segment.start + step * (idx + 1) as f32
+            };
+            VerboseWord {
+                word: word.to_string(),
+                start,
+                end,
+            }
         })
-        .filter(|word| !word.word.is_empty())
         .collect()
 }
 
 fn verbose_segments(response: &TranscribeResponse) -> Vec<VerboseSegment> {
-    response
-        .segments
-        .as_deref()
-        .unwrap_or_default()
-        .iter()
+    caption_segments(response)
+        .into_iter()
         .enumerate()
         .map(|(id, segment)| VerboseSegment {
             id,
             seek: 0,
             start: segment.start,
             end: segment.end,
-            text: segment.text.clone(),
+            text: segment.text,
             tokens: Vec::new(),
             temperature: 0.0,
             avg_logprob: 0.0,
@@ -639,12 +675,7 @@ async fn transcribe_request_from_multipart(
                     .bytes()
                     .await
                     .map_err(|err| map_error(anyhow!(err.to_string())))?;
-                let path = temp_audio_path(extension.as_deref());
-                tokio::fs::write(&path, &bytes)
-                    .await
-                    .with_context(|| format!("write uploaded audio to {}", path.display()))
-                    .map_err(map_error)?;
-                uploaded_file = Some(TempUpload::new(path));
+                uploaded_file = Some(write_temp_audio(extension.as_deref(), &bytes).await?);
             }
             "model" => model = Some(field_text(field).await?),
             "language" => {
@@ -680,18 +711,18 @@ async fn transcribe_request_from_multipart(
     let audio_path = upload.path().clone();
     let model = model.ok_or_else(|| map_error(anyhow!("Missing multipart field `model`")))?;
 
-    let mut parsed = build_transcription_request(
+    let mut parsed = build_transcription_request(TranscriptionRequestParts {
         model,
-        AudioInput::WavPath(audio_path),
+        audio: AudioInput::WavPath(audio_path),
         language,
         prompt,
-        response_format.as_deref(),
+        response_format,
         timestamp_granularities,
         dictionary,
         timestamps,
         stream,
-        Some(upload.path().clone()),
-    )?;
+        uploaded_file: Some(upload.path().clone()),
+    })?;
     parsed.uploaded_file = Some(upload.into_path());
     Ok(parsed)
 }
@@ -722,25 +753,71 @@ fn map_error(error: anyhow::Error) -> (StatusCode, Json<ErrorBody>) {
     (StatusCode::BAD_REQUEST, Json(error_body(error.to_string())))
 }
 
+fn map_server_error(error: anyhow::Error) -> (StatusCode, Json<ErrorBody>) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(typed_error_body(error.to_string(), "server_error")),
+    )
+}
+
 fn error_body(message: impl Into<String>) -> ErrorBody {
+    typed_error_body(message, "invalid_request_error")
+}
+
+fn typed_error_body(message: impl Into<String>, error_type: &'static str) -> ErrorBody {
     ErrorBody {
         error: ErrorDetail {
             message: message.into(),
-            error_type: "invalid_request_error",
+            error_type,
             param: None,
             code: None,
         },
     }
 }
 
-fn temp_audio_path(extension: Option<&std::ffi::OsStr>) -> PathBuf {
+async fn write_temp_audio(
+    extension: Option<&OsStr>,
+    bytes: &[u8],
+) -> Result<TempUpload, (StatusCode, Json<ErrorBody>)> {
+    for _ in 0..16 {
+        let path = temp_audio_path(extension);
+        let file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .await;
+
+        let mut file = match file {
+            Ok(file) => file,
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(err) => {
+                return Err(map_server_error(
+                    anyhow!(err).context(format!("create temp upload {}", path.display())),
+                ));
+            }
+        };
+
+        file.write_all(bytes)
+            .await
+            .with_context(|| format!("write uploaded audio to {}", path.display()))
+            .map_err(map_server_error)?;
+        return Ok(TempUpload::new(path));
+    }
+
+    Err(map_server_error(anyhow!(
+        "failed to create a unique temp upload path"
+    )))
+}
+
+fn temp_audio_path(extension: Option<&OsStr>) -> PathBuf {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
+    let sequence = TEMP_UPLOAD_COUNTER.fetch_add(1, Ordering::Relaxed);
     let mut path = std::env::temp_dir().join(format!(
-        "glimpse-speech-upload-{}-{timestamp}",
-        std::process::id()
+        "glimpse-speech-upload-{}-{timestamp}-{sequence}",
+        std::process::id(),
     ));
     if let Some(extension) = extension {
         path.set_extension(extension);
@@ -781,18 +858,18 @@ mod tests {
 
     #[test]
     fn rejects_timestamp_granularity_without_verbose_json() {
-        let result = build_transcription_request(
-            "whisper_small_q5".to_string(),
-            AudioInput::WavPath(PathBuf::from("audio.wav")),
-            None,
-            None,
-            Some("json"),
-            vec!["segment".to_string()],
-            Vec::new(),
-            false,
-            false,
-            None,
-        );
+        let result = build_transcription_request(TranscriptionRequestParts {
+            model: "whisper_small_q5".to_string(),
+            audio: AudioInput::WavPath(PathBuf::from("audio.wav")),
+            language: None,
+            prompt: None,
+            response_format: Some("json".to_string()),
+            timestamp_granularities: vec!["segment".to_string()],
+            dictionary: Vec::new(),
+            timestamps: false,
+            stream: false,
+            uploaded_file: None,
+        });
         assert!(result.is_err());
     }
 
@@ -801,5 +878,31 @@ mod tests {
         let response = sample_response();
         assert!(format_srt(&response).contains("00:00:01,250 --> 00:00:02,500"));
         assert!(format_vtt(&response).starts_with("WEBVTT"));
+    }
+
+    #[test]
+    fn verbose_words_split_segment_text() {
+        let words = verbose_words(&sample_response());
+        assert_eq!(words.len(), 2);
+        assert_eq!(words[0].word, "hello");
+        assert_eq!(words[0].start, 1.25);
+        assert!((words[0].end - 1.875).abs() < f32::EPSILON);
+        assert_eq!(words[1].word, "world");
+        assert!((words[1].start - 1.875).abs() < f32::EPSILON);
+        assert_eq!(words[1].end, 2.5);
+    }
+
+    #[test]
+    fn accepts_multipart_content_type_case_insensitively() {
+        assert!(is_multipart_content_type(
+            "Multipart/Form-Data; boundary=abc"
+        ));
+    }
+
+    #[test]
+    fn server_errors_are_not_invalid_request_errors() {
+        let (status, Json(body)) = map_server_error(anyhow!("model load failed"));
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body.error.error_type, "server_error");
     }
 }

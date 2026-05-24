@@ -197,11 +197,8 @@ fn print_transcription_response(
 }
 
 fn verbose_json(response: &TranscribeResponse) -> anyhow::Result<String> {
-    let segments = response
-        .segments
-        .as_deref()
-        .unwrap_or_default()
-        .iter()
+    let segments = caption_segments(response)
+        .into_iter()
         .enumerate()
         .map(|(id, segment)| {
             serde_json::json!({
@@ -280,4 +277,27 @@ fn format_timestamp(seconds: f32, decimal_separator: char) -> String {
     let secs = (millis % 60_000) / 1000;
     let ms = millis % 1000;
     format!("{hours:02}:{minutes:02}:{secs:02}{decimal_separator}{ms:03}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verbose_json_falls_back_to_full_text_segment() {
+        let response = TranscribeResponse {
+            text: "hello world".to_string(),
+            segments: None,
+            model_id: "nemotron_streaming_en".to_string(),
+            language: Some("en".to_string()),
+            duration_ms: 1_500,
+        };
+
+        let json: serde_json::Value =
+            serde_json::from_str(&verbose_json(&response).unwrap()).unwrap();
+        assert_eq!(json["text"], "hello world");
+        assert_eq!(json["segments"][0]["text"], "hello world");
+        assert_eq!(json["segments"][0]["start"], 0.0);
+        assert_eq!(json["segments"][0]["end"], 1.5);
+    }
 }

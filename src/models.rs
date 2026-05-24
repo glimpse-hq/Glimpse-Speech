@@ -1,7 +1,8 @@
 use std::{
     fmt, fs, io,
     path::{Path, PathBuf},
-    time::Duration,
+    sync::atomic::{AtomicU64, Ordering},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{anyhow, Context, Result};
@@ -21,6 +22,8 @@ const DOWNLOAD_REQUEST_TIMEOUT: Duration = Duration::from_secs(60 * 60 * 24);
 const RETRY_BACKOFF_BASE_MS: u64 = 300;
 const DEFAULT_APP_IDENTIFIER: &str = "com.glimpse.data";
 const MODELS_DIR_NAME: &str = "models";
+
+static MODEL_DOWNLOAD_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -103,18 +106,10 @@ pub struct ModelDownloadProgress {
 
 pub type ProgressCallback<'a> = dyn Fn(ModelDownloadProgress) + Send + Sync + 'a;
 
+#[derive(Default)]
 pub struct InstallOptions<'a> {
     pub cancel_token: Option<CancellationToken>,
     pub progress: Option<&'a ProgressCallback<'a>>,
-}
-
-impl<'a> Default for InstallOptions<'a> {
-    fn default() -> Self {
-        Self {
-            cancel_token: None,
-            progress: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -454,25 +449,45 @@ impl ModelInstallManager {
         options: &InstallOptions<'_>,
     ) -> Result<()> {
         let target_path = target_dir.join(file.path);
+        let marker_path = completion_marker_path(&target_path);
+        let needs_completion_marker = !has_known_verification(file);
         if let Some(parent) = target_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
 
-        let mut downloaded = fs::metadata(&target_path).map(|m| m.len()).unwrap_or(0);
+        if needs_completion_marker && target_path.is_file() && marker_path.is_file() {
+            return Ok(());
+        }
+
+        if needs_completion_marker {
+            let _ = fs::remove_file(&marker_path);
+        }
+
+        let replace_unverified_existing = needs_completion_marker && target_path.is_file();
+        let download_path = if replace_unverified_existing {
+            replacement_download_path(&target_path)
+        } else {
+            target_path.clone()
+        };
+        let mut downloaded = if needs_completion_marker {
+            0
+        } else {
+            fs::metadata(&download_path).map(|m| m.len()).unwrap_or(0)
+        };
         let mut total_size: u64 = file.size_bytes.unwrap_or(0);
         let mut retries = 0usize;
-        let mut resume_supported = true;
+        let mut resume_supported = !needs_completion_marker;
 
         loop {
             if is_cancelled(options) {
-                let _ = fs::remove_file(&target_path);
+                let _ = fs::remove_file(&download_path);
                 return Err(anyhow!("Download cancelled"));
             }
 
             if !resume_supported && downloaded > 0 {
                 downloaded = 0;
                 total_size = file.size_bytes.unwrap_or(0);
-                let _ = fs::remove_file(&target_path);
+                let _ = fs::remove_file(&download_path);
             }
 
             let mut request = self.client.get(file.url).timeout(DOWNLOAD_REQUEST_TIMEOUT);
@@ -488,7 +503,7 @@ impl ModelInstallManager {
             if resume_supported && downloaded > 0 && response.status() == StatusCode::OK {
                 downloaded = 0;
                 total_size = file.size_bytes.unwrap_or(0);
-                let _ = fs::remove_file(&target_path);
+                let _ = fs::remove_file(&download_path);
                 resume_supported = false;
                 continue;
             }
@@ -500,7 +515,7 @@ impl ModelInstallManager {
                 {
                     downloaded = 0;
                     total_size = file.size_bytes.unwrap_or(0);
-                    let _ = fs::remove_file(&target_path);
+                    let _ = fs::remove_file(&download_path);
                     resume_supported = false;
                     continue;
                 }
@@ -539,19 +554,19 @@ impl ModelInstallManager {
                 tokio::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open(&target_path)
+                    .open(&download_path)
                     .await
-                    .with_context(|| format!("open partial file {}", target_path.display()))?
+                    .with_context(|| format!("open partial file {}", download_path.display()))?
             } else {
-                tokio::fs::File::create(&target_path)
+                tokio::fs::File::create(&download_path)
                     .await
-                    .with_context(|| format!("create file {}", target_path.display()))?
+                    .with_context(|| format!("create file {}", download_path.display()))?
             };
 
             loop {
                 if is_cancelled(options) {
                     drop(output);
-                    let _ = fs::remove_file(&target_path);
+                    let _ = fs::remove_file(&download_path);
                     return Err(anyhow!("Download cancelled"));
                 }
 
@@ -565,10 +580,23 @@ impl ModelInstallManager {
                         if total_size > 0 && downloaded < total_size {
                             break;
                         }
+                        output.flush().await?;
+                        drop(output);
+                        if replace_unverified_existing {
+                            fs::rename(&download_path, &target_path).with_context(|| {
+                                format!("replace model file {}", target_path.display())
+                            })?;
+                        }
+                        if needs_completion_marker {
+                            mark_file_complete(&marker_path).with_context(|| {
+                                format!("mark completed download {}", file.path)
+                            })?;
+                        }
                         return Ok(());
                     }
                     Err(err) => {
                         if !can_retry(&mut retries) {
+                            let _ = fs::remove_file(&download_path);
                             return Err(anyhow!(
                                 "Network interrupted while downloading {}",
                                 file.path
@@ -614,14 +642,67 @@ fn missing_files(dir: &Path, manifest: &ModelManifest) -> Vec<String> {
         .files
         .iter()
         .filter_map(|file| {
-            let path = dir.join(file.path);
-            if path.exists() {
+            if manifest_file_ready(dir, file) {
                 None
             } else {
                 Some(file.path.to_string())
             }
         })
         .collect()
+}
+
+fn manifest_file_ready(dir: &Path, file: &ModelFile) -> bool {
+    let path = dir.join(file.path);
+    if !path.is_file() {
+        return false;
+    }
+
+    if let Some(expected_size) = file.size_bytes {
+        let Ok(actual_size) = fs::metadata(&path).map(|metadata| metadata.len()) else {
+            return false;
+        };
+        if actual_size != expected_size {
+            return false;
+        }
+    }
+
+    has_known_verification(file) || completion_marker_path(&path).is_file()
+}
+
+fn has_known_verification(file: &ModelFile) -> bool {
+    file.size_bytes.is_some() || file.sha256.is_some()
+}
+
+fn completion_marker_path(path: &Path) -> PathBuf {
+    let mut marker = path.to_path_buf();
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    marker.set_file_name(format!("{file_name}.complete"));
+    marker
+}
+
+fn mark_file_complete(path: &Path) -> io::Result<()> {
+    fs::File::create(path).map(|_| ())
+}
+
+fn replacement_download_path(path: &Path) -> PathBuf {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let sequence = MODEL_DOWNLOAD_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut replacement = path.to_path_buf();
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    replacement.set_file_name(format!(
+        "{file_name}.download-{}-{timestamp}-{sequence}",
+        std::process::id(),
+    ));
+    replacement
 }
 
 fn calculate_dir_size(dir: &Path) -> io::Result<u64> {
@@ -735,6 +816,31 @@ mod tests {
     }
 
     #[test]
+    fn unknown_size_files_require_completion_marker() {
+        let root = std::env::temp_dir().join(format!(
+            "glimpse-speech-status-marker-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let manager = ModelInstallManager::new(&root);
+        let dir = manager.model_dir("whisper_small_q5");
+        let artifact = dir.join("ggml-small-q5_1.bin");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&artifact, b"fixture").unwrap();
+
+        let status = manager.model_status("whisper_small_q5").unwrap();
+        assert!(!status.installed);
+        assert_eq!(status.missing_files, vec!["ggml-small-q5_1.bin"]);
+
+        mark_file_complete(&completion_marker_path(&artifact)).unwrap();
+        let status = manager.model_status("whisper_small_q5").unwrap();
+        assert!(status.installed);
+        assert!(status.missing_files.is_empty());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn resolve_model_uses_file_artifact_path() {
         let root =
             std::env::temp_dir().join(format!("glimpse-speech-resolve-{}", std::process::id()));
@@ -742,7 +848,9 @@ mod tests {
         let manager = ModelInstallManager::new(&root);
         let dir = manager.model_dir("whisper_small_q5");
         fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("ggml-small-q5_1.bin"), b"fixture").unwrap();
+        let artifact = dir.join("ggml-small-q5_1.bin");
+        fs::write(&artifact, b"fixture").unwrap();
+        mark_file_complete(&completion_marker_path(&artifact)).unwrap();
 
         let resolved = manager.resolve_model("whisper_small_q5").unwrap();
         assert_eq!(resolved.engine, ModelEngine::Whisper);
