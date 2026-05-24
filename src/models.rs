@@ -137,19 +137,19 @@ const PARAKEET_TDT_INT8_FILES: &[ModelFile] = &[
     ModelFile {
         url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/encoder-model.int8.onnx",
         path: "encoder-model.int8.onnx",
-        size_bytes: None,
+        size_bytes: Some(652_183_999),
         sha256: None,
     },
     ModelFile {
         url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/decoder_joint-model.int8.onnx",
         path: "decoder_joint-model.int8.onnx",
-        size_bytes: None,
+        size_bytes: Some(18_202_004),
         sha256: None,
     },
     ModelFile {
         url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/vocab.txt",
         path: "vocab.txt",
-        size_bytes: None,
+        size_bytes: Some(93_939),
         sha256: None,
     },
 ];
@@ -159,25 +159,25 @@ const NEMOTRON_STREAMING_FILES: &[ModelFile] = &[
     ModelFile {
         url: "https://huggingface.co/lokkju/nemotron-speech-streaming-en-0.6b-int8/resolve/main/encoder.onnx",
         path: "encoder.onnx",
-        size_bytes: None,
+        size_bytes: Some(880_555_453),
         sha256: None,
     },
     ModelFile {
         url: "https://huggingface.co/altunenes/parakeet-rs/resolve/main/nemotron-speech-streaming-en-0.6b/encoder.onnx.data",
         path: "encoder.onnx.data",
-        size_bytes: None,
+        size_bytes: Some(2_436_567_040),
         sha256: None,
     },
     ModelFile {
         url: "https://huggingface.co/lokkju/nemotron-speech-streaming-en-0.6b-int8/resolve/main/decoder_joint.onnx",
         path: "decoder_joint.onnx",
-        size_bytes: None,
+        size_bytes: Some(10_962_697),
         sha256: None,
     },
     ModelFile {
         url: "https://huggingface.co/lokkju/nemotron-speech-streaming-en-0.6b-int8/resolve/main/tokenizer.model",
         path: "tokenizer.model",
-        size_bytes: None,
+        size_bytes: Some(251_056),
         sha256: None,
     },
 ];
@@ -185,14 +185,14 @@ const NEMOTRON_STREAMING_FILES: &[ModelFile] = &[
 const WHISPER_SMALL_Q5_FILES: &[ModelFile] = &[ModelFile {
     url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin",
     path: "ggml-small-q5_1.bin",
-    size_bytes: None,
+    size_bytes: Some(190_085_487),
     sha256: None,
 }];
 
 const WHISPER_LARGE_V3_TURBO_Q8_FILES: &[ModelFile] = &[ModelFile {
     url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q8_0.bin",
     path: "ggml-large-v3-turbo-q8_0.bin",
-    size_bytes: None,
+    size_bytes: Some(874_188_075),
     sha256: None,
 }];
 
@@ -449,34 +449,28 @@ impl ModelInstallManager {
         options: &InstallOptions<'_>,
     ) -> Result<()> {
         let target_path = target_dir.join(file.path);
-        let marker_path = completion_marker_path(&target_path);
-        let needs_completion_marker = !has_known_verification(file);
         if let Some(parent) = target_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
 
-        if needs_completion_marker && target_path.is_file() && marker_path.is_file() {
+        if manifest_file_ready(target_dir, file) {
             return Ok(());
         }
 
-        if needs_completion_marker {
-            let _ = fs::remove_file(&marker_path);
-        }
-
-        let replace_unverified_existing = needs_completion_marker && target_path.is_file();
-        let download_path = if replace_unverified_existing {
+        let replace_existing = target_path.exists();
+        let download_path = if replace_existing {
             replacement_download_path(&target_path)
         } else {
             target_path.clone()
         };
-        let mut downloaded = if needs_completion_marker {
+        let mut downloaded = if replace_existing {
             0
         } else {
             fs::metadata(&download_path).map(|m| m.len()).unwrap_or(0)
         };
         let mut total_size: u64 = file.size_bytes.unwrap_or(0);
         let mut retries = 0usize;
-        let mut resume_supported = !needs_completion_marker;
+        let mut resume_supported = !replace_existing;
 
         loop {
             if is_cancelled(options) {
@@ -582,15 +576,10 @@ impl ModelInstallManager {
                         }
                         output.flush().await?;
                         drop(output);
-                        if replace_unverified_existing {
+                        if replace_existing {
                             replace_existing_file(&download_path, &target_path).with_context(
                                 || format!("replace model file {}", target_path.display()),
                             )?;
-                        }
-                        if needs_completion_marker {
-                            mark_file_complete(&marker_path).with_context(|| {
-                                format!("mark completed download {}", file.path)
-                            })?;
                         }
                         return Ok(());
                     }
@@ -666,25 +655,16 @@ fn manifest_file_ready(dir: &Path, file: &ModelFile) -> bool {
         }
     }
 
-    has_known_verification(file) || completion_marker_path(&path).is_file()
-}
+    if let Some(expected_sha256) = file.sha256 {
+        let Ok(actual) = sha256_file(&path) else {
+            return false;
+        };
+        if !actual.eq_ignore_ascii_case(expected_sha256) {
+            return false;
+        }
+    }
 
-fn has_known_verification(file: &ModelFile) -> bool {
-    file.size_bytes.is_some() || file.sha256.is_some()
-}
-
-fn completion_marker_path(path: &Path) -> PathBuf {
-    let mut marker = path.to_path_buf();
-    let file_name = path
-        .file_name()
-        .map(|name| name.to_string_lossy())
-        .unwrap_or_default();
-    marker.set_file_name(format!("{file_name}.complete"));
-    marker
-}
-
-fn mark_file_complete(path: &Path) -> io::Result<()> {
-    fs::File::create(path).map(|_| ())
+    true
 }
 
 fn replacement_download_path(path: &Path) -> PathBuf {
@@ -849,26 +829,23 @@ mod tests {
     }
 
     #[test]
-    fn unknown_size_files_require_completion_marker() {
+    fn partial_model_file_is_not_installed() {
         let root = std::env::temp_dir().join(format!(
-            "glimpse-speech-status-marker-{}",
+            "glimpse-speech-partial-status-{}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&root);
         let manager = ModelInstallManager::new(&root);
         let dir = manager.model_dir("whisper_small_q5");
-        let artifact = dir.join("ggml-small-q5_1.bin");
         fs::create_dir_all(&dir).unwrap();
-        fs::write(&artifact, b"fixture").unwrap();
+        fs::write(dir.join("ggml-small-q5_1.bin"), b"partial").unwrap();
 
         let status = manager.model_status("whisper_small_q5").unwrap();
         assert!(!status.installed);
-        assert_eq!(status.missing_files, vec!["ggml-small-q5_1.bin"]);
-
-        mark_file_complete(&completion_marker_path(&artifact)).unwrap();
-        let status = manager.model_status("whisper_small_q5").unwrap();
-        assert!(status.installed);
-        assert!(status.missing_files.is_empty());
+        assert_eq!(
+            status.missing_files,
+            vec!["ggml-small-q5_1.bin".to_string()]
+        );
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -905,8 +882,10 @@ mod tests {
         let dir = manager.model_dir("whisper_small_q5");
         fs::create_dir_all(&dir).unwrap();
         let artifact = dir.join("ggml-small-q5_1.bin");
-        fs::write(&artifact, b"fixture").unwrap();
-        mark_file_complete(&completion_marker_path(&artifact)).unwrap();
+        fs::File::create(&artifact)
+            .unwrap()
+            .set_len(190_085_487)
+            .unwrap();
 
         let resolved = manager.resolve_model("whisper_small_q5").unwrap();
         assert_eq!(resolved.engine, ModelEngine::Whisper);
