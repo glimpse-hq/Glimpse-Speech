@@ -192,7 +192,7 @@ pub async fn serve_with_shutdown(
 ) -> Result<()> {
     let addr: SocketAddr = format!("{}:{}", config.host, config.port).parse()?;
     let api_key = config.api_key.filter(|key| !key.trim().is_empty());
-    if addr.ip().is_unspecified() && api_key.is_none() {
+    if !addr.ip().is_loopback() && api_key.is_none() {
         return Err(anyhow!("an API key is required when listening on LAN"));
     }
 
