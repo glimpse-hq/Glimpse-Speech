@@ -1,17 +1,23 @@
+#[cfg(feature = "api")]
+pub mod api;
 pub mod audio;
+#[cfg(feature = "cli")]
+pub mod cli;
 pub mod diarization;
 pub mod dictionary;
 pub mod engines;
+pub mod models;
+pub mod service;
 
 use std::path::Path;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TranscriptionResult {
     pub text: String,
     pub segments: Option<Vec<TranscriptionSegment>>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TranscriptionSegment {
     /// Segment start time in seconds.
     pub start: f32,

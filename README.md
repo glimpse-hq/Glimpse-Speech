@@ -17,6 +17,8 @@ The public API is intentionally simple and engine-agnostic:
 | --- | --- |
 | `whisper` | Enable `engines::whisper::WhisperEngine` |
 | `nvidia` | Enable all NVIDIA-backed engines in this crate on supported targets, including `engines::parakeet::ParakeetEngine`, Sortformer-based diarization helpers, and `engines::nemotron::NemotronEngine` |
+| `api` | Enable the local OpenAI-compatible transcription API helpers |
+| `cli` | Enable the `glimpse-speech` command-line binary; includes `api` |
 | `all` | Enables `whisper` and `nvidia` |
 
 NVIDIA-backed engines are disabled on Intel macOS (`x86_64-apple-darwin`) because `parakeet-rs` currently pulls an `ort` stack that does not ship the required prebuilt ONNX Runtime binary for that target.
@@ -27,7 +29,7 @@ The legacy `parakeet` feature remains as a compatibility alias for `nvidia`.
 
 ```toml
 [dependencies]
-glimpse-speech = { git = "https://github.com/LegendarySpy/Glimpse-Speech.git", tag = "1.2.5", features = ["whisper", "nvidia"] }
+glimpse-speech = { git = "https://github.com/LegendarySpy/Glimpse-Speech.git", tag = "1.3.0", features = ["whisper", "nvidia"] }
 ```
 
 On Intel macOS, keep `whisper` enabled and treat `nvidia` as unavailable even if the feature is listed.
@@ -36,7 +38,7 @@ For local development in this repository:
 
 ```toml
 [dependencies]
-glimpse-speech = { path = "../Glimpse-Speech", features = ["whisper", "nvidia"] }
+glimpse-speech = { path = "../Glimpse-Speech", features = ["whisper", "nvidia", "api", "cli"] }
 ```
 
 ## Usage
