@@ -7,7 +7,8 @@ use clap::{Parser, Subcommand};
 
 use crate::{
     models::{default_model_cache_dir, ModelInstallManager},
-    service::{AudioInput, SpeechConfig, SpeechService, TranscribeRequest, TranscribeResponse},
+    service::{AudioInput, SpeechConfig, SpeechService, TranscribeRequest},
+    Transcription,
 };
 
 #[derive(Debug, Parser)]
@@ -52,6 +53,13 @@ enum Command {
         model: Option<String>,
         #[arg(long)]
         api_key: Option<String>,
+        /// Upstream OpenAI-compatible speech endpoint. When set, transcriptions proxy remotely.
+        #[arg(long)]
+        remote_endpoint: Option<String>,
+        #[arg(long)]
+        remote_api_key: Option<String>,
+        #[arg(long)]
+        remote_model: Option<String>,
         /// Enable permissive CORS headers for browser clients.
         #[arg(long)]
         cors: bool,
@@ -101,8 +109,7 @@ pub async fn run() -> anyhow::Result<()> {
                 prompt,
                 dictionary,
                 timestamps,
-                timestamp_granularity: timestamps
-                    .then_some(crate::service::TimestampGranularity::Segment),
+                timestamp_granularity: timestamps.then_some(crate::TimestampGranularity::Segment),
             })?;
             print_transcription_response(response, &response_format, cli.json)?;
             Ok(())
@@ -112,24 +119,81 @@ pub async fn run() -> anyhow::Result<()> {
             port,
             model,
             api_key,
+            remote_endpoint,
+            remote_api_key,
+            remote_model,
             cors,
             no_cors,
         } => {
             let cors_enabled = cors && !no_cors;
+            let remote_enabled = remote_endpoint
+                .as_deref()
+                .is_some_and(|endpoint| !endpoint.trim().is_empty());
             let event_sink = serve_event_sink(
                 cache_dir.clone(),
                 model.clone(),
+                remote_enabled,
                 api_key.as_deref().is_some_and(|key| !key.trim().is_empty()),
                 cors_enabled,
             );
+            let service = std::sync::Arc::new(crate::service::SpeechService::new(
+                crate::service::SpeechConfig {
+                    model_cache_dir: cache_dir,
+                },
+            ));
+            if !remote_enabled {
+                if let Some(model_id) = model.as_deref() {
+                    let warm = std::sync::Arc::clone(&service);
+                    let model_id = model_id.to_string();
+                    let label = model_id.clone();
+                    tokio::task::spawn_blocking(move || warm.preload_and_warm(&model_id))
+                        .await
+                        .map_err(|err| anyhow::anyhow!("warm model task failed: {err}"))?
+                        .map_err(|err| anyhow::anyhow!("warm model `{label}`: {err}"))?;
+                }
+            }
+            #[cfg(feature = "remote")]
+            let transcription_provider = if remote_enabled {
+                let endpoint = remote_endpoint
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or_default()
+                    .to_string();
+                let remote_model = remote_model
+                    .or(model.clone())
+                    .filter(|value| !value.trim().is_empty());
+                Some(std::sync::Arc::new(crate::provider::build_remote_provider(
+                    reqwest::Client::new(),
+                    crate::remote::RemoteConfig {
+                        endpoint,
+                        api_key: remote_api_key.unwrap_or_default(),
+                        model: remote_model,
+                    },
+                    std::sync::Arc::clone(&service),
+                )))
+            } else {
+                None
+            };
+            #[cfg(not(feature = "remote"))]
+            let transcription_provider: Option<
+                std::sync::Arc<crate::provider::SpeechProvider>,
+            > = None;
+            if remote_enabled {
+                #[cfg(not(feature = "remote"))]
+                {
+                    return Err(anyhow::anyhow!(
+                        "Remote speech requires the `remote` feature"
+                    ));
+                }
+            }
             crate::api::serve(crate::api::ApiConfig {
                 host,
                 port,
-                model_cache_dir: cache_dir,
-                warm_model: model,
+                service,
                 api_key,
                 event_sink: Some(event_sink),
                 cors: cors_enabled,
+                transcription_provider,
             })
             .await
         }
@@ -139,6 +203,7 @@ pub async fn run() -> anyhow::Result<()> {
 fn serve_event_sink(
     model_cache_dir: PathBuf,
     warm_model: Option<String>,
+    remote_enabled: bool,
     api_key_required: bool,
     cors_enabled: bool,
 ) -> crate::api::ApiEventSink {
@@ -150,6 +215,7 @@ fn serve_event_sink(
                     base_url,
                     &model_cache_dir,
                     warm_model.as_deref(),
+                    remote_enabled,
                     api_key_required,
                     cors_enabled,
                 )
@@ -162,6 +228,7 @@ fn serve_banner(
     base_url: &str,
     model_cache_dir: &Path,
     warm_model: Option<&str>,
+    remote_enabled: bool,
     api_key_required: bool,
     cors_enabled: bool,
 ) -> String {
@@ -171,6 +238,16 @@ fn serve_banner(
         "none"
     };
     let cors = if cors_enabled { "enabled" } else { "disabled" };
+    let backend = if remote_enabled {
+        "remote proxy"
+    } else {
+        "local"
+    };
+    let warm = if remote_enabled {
+        warm_model.unwrap_or("configured remote model")
+    } else {
+        warm_model.unwrap_or("none")
+    };
 
     format!(
         "Now serving Glimpse Speech API\n\
@@ -180,11 +257,11 @@ fn serve_banner(
          - Model install: POST {base_url}/v1/models/{{id}}/install\n\
          - Transcriptions: POST {base_url}/v1/audio/transcriptions\n\
          Model cache: {}\n\
-         Warm model: {}\n\
+         Backend: {backend}\n\
+         Model: {warm}\n\
          Auth: {auth}\n\
          CORS: {cors}",
         model_cache_dir.display(),
-        warm_model.unwrap_or("none")
     )
 }
 
@@ -237,7 +314,7 @@ fn print_status(status: crate::models::ModelStatus, json: bool) -> anyhow::Resul
 }
 
 fn print_transcription_response(
-    response: TranscribeResponse,
+    response: Transcription,
     response_format: &str,
     json: bool,
 ) -> anyhow::Result<()> {
@@ -258,7 +335,7 @@ fn print_transcription_response(
     Ok(())
 }
 
-fn verbose_json(response: &TranscribeResponse) -> anyhow::Result<String> {
+fn verbose_json(response: &Transcription) -> anyhow::Result<String> {
     let segments = caption_segments(response)
         .into_iter()
         .enumerate()
@@ -287,7 +364,7 @@ fn verbose_json(response: &TranscribeResponse) -> anyhow::Result<String> {
     }))?)
 }
 
-fn format_srt(response: &TranscribeResponse) -> String {
+fn format_srt(response: &Transcription) -> String {
     caption_segments(response)
         .into_iter()
         .enumerate()
@@ -304,7 +381,7 @@ fn format_srt(response: &TranscribeResponse) -> String {
         .join("\n")
 }
 
-fn format_vtt(response: &TranscribeResponse) -> String {
+fn format_vtt(response: &Transcription) -> String {
     let cues = caption_segments(response)
         .into_iter()
         .map(|segment| {
@@ -320,7 +397,7 @@ fn format_vtt(response: &TranscribeResponse) -> String {
     format!("WEBVTT\n\n{cues}\n")
 }
 
-fn caption_segments(response: &TranscribeResponse) -> Vec<crate::TranscriptionSegment> {
+fn caption_segments(response: &Transcription) -> Vec<crate::TranscriptionSegment> {
     let mut segments = response.segments.clone().unwrap_or_default();
     if segments.is_empty() && !response.text.is_empty() {
         segments.push(crate::TranscriptionSegment {
@@ -347,9 +424,10 @@ mod tests {
 
     #[test]
     fn verbose_json_falls_back_to_full_text_segment() {
-        let response = TranscribeResponse {
+        let response = Transcription {
             text: "hello world".to_string(),
             segments: None,
+            words: None,
             model_id: "nemotron_streaming_en".to_string(),
             language: Some("en".to_string()),
             duration_ms: 1_500,

@@ -4,11 +4,10 @@ use std::{
 };
 
 use anyhow::{anyhow, Result};
-use serde::{Deserialize, Serialize};
 
 use crate::{
     models::{ModelEngine, ModelInstallManager},
-    TranscriptionEngine, TranscriptionResult, TranscriptionSegment,
+    TimestampGranularity, Transcription, TranscriptionEngine, TranscriptionResult,
 };
 
 #[derive(Debug, Clone)]
@@ -32,21 +31,6 @@ pub struct TranscribeRequest {
     pub dictionary: Vec<String>,
     pub timestamps: bool,
     pub timestamp_granularity: Option<TimestampGranularity>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TimestampGranularity {
-    Segment,
-    Word,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TranscribeResponse {
-    pub text: String,
-    pub segments: Option<Vec<TranscriptionSegment>>,
-    pub model_id: String,
-    pub language: Option<String>,
-    pub duration_ms: u128,
 }
 
 pub struct SpeechService {
@@ -104,7 +88,7 @@ impl SpeechService {
         &self.model_manager
     }
 
-    pub fn transcribe(&self, request: TranscribeRequest) -> Result<TranscribeResponse> {
+    pub fn transcribe(&self, request: TranscribeRequest) -> Result<Transcription> {
         let requested_language = request.language.clone();
         let resolved_id = self.ensure_loaded(&request.model_id)?;
         let mut guard = self.lock_loaded()?;
@@ -113,9 +97,10 @@ impl SpeechService {
             .ok_or_else(|| anyhow!("model did not load"))?;
         let transcription = transcribe_with_engine(&mut loaded.engine, request)?;
 
-        Ok(TranscribeResponse {
+        Ok(Transcription {
             text: transcription.result.text,
             segments: transcription.result.segments,
+            words: None,
             model_id: resolved_id,
             language: requested_language,
             duration_ms: transcription.audio_duration_ms,
@@ -160,6 +145,13 @@ impl SpeechService {
             .lock()
             .map(|guard| guard.is_some())
             .unwrap_or(false)
+    }
+
+    pub fn loaded_model_id(&self) -> Option<String> {
+        self.loaded
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|loaded| loaded.model_id.clone()))
     }
 
     #[cfg(all(
@@ -384,7 +376,6 @@ fn transcribe_with_engine(
     }
 }
 
-#[allow(dead_code)]
 fn combined_prompt(prompt: Option<String>, dictionary: &[String]) -> Option<String> {
     match (
         prompt,
@@ -397,7 +388,6 @@ fn combined_prompt(prompt: Option<String>, dictionary: &[String]) -> Option<Stri
     }
 }
 
-#[allow(dead_code)]
 fn transcribe_audio<E: TranscriptionEngine>(
     engine: &mut E,
     audio: AudioInput,

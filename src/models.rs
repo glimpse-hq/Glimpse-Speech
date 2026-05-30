@@ -70,6 +70,9 @@ pub struct ModelFile {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ModelManifest {
     pub id: &'static str,
+    pub label: &'static str,
+    pub description: &'static str,
+    pub tags: &'static [&'static str],
     pub engine: ModelEngine,
     pub variant: &'static str,
     pub storage: ModelStorage,
@@ -199,6 +202,10 @@ const WHISPER_LARGE_V3_TURBO_Q8_FILES: &[ModelFile] = &[ModelFile {
 pub const MODEL_MANIFESTS: &[ModelManifest] = &[
     ModelManifest {
         id: "whisper_large_v3_turbo_q8",
+        label: "Whisper Large V3 Turbo",
+        description:
+            "Great quality local Whisper model with multilingual support and dictionary support.",
+        tags: &["Recommended", "Dictionary", "Multilingual"],
         engine: ModelEngine::Whisper,
         variant: "Q8_0",
         storage: ModelStorage::File {
@@ -215,6 +222,10 @@ pub const MODEL_MANIFESTS: &[ModelManifest] = &[
     #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
     ModelManifest {
         id: "parakeet_tdt_int8",
+        label: "Parakeet TDT 0.6B (Int8)",
+        description:
+            "Fast, multilingual and accurate. Based on ONNX for everyday local transcription.",
+        tags: &["Multilingual", "Fast"],
         engine: ModelEngine::Parakeet,
         variant: "Int8",
         storage: ModelStorage::Directory,
@@ -226,6 +237,9 @@ pub const MODEL_MANIFESTS: &[ModelManifest] = &[
     #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
     ModelManifest {
         id: "nemotron_streaming_en",
+        label: "Nemotron Streaming 0.6B",
+        description: "Real-time streaming transcription. Text appears as you speak.",
+        tags: &["English", "Streaming"],
         engine: ModelEngine::Nemotron,
         variant: "Int8",
         storage: ModelStorage::Directory,
@@ -236,6 +250,9 @@ pub const MODEL_MANIFESTS: &[ModelManifest] = &[
     },
     ModelManifest {
         id: "whisper_small_q5",
+        label: "Whisper Small",
+        description: "Small & fast with dictionary support.",
+        tags: &["English", "Dictionary", "Compute Friendly"],
         engine: ModelEngine::Whisper,
         variant: "Q5_1",
         storage: ModelStorage::File {

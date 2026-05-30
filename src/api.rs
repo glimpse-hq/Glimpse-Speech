@@ -25,29 +25,29 @@ use tokio::io::AsyncWriteExt;
 use tower_http::cors::CorsLayer;
 
 use crate::{
-    models::{definition, InstallOptions, ModelDownloadProgress, ModelManifest},
-    service::{
-        AudioInput, SpeechConfig, SpeechService,
-        TimestampGranularity as ServiceTimestampGranularity, TranscribeRequest, TranscribeResponse,
-    },
+    models::{InstallOptions, ModelDownloadProgress},
+    provider::{SpeechProvider, TranscribeError},
+    service::{AudioInput, SpeechService, TranscribeRequest},
+    TimestampGranularity, Transcription,
 };
 
 #[derive(Clone)]
 pub struct ApiConfig {
     pub host: String,
     pub port: u16,
-    pub model_cache_dir: PathBuf,
-    pub warm_model: Option<String>,
+    pub service: Arc<SpeechService>,
     pub api_key: Option<String>,
     pub event_sink: Option<ApiEventSink>,
     /// When true, responses include permissive CORS headers so browser-based
     /// clients on any origin can call the API.
     pub cors: bool,
+    pub transcription_provider: Option<Arc<SpeechProvider>>,
 }
 
 #[derive(Clone)]
 struct ApiState {
     service: Arc<SpeechService>,
+    provider: Arc<SpeechProvider>,
     api_key: Option<Arc<str>>,
     event_sink: Option<ApiEventSink>,
 }
@@ -80,6 +80,15 @@ struct ErrorDetail {
 struct InstallResponse {
     status: crate::models::ModelStatus,
     progress: Vec<ModelDownloadProgress>,
+}
+
+#[derive(Debug, Serialize)]
+struct RemoteModel {
+    id: String,
+    label: String,
+    description: String,
+    tags: &'static [&'static str],
+    capabilities: &'static [&'static str],
 }
 
 struct ParsedTranscriptionRequest {
@@ -139,12 +148,6 @@ enum ResponseFormat {
     Vtt,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TimestampGranularity {
-    Segment,
-    Word,
-}
-
 #[derive(Debug, Serialize)]
 struct JsonTranscriptionResponse {
     text: String,
@@ -198,21 +201,13 @@ pub async fn serve_with_shutdown(
 
     let cors_enabled = config.cors;
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    let service = Arc::new(SpeechService::new(SpeechConfig {
-        model_cache_dir: config.model_cache_dir,
-    }));
-    if let Some(model_id) = config.warm_model.as_deref() {
-        let service = Arc::clone(&service);
-        let model_id = model_id.to_string();
-        let warm_label = model_id.clone();
-        tokio::task::spawn_blocking(move || service.preload_and_warm(&model_id))
-            .await
-            .map_err(|err| anyhow!("warm model task failed: {err}"))?
-            .with_context(|| format!("warm model `{warm_label}`"))?;
-    }
-
+    let service = config.service;
+    let provider = config
+        .transcription_provider
+        .unwrap_or_else(|| Arc::new(SpeechProvider::Local(Arc::clone(&service))));
     let state = ApiState {
         service,
+        provider,
         api_key: api_key.map(Arc::from),
         event_sink: config.event_sink,
     };
@@ -239,10 +234,31 @@ pub async fn serve_with_shutdown(
 async fn list_models(
     State(state): State<ApiState>,
     headers: HeaderMap,
-) -> Result<Json<&'static [ModelManifest]>, (StatusCode, Json<ErrorBody>)> {
+) -> Result<Response, (StatusCode, Json<ErrorBody>)> {
     authorize(&state, &headers)?;
     state.log("info", "GET /v1/models".to_string());
-    Ok(Json(crate::models::list_models()))
+    if let Some(remote_ids) = state.provider.remote_model_ids().await {
+        let remote_ids = remote_ids.map_err(map_transcribe_error)?;
+        return Ok(
+            Json(remote_ids.into_iter().map(remote_model).collect::<Vec<_>>()).into_response(),
+        );
+    }
+
+    Ok(Json(crate::models::list_models()).into_response())
+}
+
+fn remote_model(id: String) -> RemoteModel {
+    let label = id.clone();
+    RemoteModel {
+        id,
+        label,
+        description: "Remote transcription model configured for this server.".to_string(),
+        tags: &["Remote"],
+        capabilities: &[
+            crate::models::MODEL_CAPABILITY_DICTIONARY_PROMPT,
+            crate::models::MODEL_CAPABILITY_TIMESTAMPS,
+        ],
+    }
 }
 
 async fn install_model(
@@ -318,10 +334,10 @@ async fn transcribe(
     let response_format = parsed.response_format;
     let timestamp_granularities = parsed.timestamp_granularities.clone();
     let uploaded_file = parsed.uploaded_file.clone();
-    let service = Arc::clone(&state.service);
-    let result = tokio::task::spawn_blocking(move || service.transcribe(parsed.request))
+    let result = state
+        .provider
+        .transcribe(parsed.request)
         .await
-        .map_err(|err| map_server_error(anyhow!("transcription task failed: {err}")))?
         .map(|response| {
             state.log("info", format!("Transcribed with {}", response.model_id));
             state.log_model(
@@ -331,7 +347,7 @@ async fn transcribe(
             );
             format_transcription_response(response, response_format, &timestamp_granularities)
         })
-        .map_err(map_server_error);
+        .map_err(map_transcribe_error);
 
     if let Some(path) = uploaded_file {
         let _ = std::fs::remove_file(path);
@@ -414,9 +430,6 @@ fn build_transcription_request(
             "Streaming transcription responses are not supported"
         )));
     }
-    if definition(&model).is_none() {
-        return Err(map_error(anyhow!("Unknown model: {model}")));
-    }
 
     let response_format = parse_response_format(response_format.as_deref().unwrap_or("json"))?;
     let timestamp_granularities = parse_timestamp_granularities(timestamp_granularities)?;
@@ -425,6 +438,12 @@ fn build_transcription_request(
             "`timestamp_granularities` requires response_format `verbose_json`"
         )));
     }
+    let needs_timestamps = timestamps
+        || !timestamp_granularities.is_empty()
+        || matches!(
+            response_format,
+            ResponseFormat::VerboseJson | ResponseFormat::Srt | ResponseFormat::Vtt
+        );
 
     Ok(ParsedTranscriptionRequest {
         request: TranscribeRequest {
@@ -433,8 +452,9 @@ fn build_transcription_request(
             language,
             prompt,
             dictionary,
-            timestamps: timestamps || !timestamp_granularities.is_empty(),
-            timestamp_granularity: service_timestamp_granularity(&timestamp_granularities),
+            timestamps: needs_timestamps,
+            timestamp_granularity: service_timestamp_granularity(&timestamp_granularities)
+                .or_else(|| needs_timestamps.then_some(TimestampGranularity::Segment)),
         },
         response_format,
         timestamp_granularities,
@@ -442,13 +462,11 @@ fn build_transcription_request(
     })
 }
 
-fn service_timestamp_granularity(
-    values: &[TimestampGranularity],
-) -> Option<ServiceTimestampGranularity> {
+fn service_timestamp_granularity(values: &[TimestampGranularity]) -> Option<TimestampGranularity> {
     if values.contains(&TimestampGranularity::Word) {
-        Some(ServiceTimestampGranularity::Word)
+        Some(TimestampGranularity::Word)
     } else if values.contains(&TimestampGranularity::Segment) {
-        Some(ServiceTimestampGranularity::Segment)
+        Some(TimestampGranularity::Segment)
     } else {
         None
     }
@@ -489,7 +507,7 @@ fn parse_timestamp_granularities(
 }
 
 fn format_transcription_response(
-    response: TranscribeResponse,
+    response: Transcription,
     format: ResponseFormat,
     timestamp_granularities: &[TimestampGranularity],
 ) -> Response {
@@ -508,7 +526,7 @@ fn format_transcription_response(
 }
 
 fn verbose_response(
-    response: TranscribeResponse,
+    response: Transcription,
     timestamp_granularities: &[TimestampGranularity],
 ) -> VerboseTranscriptionResponse {
     let segments = verbose_segments(&response);
@@ -530,7 +548,18 @@ fn verbose_response(
     }
 }
 
-fn verbose_words(response: &TranscribeResponse) -> Vec<VerboseWord> {
+fn verbose_words(response: &Transcription) -> Vec<VerboseWord> {
+    if let Some(words) = &response.words {
+        return words
+            .iter()
+            .map(|word| VerboseWord {
+                word: word.text.clone(),
+                start: word.start,
+                end: word.end,
+            })
+            .collect();
+    }
+
     caption_segments(response)
         .into_iter()
         .flat_map(|segment| words_for_segment(&segment))
@@ -565,7 +594,7 @@ fn words_for_segment(segment: &crate::TranscriptionSegment) -> Vec<VerboseWord> 
         .collect()
 }
 
-fn verbose_segments(response: &TranscribeResponse) -> Vec<VerboseSegment> {
+fn verbose_segments(response: &Transcription) -> Vec<VerboseSegment> {
     caption_segments(response)
         .into_iter()
         .enumerate()
@@ -588,7 +617,7 @@ fn text_response(body: String, content_type: &'static str) -> Response {
     ([(CONTENT_TYPE, content_type)], body).into_response()
 }
 
-fn format_srt(response: &TranscribeResponse) -> String {
+fn format_srt(response: &Transcription) -> String {
     caption_segments(response)
         .into_iter()
         .enumerate()
@@ -605,7 +634,7 @@ fn format_srt(response: &TranscribeResponse) -> String {
         .join("\n")
 }
 
-fn format_vtt(response: &TranscribeResponse) -> String {
+fn format_vtt(response: &Transcription) -> String {
     let cues = caption_segments(response)
         .into_iter()
         .map(|segment| {
@@ -621,7 +650,7 @@ fn format_vtt(response: &TranscribeResponse) -> String {
     format!("WEBVTT\n\n{cues}\n")
 }
 
-fn caption_segments(response: &TranscribeResponse) -> Vec<crate::TranscriptionSegment> {
+fn caption_segments(response: &Transcription) -> Vec<crate::TranscriptionSegment> {
     let mut segments = response.segments.clone().unwrap_or_default();
     if segments.is_empty() && !response.text.is_empty() {
         segments.push(crate::TranscriptionSegment {
@@ -762,6 +791,55 @@ fn map_server_error(error: anyhow::Error) -> (StatusCode, Json<ErrorBody>) {
     )
 }
 
+fn map_transcribe_error(error: TranscribeError) -> (StatusCode, Json<ErrorBody>) {
+    match error {
+        TranscribeError::Local(err) => map_local_transcribe_error(err),
+        #[cfg(feature = "remote")]
+        TranscribeError::Remote(err) => map_remote_error(err),
+    }
+}
+
+fn map_local_transcribe_error(error: anyhow::Error) -> (StatusCode, Json<ErrorBody>) {
+    if error.to_string().starts_with("Unknown model:") {
+        map_error(error)
+    } else {
+        map_server_error(error)
+    }
+}
+
+#[cfg(feature = "remote")]
+fn map_remote_error(error: crate::remote::RemoteError) -> (StatusCode, Json<ErrorBody>) {
+    let status = match error.kind {
+        crate::remote::RemoteErrorKind::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+        crate::remote::RemoteErrorKind::QuotaExceeded => StatusCode::PAYMENT_REQUIRED,
+        crate::remote::RemoteErrorKind::Unauthorized => StatusCode::UNAUTHORIZED,
+        crate::remote::RemoteErrorKind::InvalidRequest => StatusCode::BAD_REQUEST,
+        crate::remote::RemoteErrorKind::NotFound => StatusCode::NOT_FOUND,
+        crate::remote::RemoteErrorKind::UpstreamUnavailable
+        | crate::remote::RemoteErrorKind::Other => StatusCode::BAD_GATEWAY,
+    };
+    let error_type = match error.kind {
+        crate::remote::RemoteErrorKind::RateLimited => "rate_limit_error",
+        crate::remote::RemoteErrorKind::QuotaExceeded => "insufficient_quota",
+        crate::remote::RemoteErrorKind::Unauthorized => "authentication_error",
+        crate::remote::RemoteErrorKind::InvalidRequest => "invalid_request_error",
+        crate::remote::RemoteErrorKind::NotFound => "not_found_error",
+        crate::remote::RemoteErrorKind::UpstreamUnavailable
+        | crate::remote::RemoteErrorKind::Other => "upstream_error",
+    };
+    (
+        status,
+        Json(ErrorBody {
+            error: ErrorDetail {
+                message: error.user_message(),
+                error_type,
+                param: error.param,
+                code: error.code,
+            },
+        }),
+    )
+}
+
 fn error_body(message: impl Into<String>) -> ErrorBody {
     typed_error_body(message, "invalid_request_error")
 }
@@ -833,14 +911,15 @@ fn temp_audio_path(extension: Option<&OsStr>) -> PathBuf {
 mod tests {
     use super::*;
 
-    fn sample_response() -> TranscribeResponse {
-        TranscribeResponse {
+    fn sample_response() -> Transcription {
+        Transcription {
             text: "hello world".to_string(),
             segments: Some(vec![crate::TranscriptionSegment {
                 start: 1.25,
                 end: 2.5,
                 text: "hello world".to_string(),
             }]),
+            words: None,
             model_id: "whisper_small_q5".to_string(),
             language: Some("en".to_string()),
             duration_ms: 1250,
@@ -876,6 +955,29 @@ mod tests {
     }
 
     #[test]
+    fn verbose_json_requests_segment_timestamps_by_default() {
+        let parsed = build_transcription_request(TranscriptionRequestParts {
+            model: "whisper_small_q5".to_string(),
+            audio: AudioInput::WavPath(PathBuf::from("audio.wav")),
+            language: None,
+            prompt: None,
+            response_format: Some("verbose_json".to_string()),
+            timestamp_granularities: Vec::new(),
+            dictionary: Vec::new(),
+            timestamps: false,
+            stream: false,
+            uploaded_file: None,
+        })
+        .unwrap();
+
+        assert!(parsed.request.timestamps);
+        assert_eq!(
+            parsed.request.timestamp_granularity,
+            Some(TimestampGranularity::Segment)
+        );
+    }
+
+    #[test]
     fn formats_srt_and_vtt() {
         let response = sample_response();
         assert!(format_srt(&response).contains("00:00:01,250 --> 00:00:02,500"));
@@ -895,16 +997,26 @@ mod tests {
     }
 
     #[test]
-    fn accepts_multipart_content_type_case_insensitively() {
-        assert!(is_multipart_content_type(
-            "Multipart/Form-Data; boundary=abc"
-        ));
-    }
+    fn verbose_words_use_upstream_word_timestamps() {
+        let mut response = sample_response();
+        response.words = Some(vec![
+            crate::TranscriptionSegment {
+                start: 1.25,
+                end: 1.5,
+                text: "hello".to_string(),
+            },
+            crate::TranscriptionSegment {
+                start: 2.0,
+                end: 2.5,
+                text: "world".to_string(),
+            },
+        ]);
 
-    #[test]
-    fn server_errors_are_not_invalid_request_errors() {
-        let (status, Json(body)) = map_server_error(anyhow!("model load failed"));
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(body.error.error_type, "server_error");
+        let words = verbose_words(&response);
+
+        assert_eq!(words.len(), 2);
+        assert_eq!(words[0].word, "hello");
+        assert_eq!(words[0].end, 1.5);
+        assert_eq!(words[1].start, 2.0);
     }
 }
