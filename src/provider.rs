@@ -121,31 +121,31 @@ impl SpeechProvider {
         match self {
             Self::Local(_) => None,
             #[cfg(feature = "remote")]
-            Self::Remote(upstream) => Some(upstream.remote_model_ids().await),
+            Self::Remote(upstream) => upstream.remote_model_ids().await,
         }
     }
 }
 
 #[cfg(feature = "remote")]
 impl RemoteUpstream {
-    async fn remote_model_ids(&self) -> Vec<String> {
+    async fn remote_model_ids(&self) -> Option<Vec<String>> {
         if let Some(model) = self
             .default_model
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            return vec![model.to_string()];
+            return Some(vec![model.to_string()]);
         }
 
         match self.engine.list_models().await {
-            Ok(models) => models,
+            Ok(models) => Some(models),
             Err(err) => {
                 eprintln!(
                     "Remote speech model discovery failed: {}",
                     err.user_message()
                 );
-                Vec::new()
+                None
             }
         }
     }
@@ -158,7 +158,12 @@ impl RemoteUpstream {
             AudioInput::WavPath(path) => path.clone(),
             _ => {
                 return match &self.fallback {
-                    Some(fallback) => Box::pin(fallback.transcribe(request)).await,
+                    Some(fallback) => match local_fallback_request(fallback, request) {
+                        Some(request) => Box::pin(fallback.transcribe(request)).await,
+                        None => Err(TranscribeError::Local(anyhow!(
+                            "No local transcription model is installed for fallback"
+                        ))),
+                    },
                     None => Err(TranscribeError::Remote(crate::remote::config_error(
                         "Remote provider requires an audio file upload",
                     ))),
