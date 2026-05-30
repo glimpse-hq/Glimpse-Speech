@@ -116,10 +116,34 @@ impl SpeechProvider {
             Self::Remote(upstream) => Box::pin(upstream.transcribe(request)).await,
         }
     }
+
+    pub async fn remote_model_ids(&self) -> Result<Option<Vec<String>>, TranscribeError> {
+        match self {
+            Self::Local(_) => Ok(None),
+            #[cfg(feature = "remote")]
+            Self::Remote(upstream) => upstream.remote_model_ids().await.map(Some),
+        }
+    }
 }
 
 #[cfg(feature = "remote")]
 impl RemoteUpstream {
+    async fn remote_model_ids(&self) -> Result<Vec<String>, TranscribeError> {
+        if let Some(model) = self
+            .default_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return Ok(vec![model.to_string()]);
+        }
+
+        self.engine
+            .list_models()
+            .await
+            .map_err(TranscribeError::Remote)
+    }
+
     async fn transcribe(
         &self,
         request: TranscribeRequest,
@@ -169,9 +193,20 @@ impl RemoteUpstream {
                     "Remote speech temporarily unavailable, falling back to local: {}",
                     err.user_message()
                 );
-                Box::pin(fallback.transcribe(request)).await
+                Box::pin(fallback.transcribe(local_fallback_request(request))).await
             }
             Err(err) => Err(TranscribeError::Remote(err)),
         }
     }
+}
+
+#[cfg(feature = "remote")]
+fn local_fallback_request(mut request: TranscribeRequest) -> TranscribeRequest {
+    let local_model_id = crate::models::resolve_model_alias(&request.model_id);
+    if crate::models::definition(local_model_id).is_some() {
+        request.model_id = local_model_id.to_string();
+    } else if let Some(manifest) = crate::models::list_models().first() {
+        request.model_id = manifest.id.to_string();
+    }
+    request
 }

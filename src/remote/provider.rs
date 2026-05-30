@@ -86,18 +86,36 @@ const HOST_PROFILES: &[HostProfile] = &[HostProfile {
 
 pub fn resolve_profile(endpoint: &str) -> EndpointProfile {
     let endpoint = endpoint.trim().to_ascii_lowercase();
-    if let Some(entry) = HOST_PROFILES
-        .iter()
-        .find(|entry| entry.host_suffixes.iter().any(|suffix| endpoint.contains(suffix)))
-    {
+    let host = reqwest::Url::parse(&endpoint)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase));
+
+    if let Some(entry) = host.as_deref().and_then(|host| {
+        HOST_PROFILES.iter().find(|entry| {
+            entry
+                .host_suffixes
+                .iter()
+                .any(|suffix| host_matches(host, suffix))
+        })
+    }) {
         return entry.profile;
     }
 
-    if endpoint.contains("localhost") || endpoint.contains("127.0.0.1") {
+    if host
+        .as_deref()
+        .is_some_and(|host| host == "localhost" || host.starts_with("127."))
+    {
         Compatibility::SelfHosted.base_profile()
     } else {
         Compatibility::DirectOpenAi.base_profile()
     }
+}
+
+fn host_matches(host: &str, suffix: &str) -> bool {
+    host == suffix
+        || host
+            .strip_suffix(suffix)
+            .is_some_and(|prefix| prefix.ends_with('.'))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -317,6 +335,17 @@ mod tests {
     }
 
     #[test]
+    fn mistral_profile_does_not_match_path_or_host_substring() {
+        let proxy = resolve_profile("https://proxy.example/mistral.ai/v1");
+        assert_eq!(proxy.dictionary_mode, DictionaryMode::Prompt);
+        assert!(proxy.sends_response_format);
+
+        let lookalike = resolve_profile("https://mistral.ai.evil.example/v1");
+        assert_eq!(lookalike.dictionary_mode, DictionaryMode::Prompt);
+        assert!(lookalike.sends_response_format);
+    }
+
+    #[test]
     fn self_hosted_endpoints_disable_word_timestamps() {
         let profile = resolve_profile("http://127.0.0.1:8080/v1");
         assert!(!profile.supports_word_timestamps);
@@ -334,11 +363,7 @@ mod tests {
     #[test]
     fn requests_verbose_json_with_word_timestamps() {
         let profile = resolve_profile("https://api.openai.com/v1");
-        let plan = plan_request(
-            &profile,
-            true,
-            Some(TimestampGranularity::Word),
-        );
+        let plan = plan_request(&profile, true, Some(TimestampGranularity::Word));
         assert_eq!(plan.response_format, ResponseFormat::VerboseJson);
         assert_eq!(plan.timestamp_granularities, vec!["segment", "word"]);
     }

@@ -1,7 +1,11 @@
 mod engine;
 mod provider;
 
-use std::{error::Error as StdError, fmt, time::Duration};
+use std::{
+    error::Error as StdError,
+    fmt,
+    time::{Duration, SystemTime},
+};
 
 pub use engine::{RemoteConfig, RemoteEngine, RemoteRequestParams};
 pub use provider::{
@@ -234,7 +238,9 @@ pub fn parse_retry_after(value: Option<&reqwest::header::HeaderValue>) -> Option
     if let Ok(seconds) = raw.parse::<u64>() {
         return Some(Duration::from_secs(seconds));
     }
-    None
+    httpdate::parse_http_date(raw)
+        .ok()
+        .map(|when| when.duration_since(SystemTime::now()).unwrap_or_default())
 }
 
 #[cfg(test)]
@@ -273,6 +279,19 @@ mod tests {
     #[test]
     fn parse_retry_after_accepts_seconds() {
         let value = reqwest::header::HeaderValue::from_static("30");
-        assert_eq!(parse_retry_after(Some(&value)), Some(Duration::from_secs(30)));
+        assert_eq!(
+            parse_retry_after(Some(&value)),
+            Some(Duration::from_secs(30))
+        );
+    }
+
+    #[test]
+    fn parse_retry_after_accepts_http_date() {
+        let retry_at = SystemTime::now() + Duration::from_secs(120);
+        let value = reqwest::header::HeaderValue::from_str(&httpdate::fmt_http_date(retry_at))
+            .expect("valid header");
+        let parsed = parse_retry_after(Some(&value)).expect("retry date parses");
+        assert!(parsed > Duration::ZERO);
+        assert!(parsed <= Duration::from_secs(120));
     }
 }

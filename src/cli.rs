@@ -109,8 +109,7 @@ pub async fn run() -> anyhow::Result<()> {
                 prompt,
                 dictionary,
                 timestamps,
-                timestamp_granularity: timestamps
-                    .then_some(crate::TimestampGranularity::Segment),
+                timestamp_granularity: timestamps.then_some(crate::TimestampGranularity::Segment),
             })?;
             print_transcription_response(response, &response_format, cli.json)?;
             Ok(())
@@ -176,8 +175,9 @@ pub async fn run() -> anyhow::Result<()> {
                 None
             };
             #[cfg(not(feature = "remote"))]
-            let transcription_provider: Option<std::sync::Arc<crate::provider::SpeechProvider>> =
-                None;
+            let transcription_provider: Option<
+                std::sync::Arc<crate::provider::SpeechProvider>,
+            > = None;
             if remote_enabled {
                 #[cfg(not(feature = "remote"))]
                 {

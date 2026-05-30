@@ -63,11 +63,7 @@ impl RemoteEngine {
         }
 
         let profile = resolve_profile(endpoint);
-        let plan = plan_request(
-            &profile,
-            params.timestamps,
-            params.timestamp_granularity,
-        );
+        let plan = plan_request(&profile, params.timestamps, params.timestamp_granularity);
         let url = format!("{}/audio/transcriptions", api_base(endpoint));
 
         let extension = audio_path

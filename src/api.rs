@@ -25,7 +25,7 @@ use tokio::io::AsyncWriteExt;
 use tower_http::cors::CorsLayer;
 
 use crate::{
-    models::{InstallOptions, ModelDownloadProgress, ModelManifest},
+    models::{InstallOptions, ModelDownloadProgress},
     provider::{SpeechProvider, TranscribeError},
     service::{AudioInput, SpeechService, TranscribeRequest},
     TimestampGranularity, Transcription,
@@ -80,6 +80,15 @@ struct ErrorDetail {
 struct InstallResponse {
     status: crate::models::ModelStatus,
     progress: Vec<ModelDownloadProgress>,
+}
+
+#[derive(Debug, Serialize)]
+struct RemoteModel {
+    id: String,
+    label: String,
+    description: String,
+    tags: &'static [&'static str],
+    capabilities: &'static [&'static str],
 }
 
 struct ParsedTranscriptionRequest {
@@ -225,10 +234,35 @@ pub async fn serve_with_shutdown(
 async fn list_models(
     State(state): State<ApiState>,
     headers: HeaderMap,
-) -> Result<Json<&'static [ModelManifest]>, (StatusCode, Json<ErrorBody>)> {
+) -> Result<Response, (StatusCode, Json<ErrorBody>)> {
     authorize(&state, &headers)?;
     state.log("info", "GET /v1/models".to_string());
-    Ok(Json(crate::models::list_models()))
+    if let Some(remote_ids) = state
+        .provider
+        .remote_model_ids()
+        .await
+        .map_err(map_transcribe_error)?
+    {
+        return Ok(
+            Json(remote_ids.into_iter().map(remote_model).collect::<Vec<_>>()).into_response(),
+        );
+    }
+
+    Ok(Json(crate::models::list_models()).into_response())
+}
+
+fn remote_model(id: String) -> RemoteModel {
+    let label = id.clone();
+    RemoteModel {
+        id,
+        label,
+        description: "Remote transcription model configured for this server.".to_string(),
+        tags: &["Remote"],
+        capabilities: &[
+            crate::models::MODEL_CAPABILITY_DICTIONARY_PROMPT,
+            crate::models::MODEL_CAPABILITY_TIMESTAMPS,
+        ],
+    }
 }
 
 async fn install_model(
@@ -432,9 +466,7 @@ fn build_transcription_request(
     })
 }
 
-fn service_timestamp_granularity(
-    values: &[TimestampGranularity],
-) -> Option<TimestampGranularity> {
+fn service_timestamp_granularity(values: &[TimestampGranularity]) -> Option<TimestampGranularity> {
     if values.contains(&TimestampGranularity::Word) {
         Some(TimestampGranularity::Word)
     } else if values.contains(&TimestampGranularity::Segment) {

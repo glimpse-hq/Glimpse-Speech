@@ -759,6 +759,7 @@ dependencies = [
  "axum",
  "clap",
  "hound",
+ "httpdate",
  "parakeet-rs",
  "reqwest",
  "serde",
