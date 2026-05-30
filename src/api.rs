@@ -238,6 +238,7 @@ async fn list_models(
     authorize(&state, &headers)?;
     state.log("info", "GET /v1/models".to_string());
     if let Some(remote_ids) = state.provider.remote_model_ids().await {
+        let remote_ids = remote_ids.map_err(map_transcribe_error)?;
         return Ok(
             Json(remote_ids.into_iter().map(remote_model).collect::<Vec<_>>()).into_response(),
         );

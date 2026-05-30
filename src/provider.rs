@@ -117,37 +117,31 @@ impl SpeechProvider {
         }
     }
 
-    pub async fn remote_model_ids(&self) -> Option<Vec<String>> {
+    pub async fn remote_model_ids(&self) -> Option<Result<Vec<String>, TranscribeError>> {
         match self {
             Self::Local(_) => None,
             #[cfg(feature = "remote")]
-            Self::Remote(upstream) => upstream.remote_model_ids().await,
+            Self::Remote(upstream) => Some(upstream.remote_model_ids().await),
         }
     }
 }
 
 #[cfg(feature = "remote")]
 impl RemoteUpstream {
-    async fn remote_model_ids(&self) -> Option<Vec<String>> {
+    async fn remote_model_ids(&self) -> Result<Vec<String>, TranscribeError> {
         if let Some(model) = self
             .default_model
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            return Some(vec![model.to_string()]);
+            return Ok(vec![model.to_string()]);
         }
 
-        match self.engine.list_models().await {
-            Ok(models) => Some(models),
-            Err(err) => {
-                eprintln!(
-                    "Remote speech model discovery failed: {}",
-                    err.user_message()
-                );
-                None
-            }
-        }
+        self.engine
+            .list_models()
+            .await
+            .map_err(TranscribeError::Remote)
     }
 
     async fn transcribe(
