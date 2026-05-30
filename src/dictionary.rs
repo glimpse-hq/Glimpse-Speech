@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-const MAX_DICTIONARY_ENTRIES: usize = 64;
+pub(crate) const MAX_DICTIONARY_ENTRIES: usize = 64;
 const MAX_DICTIONARY_TERM_CHARS: usize = 160;
 const MAX_PROMPT_BYTES: usize = 600;
 

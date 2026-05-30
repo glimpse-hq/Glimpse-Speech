@@ -7,10 +7,14 @@ pub mod diarization;
 pub mod dictionary;
 pub mod engines;
 pub mod models;
+pub mod provider;
+#[cfg(feature = "remote")]
+pub mod remote;
 pub mod service;
 
 use std::path::Path;
 
+/// Raw output of a transcription engine: text plus optional segments.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TranscriptionResult {
     pub text: String,
@@ -24,6 +28,24 @@ pub struct TranscriptionSegment {
     /// Segment end time in seconds.
     pub end: f32,
     pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Transcription {
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub segments: Option<Vec<TranscriptionSegment>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub words: Option<Vec<TranscriptionSegment>>,
+    pub model_id: String,
+    pub language: Option<String>,
+    pub duration_ms: u128,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimestampGranularity {
+    Segment,
+    Word,
 }
 
 pub trait TranscriptionEngine {
