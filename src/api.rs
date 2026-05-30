@@ -237,12 +237,7 @@ async fn list_models(
 ) -> Result<Response, (StatusCode, Json<ErrorBody>)> {
     authorize(&state, &headers)?;
     state.log("info", "GET /v1/models".to_string());
-    if let Some(remote_ids) = state
-        .provider
-        .remote_model_ids()
-        .await
-        .map_err(map_transcribe_error)?
-    {
+    if let Some(remote_ids) = state.provider.remote_model_ids().await {
         return Ok(
             Json(remote_ids.into_iter().map(remote_model).collect::<Vec<_>>()).into_response(),
         );
