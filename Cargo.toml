@@ -1,6 +1,6 @@
 [package]
 name = "glimpse-speech"
-version = "1.4.0"
+version = "1.4.1"
 edition = "2021"
 rust-version = "1.85"
 description = "A transcription API powered by whisper-rs and NVIDIA speech models via parakeet-rs"
