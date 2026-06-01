@@ -373,19 +373,36 @@ impl ModelInstallManager {
     }
 
     pub fn resolve_model(&self, id: &str) -> Result<ResolvedModel> {
-        let manifest = definition(id).ok_or_else(|| anyhow!("Unknown model: {id}"))?;
-        let status = self.model_status(id)?;
-        if !status.installed {
-            return Err(anyhow!(
-                "{id} is not fully installed. Missing: {}",
-                status.missing_files.join(", ")
-            ));
+        let manifest = definition(id);
+        let engine = manifest.map_or(ModelEngine::Whisper, |manifest| manifest.engine);
+
+        // Whisper is a single file the engine loads directly; other engines need
+        // their full multi-file install present.
+        if engine != ModelEngine::Whisper {
+            let status = self.model_status(id)?;
+            if !status.installed {
+                return Err(anyhow!(
+                    "{id} is not fully installed. Missing: {}",
+                    status.missing_files.join(", ")
+                ));
+            }
         }
 
+        let (resolved_id, path) = match manifest {
+            Some(manifest) => (manifest.id.to_string(), self.artifact_path(manifest)),
+            None => {
+                let path = [PathBuf::from(id), self.cache_dir.join(id)]
+                    .into_iter()
+                    .find(|candidate| candidate.is_file())
+                    .ok_or_else(|| anyhow!("Unknown model: {id}"))?;
+                (id.to_string(), path)
+            }
+        };
+
         Ok(ResolvedModel {
-            id: manifest.id.to_string(),
-            path: self.artifact_path(manifest),
-            engine: manifest.engine,
+            id: resolved_id,
+            path,
+            engine,
         })
     }
 
@@ -886,6 +903,66 @@ mod tests {
             .file_name()
             .to_string_lossy()
             .contains(".backup-")));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolve_model_accepts_whisper_artifact_with_unexpected_size() {
+        let root = std::env::temp_dir()
+            .join(format!("glimpse-speech-quant-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let manager = ModelInstallManager::new(&root);
+        let dir = manager.model_dir("whisper_large_v3_turbo_q8");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("ggml-large-v3-turbo-q8_0.bin"),
+            b"ggml not the expected size",
+        )
+        .unwrap();
+
+        let resolved = manager.resolve_model("whisper_large_v3_turbo_q8").unwrap();
+        assert_eq!(resolved.engine, ModelEngine::Whisper);
+        assert_eq!(resolved.path, dir.join("ggml-large-v3-turbo-q8_0.bin"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolve_model_loads_arbitrary_whisper_file_by_path() {
+        let root =
+            std::env::temp_dir().join(format!("glimpse-speech-loose-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let manager = ModelInstallManager::new(&root);
+
+        let model_path = root.join("ggml-large-v3-turbo-q4.bin");
+        fs::write(&model_path, b"ggml arbitrary quant").unwrap();
+
+        let by_path = manager
+            .resolve_model(model_path.to_str().unwrap())
+            .unwrap();
+        assert_eq!(by_path.engine, ModelEngine::Whisper);
+        assert_eq!(by_path.path, model_path);
+
+        let by_name = manager.resolve_model("ggml-large-v3-turbo-q4.bin").unwrap();
+        assert_eq!(by_name.path, model_path);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolve_model_rejects_unknown_reference() {
+        let root =
+            std::env::temp_dir().join(format!("glimpse-speech-unknown-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let manager = ModelInstallManager::new(&root);
+
+        assert!(manager.resolve_model("totally-unknown").is_err());
+        assert!(manager
+            .resolve_model("/no/such/file/model.bin")
+            .is_err());
 
         let _ = fs::remove_dir_all(&root);
     }
