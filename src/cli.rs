@@ -4,12 +4,51 @@ use std::{
 };
 
 use clap::{Parser, Subcommand};
+use directories::ProjectDirs;
 
 use crate::{
-    models::{default_model_cache_dir, ModelInstallManager},
-    service::{AudioInput, SpeechConfig, SpeechService, TranscribeRequest},
+    models::{InstallSpec, ModelEngine, ModelInstallManager, ModelStorage, RemoteFile},
+    service::{AudioInput, SpeechService, TranscribeRequest},
     Transcription,
 };
+
+fn default_cache_dir() -> PathBuf {
+    if let Ok(value) = std::env::var("GLIMPSE_SPEECH_CACHE_DIR") {
+        return PathBuf::from(value);
+    }
+
+    #[cfg(target_os = "macos")]
+    if let Ok(home) = std::env::var("HOME") {
+        return PathBuf::from(home)
+            .join("Library")
+            .join("Application Support")
+            .join("com.glimpse.data")
+            .join("models");
+    }
+
+    if let Some(project_dirs) = ProjectDirs::from("com", "Glimpse", "glimpse-speech") {
+        return project_dirs.data_local_dir().join("models");
+    }
+
+    PathBuf::from("glimpse-speech").join("models")
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum CliEngine {
+    Whisper,
+    Parakeet,
+    Nemotron,
+}
+
+impl From<CliEngine> for ModelEngine {
+    fn from(engine: CliEngine) -> Self {
+        match engine {
+            CliEngine::Whisper => ModelEngine::Whisper,
+            CliEngine::Parakeet => ModelEngine::Parakeet,
+            CliEngine::Nemotron => ModelEngine::Nemotron,
+        }
+    }
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "glimpse")]
@@ -33,6 +72,8 @@ enum Command {
         audio: PathBuf,
         #[arg(long)]
         model: String,
+        #[arg(long, value_enum, default_value_t = CliEngine::Whisper)]
+        engine: CliEngine,
         #[arg(long)]
         language: Option<String>,
         #[arg(long)]
@@ -51,6 +92,8 @@ enum Command {
         port: u16,
         #[arg(long)]
         model: Option<String>,
+        #[arg(long, value_enum, default_value_t = CliEngine::Whisper)]
+        engine: CliEngine,
         #[arg(long)]
         api_key: Option<String>,
         /// Upstream OpenAI-compatible speech endpoint. When set, transcriptions proxy remotely.
@@ -72,9 +115,20 @@ enum Command {
 #[derive(Debug, Subcommand)]
 enum ModelsCommand {
     List,
-    Install { id: String },
-    Status { id: String },
-    Delete { id: String },
+    Install {
+        id: String,
+        #[arg(long)]
+        url: String,
+        #[arg(long)]
+        artifact: Option<String>,
+        #[arg(long)]
+        size: Option<u64>,
+        #[arg(long)]
+        sha256: Option<String>,
+    },
+    Delete {
+        id: String,
+    },
 }
 
 pub fn run_blocking() -> anyhow::Result<()> {
@@ -86,22 +140,21 @@ pub fn run_blocking() -> anyhow::Result<()> {
 
 pub async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let cache_dir = cli.cache_dir.unwrap_or_else(default_model_cache_dir);
+    let cache_dir = cli.cache_dir.unwrap_or_else(default_cache_dir);
 
     match cli.command {
         Command::Models { command } => handle_models(command, cache_dir, cli.json).await,
         Command::Transcribe {
             audio,
             model,
+            engine,
             language,
             prompt,
             response_format,
             timestamps,
             dictionary,
         } => {
-            let service = SpeechService::new(SpeechConfig {
-                model_cache_dir: cache_dir,
-            });
+            let service = SpeechService::new_loose_with_engine(cache_dir, engine.into());
             let response = service.transcribe(TranscribeRequest {
                 audio: AudioInput::WavPath(audio),
                 model_id: model,
@@ -118,6 +171,7 @@ pub async fn run() -> anyhow::Result<()> {
             host,
             port,
             model,
+            engine,
             api_key,
             remote_endpoint,
             remote_api_key,
@@ -132,15 +186,14 @@ pub async fn run() -> anyhow::Result<()> {
             let event_sink = serve_event_sink(
                 cache_dir.clone(),
                 model.clone(),
+                engine,
                 remote_enabled,
                 api_key.as_deref().is_some_and(|key| !key.trim().is_empty()),
                 cors_enabled,
             );
-            let service = std::sync::Arc::new(crate::service::SpeechService::new(
-                crate::service::SpeechConfig {
-                    model_cache_dir: cache_dir,
-                },
-            ));
+            let service = std::sync::Arc::new(
+                crate::service::SpeechService::new_loose_with_engine(cache_dir, engine.into()),
+            );
             if !remote_enabled {
                 if let Some(model_id) = model.as_deref() {
                     let warm = std::sync::Arc::clone(&service);
@@ -175,6 +228,8 @@ pub async fn run() -> anyhow::Result<()> {
                 None
             };
             #[cfg(not(feature = "remote"))]
+            let _ = (&remote_api_key, &remote_model);
+            #[cfg(not(feature = "remote"))]
             let transcription_provider: Option<
                 std::sync::Arc<crate::provider::SpeechProvider>,
             > = None;
@@ -194,6 +249,7 @@ pub async fn run() -> anyhow::Result<()> {
                 event_sink: Some(event_sink),
                 cors: cors_enabled,
                 transcription_provider,
+                local_models: Vec::new(),
             })
             .await
         }
@@ -203,6 +259,7 @@ pub async fn run() -> anyhow::Result<()> {
 fn serve_event_sink(
     model_cache_dir: PathBuf,
     warm_model: Option<String>,
+    engine: CliEngine,
     remote_enabled: bool,
     api_key_required: bool,
     cors_enabled: bool,
@@ -215,6 +272,7 @@ fn serve_event_sink(
                     base_url,
                     &model_cache_dir,
                     warm_model.as_deref(),
+                    engine,
                     remote_enabled,
                     api_key_required,
                     cors_enabled,
@@ -228,6 +286,7 @@ fn serve_banner(
     base_url: &str,
     model_cache_dir: &Path,
     warm_model: Option<&str>,
+    engine: CliEngine,
     remote_enabled: bool,
     api_key_required: bool,
     cors_enabled: bool,
@@ -254,14 +313,15 @@ fn serve_banner(
          Base URL: {base_url}\n\
          Serving:\n\
          - Models: GET {base_url}/v1/models\n\
-         - Model install: POST {base_url}/v1/models/{{id}}/install\n\
          - Transcriptions: POST {base_url}/v1/audio/transcriptions\n\
          Model cache: {}\n\
          Backend: {backend}\n\
+         Engine: {}\n\
          Model: {warm}\n\
          Auth: {auth}\n\
          CORS: {cors}",
         model_cache_dir.display(),
+        ModelEngine::from(engine),
     )
 }
 
@@ -273,29 +333,68 @@ async fn handle_models(
     let manager = ModelInstallManager::new(cache_dir);
     match command {
         ModelsCommand::List => {
-            let models = crate::models::list_models();
+            let ids = installed_model_ids(manager.cache_dir());
             if json {
-                println!("{}", serde_json::to_string_pretty(models)?);
+                println!("{}", serde_json::to_string_pretty(&ids)?);
+            } else if ids.is_empty() {
+                println!("No models installed in {}", manager.cache_dir().display());
             } else {
-                for model in models {
-                    println!("{}\t{}\t{}", model.id, model.engine, model.variant);
+                for id in ids {
+                    println!("{id}");
                 }
             }
         }
-        ModelsCommand::Install { id } => {
-            let status = manager.install_model(&id, Default::default()).await?;
-            print_status(status, json)?;
-        }
-        ModelsCommand::Status { id } => {
-            let status = manager.model_status(&id)?;
+        ModelsCommand::Install {
+            id,
+            url,
+            artifact,
+            size,
+            sha256,
+        } => {
+            let artifact = artifact.unwrap_or_else(|| filename_from_url(&url));
+            let spec = InstallSpec {
+                id: id.clone(),
+                engine: ModelEngine::Whisper,
+                storage: ModelStorage::File {
+                    artifact: artifact.clone(),
+                },
+                files: vec![RemoteFile {
+                    url,
+                    path: artifact,
+                    size_bytes: size,
+                    sha256,
+                }],
+            };
+            let status = manager.install(&spec, Default::default()).await?;
             print_status(status, json)?;
         }
         ModelsCommand::Delete { id } => {
-            let status = manager.delete_model(&id)?;
+            let status = manager.delete(&id)?;
             print_status(status, json)?;
         }
     }
     Ok(())
+}
+
+fn installed_model_ids(cache_dir: &Path) -> Vec<String> {
+    let mut ids = std::fs::read_dir(cache_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids
+}
+
+fn filename_from_url(url: &str) -> String {
+    url.rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .map(|segment| segment.split(['?', '#']).next().unwrap_or(segment))
+        .filter(|name| !name.is_empty())
+        .unwrap_or("model.bin")
+        .to_string()
 }
 
 fn print_status(status: crate::models::ModelStatus, json: bool) -> anyhow::Result<()> {

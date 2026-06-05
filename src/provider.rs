@@ -1,13 +1,15 @@
 use std::{error::Error as StdError, fmt, sync::Arc};
 
 use anyhow::anyhow;
-use reqwest::Client;
 
 use crate::service::{SpeechService, TranscribeRequest};
 use crate::Transcription;
 
 #[cfg(feature = "remote")]
 use crate::service::AudioInput;
+
+#[cfg(feature = "remote")]
+use reqwest::Client;
 
 #[cfg(feature = "remote")]
 use crate::remote::{RemoteEngine, RemoteError, RemoteRequestParams};
@@ -224,15 +226,5 @@ fn local_fallback_request(
 
 #[cfg(feature = "remote")]
 fn installed_model_id(service: &SpeechService, preferred: &str) -> Option<String> {
-    if let Ok(model) = service.model_manager().resolve_model(preferred) {
-        return Some(model.id);
-    }
-
-    crate::models::list_models().iter().find_map(|manifest| {
-        service
-            .model_manager()
-            .resolve_model(manifest.id)
-            .ok()
-            .map(|model| model.id)
-    })
+    service.resolve(preferred).ok().map(|model| model.id)
 }

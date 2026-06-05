@@ -42,6 +42,16 @@ pub struct ApiConfig {
     /// clients on any origin can call the API.
     pub cors: bool,
     pub transcription_provider: Option<Arc<SpeechProvider>>,
+    pub local_models: Vec<ApiModelInfo>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ApiModelInfo {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+    pub tags: Vec<String>,
+    pub capabilities: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -50,6 +60,7 @@ struct ApiState {
     provider: Arc<SpeechProvider>,
     api_key: Option<Arc<str>>,
     event_sink: Option<ApiEventSink>,
+    local_models: Arc<Vec<ApiModelInfo>>,
 }
 
 pub type ApiEventSink = Arc<dyn Fn(ApiEvent) + Send + Sync + 'static>;
@@ -210,16 +221,23 @@ pub async fn serve_with_shutdown(
         provider,
         api_key: api_key.map(Arc::from),
         event_sink: config.event_sink,
+        local_models: Arc::new(config.local_models),
     };
     state.log("info", format!("Local API listening on http://{addr}"));
+    let model_management_enabled = !state.local_models.is_empty();
 
     let mut app = Router::new()
         .route("/v1/models", get(list_models))
-        .route("/v1/models/{id}/install", post(install_model))
-        .route("/v1/models/{id}", delete(delete_model))
         .route("/v1/audio/transcriptions", post(transcribe))
-        .layer(DefaultBodyLimit::max(1024 * 1024 * 1024))
-        .with_state(state);
+        .layer(DefaultBodyLimit::max(1024 * 1024 * 1024));
+
+    if model_management_enabled {
+        app = app
+            .route("/v1/models/{id}/install", post(install_model))
+            .route("/v1/models/{id}", delete(delete_model));
+    }
+
+    let mut app = app.with_state(state);
 
     if cors_enabled {
         app = app.layer(CorsLayer::permissive());
@@ -244,7 +262,7 @@ async fn list_models(
         );
     }
 
-    Ok(Json(crate::models::list_models()).into_response())
+    Ok(Json((*state.local_models).clone()).into_response())
 }
 
 fn remote_model(id: String) -> RemoteModel {
@@ -254,10 +272,7 @@ fn remote_model(id: String) -> RemoteModel {
         label,
         description: "Remote transcription model configured for this server.".to_string(),
         tags: &["Remote"],
-        capabilities: &[
-            crate::models::MODEL_CAPABILITY_DICTIONARY_PROMPT,
-            crate::models::MODEL_CAPABILITY_TIMESTAMPS,
-        ],
+        capabilities: &["dictionary_prompt", "timestamps"],
     }
 }
 
@@ -278,8 +293,7 @@ async fn install_model(
 
     let status = state
         .service
-        .model_manager()
-        .install_model(
+        .install(
             &id,
             InstallOptions {
                 cancel_token: None,
@@ -303,12 +317,7 @@ async fn delete_model(
 ) -> Result<Json<crate::models::ModelStatus>, (StatusCode, Json<ErrorBody>)> {
     authorize(&state, &headers)?;
     state.log("info", format!("DELETE /v1/models/{id}"));
-    state
-        .service
-        .model_manager()
-        .delete_model(&id)
-        .map(Json)
-        .map_err(map_error)
+    state.service.delete(&id).map(Json).map_err(map_error)
 }
 
 async fn transcribe(

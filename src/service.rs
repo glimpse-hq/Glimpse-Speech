@@ -6,13 +6,27 @@ use std::{
 use anyhow::{anyhow, Result};
 
 use crate::{
-    models::{ModelEngine, ModelInstallManager},
+    models::{
+        InstallOptions, InstallSpec, ModelEngine, ModelInstallManager, ModelStatus, ResolvedModel,
+    },
     TimestampGranularity, Transcription, TranscriptionEngine, TranscriptionResult,
 };
 
-#[derive(Debug, Clone)]
+pub type ModelResolver = Arc<dyn Fn(&str) -> Option<InstallSpec> + Send + Sync>;
+
+#[derive(Clone)]
 pub struct SpeechConfig {
     pub model_cache_dir: PathBuf,
+    pub resolver: ModelResolver,
+}
+
+impl SpeechConfig {
+    pub fn loose(model_cache_dir: PathBuf) -> Self {
+        Self {
+            model_cache_dir,
+            resolver: Arc::new(|_| None),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -35,6 +49,8 @@ pub struct TranscribeRequest {
 
 pub struct SpeechService {
     model_manager: ModelInstallManager,
+    resolver: ModelResolver,
+    loose_engine: ModelEngine,
     loaded: Mutex<Option<LoadedEngine>>,
 }
 
@@ -80,12 +96,54 @@ impl SpeechService {
     pub fn new(config: SpeechConfig) -> Self {
         Self {
             model_manager: ModelInstallManager::new(config.model_cache_dir),
+            resolver: config.resolver,
+            loose_engine: ModelEngine::Whisper,
+            loaded: Mutex::new(None),
+        }
+    }
+
+    pub fn new_loose_with_engine(model_cache_dir: PathBuf, engine: ModelEngine) -> Self {
+        Self {
+            model_manager: ModelInstallManager::new(model_cache_dir),
+            resolver: Arc::new(|_| None),
+            loose_engine: engine,
             loaded: Mutex::new(None),
         }
     }
 
     pub fn model_manager(&self) -> &ModelInstallManager {
         &self.model_manager
+    }
+
+    pub fn resolve(&self, model_id: &str) -> Result<ResolvedModel> {
+        match (self.resolver)(model_id) {
+            Some(spec) => self.model_manager.resolve(&spec),
+            None => self
+                .model_manager
+                .resolve_loose(model_id, self.loose_engine),
+        }
+    }
+
+    fn spec(&self, model_id: &str) -> Result<InstallSpec> {
+        (self.resolver)(model_id).ok_or_else(|| anyhow!("Unknown model: {model_id}"))
+    }
+
+    pub async fn install(
+        &self,
+        model_id: &str,
+        options: InstallOptions<'_>,
+    ) -> Result<ModelStatus> {
+        let spec = self.spec(model_id)?;
+        self.model_manager.install(&spec, options).await
+    }
+
+    pub fn model_status(&self, model_id: &str) -> Result<ModelStatus> {
+        let spec = self.spec(model_id)?;
+        self.model_manager.status(&spec)
+    }
+
+    pub fn delete(&self, model_id: &str) -> Result<ModelStatus> {
+        self.model_manager.delete(model_id)
     }
 
     pub fn transcribe(&self, request: TranscribeRequest) -> Result<Transcription> {
@@ -210,7 +268,7 @@ impl SpeechService {
     }
 
     fn ensure_loaded(&self, model_id: &str) -> Result<String> {
-        let resolved = self.model_manager.resolve_model(model_id)?;
+        let resolved = self.resolve(model_id)?;
         let mut guard = self.lock_loaded()?;
         let should_reload = guard
             .as_ref()
@@ -240,6 +298,8 @@ impl Clone for SpeechService {
     fn clone(&self) -> Self {
         Self {
             model_manager: self.model_manager.clone(),
+            resolver: Arc::clone(&self.resolver),
+            loose_engine: self.loose_engine,
             loaded: Mutex::new(None),
         }
     }
@@ -376,6 +436,7 @@ fn transcribe_with_engine(
     }
 }
 
+#[cfg(feature = "whisper")]
 fn combined_prompt(prompt: Option<String>, dictionary: &[String]) -> Option<String> {
     match (
         prompt,
