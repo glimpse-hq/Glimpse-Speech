@@ -1,6 +1,9 @@
-use std::path::{Path, PathBuf};
+use std::{
+    borrow::Cow,
+    path::{Path, PathBuf},
+};
 
-use parakeet_rs::Nemotron;
+use parakeet_rs::{Nemotron, NemotronMode};
 
 use crate::{TranscriptionEngine, TranscriptionResult};
 
@@ -101,9 +104,10 @@ impl TranscriptionEngine for NemotronEngine {
     fn transcribe_samples(
         &mut self,
         samples: Vec<f32>,
-        _params: Option<Self::InferenceParams>,
+        params: Option<Self::InferenceParams>,
     ) -> Result<TranscriptionResult, Box<dyn std::error::Error>> {
         let runtime = self.runtime_mut()?;
+        apply_language(runtime, params.as_ref().and_then(|p| p.language.as_deref()))?;
         runtime.reset();
 
         // Feed all audio through the streaming interface in chunks
@@ -169,6 +173,55 @@ fn validate_model_path(model_path: &Path) -> Result<(), Box<dyn std::error::Erro
 fn nemotron_error(error: impl std::fmt::Display) -> Box<dyn std::error::Error> {
     io_error(format!("parakeet-rs Nemotron error: {error}"))
 }
+
+fn apply_language(
+    runtime: &mut Nemotron,
+    language: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if runtime.mode() != NemotronMode::Multilingual {
+        return Ok(());
+    }
+
+    let Some(language) = language.and_then(nemotron_language) else {
+        return Ok(());
+    };
+
+    runtime
+        .set_target_lang(language.as_ref())
+        .map_err(nemotron_error)
+}
+
+fn nemotron_language(language: &str) -> Option<Cow<'_, str>> {
+    let language = language.trim();
+    if language.is_empty() || language == "auto" {
+        return Some(Cow::Borrowed("auto"));
+    }
+
+    match language {
+        "he" => return Some(Cow::Borrowed("he-IL")),
+        "ja" => return Some(Cow::Borrowed("ja-JP")),
+        "mt" => return Some(Cow::Borrowed("mt-MT")),
+        "th" => return Some(Cow::Borrowed("th-TH")),
+        "vi" => return Some(Cow::Borrowed("vi-VN")),
+        "zh" => return Some(Cow::Borrowed("zh-CN")),
+        _ => {}
+    }
+
+    if NEMOTRON_LANGUAGE_CODES.contains(&language) {
+        Some(Cow::Borrowed(language))
+    } else {
+        Some(Cow::Borrowed("auto"))
+    }
+}
+
+const NEMOTRON_LANGUAGE_CODES: &[&str] = &[
+    "ar", "ar-AR", "bg", "bg-BG", "cs", "cs-CZ", "da", "da-DK", "de", "de-DE", "el", "el-GR", "en",
+    "en-GB", "en-US", "es", "es-ES", "es-US", "et", "et-EE", "fi", "fi-FI", "fr", "fr-CA", "fr-FR",
+    "he-IL", "hi", "hi-IN", "hr", "hr-HR", "hu", "hu-HU", "it", "it-IT", "ja-JP", "ko", "ko-KR",
+    "lt", "lt-LT", "lv", "lv-LV", "mt-MT", "nb", "nb-NO", "nl", "nl-NL", "nn", "nn-NO", "no", "pl",
+    "pl-PL", "pt", "pt-BR", "pt-PT", "ro", "ro-RO", "ru", "ru-RU", "sk", "sk-SK", "sl", "sl-SI",
+    "sv", "sv-SE", "th-TH", "tr", "tr-TR", "uk", "uk-UA", "vi-VN", "zh-CN",
+];
 
 fn io_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
     std::io::Error::other(message.into()).into()

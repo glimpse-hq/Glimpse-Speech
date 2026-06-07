@@ -1,5 +1,6 @@
 use std::{
-    fmt, fs, io,
+    fmt, fs,
+    io::{self, Read},
     path::Component,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
@@ -83,6 +84,7 @@ pub struct ModelDownloadProgress {
     pub downloaded: u64,
     pub total: u64,
     pub percent: f64,
+    pub verifying: bool,
 }
 
 pub type ProgressCallback<'a> = dyn Fn(ModelDownloadProgress) + Send + Sync + 'a;
@@ -227,6 +229,8 @@ impl ModelInstallManager {
         for file in &spec.files {
             self.download_file(&spec.id, file, &dir, &options).await?;
         }
+
+        emit_verifying_progress(&spec.id, &options);
 
         match self.verify(spec) {
             Ok(status) => Ok(status),
@@ -598,9 +602,19 @@ fn calculate_dir_size(dir: &Path) -> io::Result<u64> {
 }
 
 fn sha256_file(path: &Path) -> io::Result<String> {
-    let bytes = fs::read(path)?;
-    let digest = Sha256::digest(bytes);
-    Ok(hex_encode(&digest))
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 1024 * 1024];
+
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+
+    Ok(hex_encode(&hasher.finalize()))
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -654,6 +668,22 @@ fn emit_progress(
         downloaded,
         total,
         percent,
+        verifying: false,
+    });
+}
+
+fn emit_verifying_progress(model: &str, options: &InstallOptions<'_>) {
+    let Some(progress) = options.progress else {
+        return;
+    };
+
+    progress(ModelDownloadProgress {
+        model: model.to_string(),
+        file: String::new(),
+        downloaded: 0,
+        total: 0,
+        percent: 100.0,
+        verifying: true,
     });
 }
 
@@ -880,6 +910,23 @@ mod tests {
         assert!(manager
             .resolve_loose(model_path.to_str().unwrap(), ModelEngine::Parakeet)
             .is_err());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sha256_file_hashes_content() {
+        let root =
+            std::env::temp_dir().join(format!("glimpse-speech-sha256-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("model.bin");
+        fs::write(&path, b"hello").unwrap();
+
+        assert_eq!(
+            sha256_file(&path).unwrap(),
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
 
         let _ = fs::remove_dir_all(&root);
     }
