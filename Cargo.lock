@@ -780,7 +780,7 @@ dependencies = [
 
 [[package]]
 name = "glimpse-speech"
-version = "1.4.1"
+version = "1.4.5"
 dependencies = [
  "anyhow",
  "axum",
