@@ -89,6 +89,17 @@ pub struct ModelDownloadProgress {
 
 pub type ProgressCallback<'a> = dyn Fn(ModelDownloadProgress) + Send + Sync + 'a;
 
+#[derive(Debug)]
+struct DownloadCancelled;
+
+impl fmt::Display for DownloadCancelled {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Download cancelled")
+    }
+}
+
+impl std::error::Error for DownloadCancelled {}
+
 #[derive(Default)]
 pub struct InstallOptions<'a> {
     pub cancel_token: Option<CancellationToken>,
@@ -227,7 +238,12 @@ impl ModelInstallManager {
             .with_context(|| format!("create model directory {}", dir.display()))?;
 
         for file in &spec.files {
-            self.download_file(&spec.id, file, &dir, &options).await?;
+            if let Err(err) = self.download_file(&spec.id, file, &dir, &options).await {
+                if err.downcast_ref::<DownloadCancelled>().is_some() {
+                    let _ = fs::remove_dir_all(&dir);
+                }
+                return Err(err);
+            }
         }
 
         emit_verifying_progress(&spec.id, &options);
@@ -291,7 +307,7 @@ impl ModelInstallManager {
         loop {
             if is_cancelled(options) {
                 let _ = fs::remove_file(&download_path);
-                return Err(anyhow!("Download cancelled"));
+                return Err(DownloadCancelled.into());
             }
 
             if !resume_supported && downloaded > 0 {
@@ -377,7 +393,7 @@ impl ModelInstallManager {
                 if is_cancelled(options) {
                     drop(output);
                     let _ = fs::remove_file(&download_path);
-                    return Err(anyhow!("Download cancelled"));
+                    return Err(DownloadCancelled.into());
                 }
 
                 match response.chunk().await {
