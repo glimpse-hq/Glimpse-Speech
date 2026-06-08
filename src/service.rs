@@ -5,11 +5,20 @@ use std::{
 
 use anyhow::{anyhow, Result};
 
+#[cfg(any(
+    feature = "whisper",
+    all(
+        feature = "nvidia",
+        not(all(target_os = "macos", target_arch = "x86_64"))
+    )
+))]
+use crate::TranscriptionEngine;
+
 use crate::{
     models::{
         InstallOptions, InstallSpec, ModelEngine, ModelInstallManager, ModelStatus, ResolvedModel,
     },
-    TimestampGranularity, Transcription, TranscriptionEngine, TranscriptionResult,
+    TimestampGranularity, Transcription, TranscriptionResult,
 };
 
 pub type ModelResolver = Arc<dyn Fn(&str) -> Option<InstallSpec> + Send + Sync>;
@@ -59,6 +68,13 @@ struct TranscriptionWithDuration {
     audio_duration_ms: u128,
 }
 
+#[cfg(any(
+    feature = "whisper",
+    all(
+        feature = "nvidia",
+        not(all(target_os = "macos", target_arch = "x86_64"))
+    )
+))]
 struct PreparedAudio {
     samples: Vec<f32>,
     duration_ms: u128,
@@ -449,6 +465,13 @@ fn combined_prompt(prompt: Option<String>, dictionary: &[String]) -> Option<Stri
     }
 }
 
+#[cfg(any(
+    feature = "whisper",
+    all(
+        feature = "nvidia",
+        not(all(target_os = "macos", target_arch = "x86_64"))
+    )
+))]
 fn transcribe_audio<E: TranscriptionEngine>(
     engine: &mut E,
     audio: AudioInput,
@@ -464,6 +487,13 @@ fn transcribe_audio<E: TranscriptionEngine>(
     })
 }
 
+#[cfg(any(
+    feature = "whisper",
+    all(
+        feature = "nvidia",
+        not(all(target_os = "macos", target_arch = "x86_64"))
+    )
+))]
 fn prepare_audio(audio: AudioInput) -> Result<PreparedAudio> {
     let (mut samples, source_sample_rate, source_sample_count) = match audio {
         AudioInput::WavPath(path) => {
@@ -508,6 +538,13 @@ fn prepare_audio(audio: AudioInput) -> Result<PreparedAudio> {
     })
 }
 
+#[cfg(any(
+    feature = "whisper",
+    all(
+        feature = "nvidia",
+        not(all(target_os = "macos", target_arch = "x86_64"))
+    )
+))]
 fn audio_duration_ms(sample_count: usize, sample_rate: u32) -> u128 {
     if sample_rate == 0 {
         return 0;
@@ -515,6 +552,13 @@ fn audio_duration_ms(sample_count: usize, sample_rate: u32) -> u128 {
     ((sample_count as u128) * 1000) / sample_rate as u128
 }
 
+#[cfg(any(
+    feature = "whisper",
+    all(
+        feature = "nvidia",
+        not(all(target_os = "macos", target_arch = "x86_64"))
+    )
+))]
 fn resample_linear(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
     if samples.is_empty() {
         return Vec::new();
