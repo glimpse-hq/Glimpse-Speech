@@ -13,6 +13,15 @@ pub mod service;
 
 use std::path::Path;
 
+#[cfg(feature = "whisper")]
+pub(crate) fn silence_native_logs() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(whisper_rs::install_logging_hooks);
+}
+
+#[cfg(not(feature = "whisper"))]
+pub(crate) fn silence_native_logs() {}
+
 /// Raw output of a transcription engine: text plus optional segments.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TranscriptionResult {

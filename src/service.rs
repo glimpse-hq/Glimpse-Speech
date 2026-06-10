@@ -110,6 +110,7 @@ enum EngineInstance {
 
 impl SpeechService {
     pub fn new(config: SpeechConfig) -> Self {
+        crate::silence_native_logs();
         Self {
             model_manager: ModelInstallManager::new(config.model_cache_dir),
             resolver: config.resolver,
@@ -119,6 +120,7 @@ impl SpeechService {
     }
 
     pub fn new_loose_with_engine(model_cache_dir: PathBuf, engine: ModelEngine) -> Self {
+        crate::silence_native_logs();
         Self {
             model_manager: ModelInstallManager::new(model_cache_dir),
             resolver: Arc::new(|_| None),
