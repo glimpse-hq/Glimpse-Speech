@@ -51,6 +51,11 @@ pub struct RemoteFile {
     pub path: String,
     pub size_bytes: Option<u64>,
     pub sha256: Option<String>,
+    /// Treat the download as a zip archive: verify it, unpack it into the model
+    /// directory, and expect `path` as the resulting directory. `size_bytes`
+    /// and `sha256` describe the archive, not the extracted contents.
+    #[serde(default)]
+    pub extract: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -194,6 +199,10 @@ impl ModelInstallManager {
         }
 
         for file in &spec.files {
+            // Archives are verified before extraction; the zip is gone afterwards.
+            if file.extract {
+                continue;
+            }
             let path = dir.join(&file.path);
             if let Some(expected_size) = file.size_bytes {
                 let actual_size = fs::metadata(&path)
@@ -237,9 +246,12 @@ impl ModelInstallManager {
             .await
             .with_context(|| format!("create model directory {}", dir.display()))?;
 
+        // A cancelled add-on download must not wipe an existing install.
+        let fresh_install = !spec.files.iter().any(|file| file_ready(&dir, file));
+
         for file in &spec.files {
             if let Err(err) = self.download_file(&spec.id, file, &dir, &options).await {
-                if err.downcast_ref::<DownloadCancelled>().is_some() {
+                if err.downcast_ref::<DownloadCancelled>().is_some() && fresh_install {
                     let _ = fs::remove_dir_all(&dir);
                 }
                 return Err(err);
@@ -289,8 +301,10 @@ impl ModelInstallManager {
             return Ok(());
         }
 
-        let replace_existing = target_path.exists();
-        let download_path = if replace_existing {
+        let replace_existing = !file.extract && target_path.exists();
+        let download_path = if file.extract {
+            target_dir.join(format!("{}.zip", file.path))
+        } else if replace_existing {
             replacement_download_path(&target_path)
         } else {
             target_path.clone()
@@ -408,7 +422,10 @@ impl ModelInstallManager {
                         }
                         output.flush().await?;
                         drop(output);
-                        if replace_existing {
+                        if file.extract {
+                            extract_archive(&download_path, &target_path, file)
+                                .with_context(|| format!("extract {}", file.path))?;
+                        } else if replace_existing {
                             replace_existing_file(&download_path, &target_path).with_context(
                                 || format!("replace model file {}", target_path.display()),
                             )?;
@@ -534,6 +551,9 @@ fn missing_files(dir: &Path, spec: &InstallSpec) -> Vec<String> {
 
 fn file_ready(dir: &Path, file: &RemoteFile) -> bool {
     let path = dir.join(&file.path);
+    if file.extract {
+        return path.is_dir();
+    }
     if !path.is_file() {
         return false;
     }
@@ -574,6 +594,84 @@ fn sibling_temp_path(path: &Path, purpose: &str) -> PathBuf {
         std::process::id(),
     ));
     replacement
+}
+
+fn extract_archive(zip_path: &Path, target_path: &Path, file: &RemoteFile) -> Result<()> {
+    let cleanup_zip = || {
+        let _ = fs::remove_file(zip_path);
+    };
+
+    if let Some(expected_size) = file.size_bytes {
+        let actual_size = fs::metadata(zip_path)?.len();
+        if actual_size != expected_size {
+            cleanup_zip();
+            return Err(anyhow!(
+                "{} archive has unexpected size: expected {expected_size}, got {actual_size}",
+                file.path
+            ));
+        }
+    }
+
+    if let Some(expected_sha256) = &file.sha256 {
+        let actual = sha256_file(zip_path)?;
+        if !actual.eq_ignore_ascii_case(expected_sha256) {
+            cleanup_zip();
+            return Err(anyhow!(
+                "{} archive has unexpected sha256: expected {expected_sha256}, got {actual}",
+                file.path
+            ));
+        }
+    }
+
+    // Extract into a staging directory and rename into place, so a crash can
+    // never leave a half-extracted directory that file_ready() accepts.
+    let staging = sibling_temp_path(target_path, "extract");
+    let result = (|| {
+        extract_zip(zip_path, &staging)?;
+        let staged = staging.join(&file.path);
+        if !staged.is_dir() {
+            return Err(anyhow!("archive did not contain {}", file.path));
+        }
+        if target_path.exists() {
+            fs::remove_dir_all(target_path)?;
+        }
+        fs::rename(&staged, target_path)?;
+        Ok(())
+    })();
+    cleanup_zip();
+    let _ = fs::remove_dir_all(&staging);
+
+    result
+}
+
+fn extract_zip(zip_path: &Path, target_dir: &Path) -> Result<()> {
+    let file = fs::File::open(zip_path)?;
+    let mut archive = zip::ZipArchive::new(io::BufReader::new(file))?;
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index)?;
+        // enclosed_name rejects entries that would escape the target directory.
+        let Some(relative) = entry.enclosed_name() else {
+            continue;
+        };
+        // Skip macOS resource-fork metadata bundled into upstream zips.
+        if relative
+            .components()
+            .next()
+            .is_some_and(|component| component.as_os_str() == "__MACOSX")
+        {
+            continue;
+        }
+        let out_path = target_dir.join(&relative);
+        if entry.is_dir() {
+            fs::create_dir_all(&out_path)?;
+        } else {
+            if let Some(parent) = out_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            io::copy(&mut entry, &mut fs::File::create(&out_path)?)?;
+        }
+    }
+    Ok(())
 }
 
 fn replace_existing_file(source: &Path, target: &Path) -> io::Result<()> {
@@ -719,6 +817,7 @@ mod tests {
                 path: artifact.to_string(),
                 size_bytes: size,
                 sha256: None,
+                extract: false,
             }],
         }
     }

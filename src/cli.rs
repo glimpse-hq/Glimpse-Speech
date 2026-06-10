@@ -363,6 +363,7 @@ async fn handle_models(
                     path: artifact,
                     size_bytes: size,
                     sha256,
+                    extract: false,
                 }],
             };
             let status = manager.install(&spec, Default::default()).await?;

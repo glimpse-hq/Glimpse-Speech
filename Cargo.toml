@@ -1,6 +1,6 @@
 [package]
 name = "glimpse-speech"
-version = "1.4.6"
+version = "1.4.7"
 edition = "2021"
 rust-version = "1.85"
 autoexamples = false
@@ -28,6 +28,7 @@ directories = { version = "6", optional = true }
 flacenc = { version = "0.5", default-features = false, optional = true }
 hound = "3.5.1"
 httpdate = "1"
+log = "0.4"
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -35,18 +36,22 @@ sha2 = "0.11"
 tokio = { version = "1", features = ["fs", "io-util", "net", "rt-multi-thread", "signal", "time"] }
 tokio-util = "0.7"
 tower-http = { version = "0.6", features = ["cors"], optional = true }
+zip = { version = "7.2.0", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
-[target.'cfg(target_os = "macos")'.dependencies]
-whisper-rs = { version = "0.16.0", features = ["metal"], optional = true }
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+whisper-rs = { version = "0.16.0", features = ["metal", "coreml", "log_backend"], optional = true }
+
+[target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
+whisper-rs = { version = "0.16.0", features = ["metal", "log_backend"], optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-whisper-rs = { version = "0.16.0", features = ["vulkan"], optional = true }
+whisper-rs = { version = "0.16.0", features = ["vulkan", "log_backend"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-whisper-rs = { version = "0.16.0", features = ["vulkan"], optional = true }
+whisper-rs = { version = "0.16.0", features = ["vulkan", "log_backend"], optional = true }
 
 [target.'cfg(not(all(target_os = "macos", target_arch = "x86_64")))'.dependencies]
 parakeet-rs = { version = "0.3.6", optional = true }

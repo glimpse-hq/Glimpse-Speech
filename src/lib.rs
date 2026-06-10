@@ -16,11 +16,59 @@ use std::path::Path;
 #[cfg(feature = "whisper")]
 pub(crate) fn silence_native_logs() {
     static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(whisper_rs::install_logging_hooks);
+    ONCE.call_once(|| {
+        native_log::install();
+        whisper_rs::install_logging_hooks();
+    });
 }
 
 #[cfg(not(feature = "whisper"))]
 pub(crate) fn silence_native_logs() {}
+
+#[cfg(feature = "whisper")]
+mod native_log {
+    use std::sync::Mutex;
+
+    static CORE_ML_LINES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    struct CoreMlCapture;
+
+    impl log::Log for CoreMlCapture {
+        fn enabled(&self, _: &log::Metadata) -> bool {
+            true
+        }
+
+        fn log(&self, record: &log::Record) {
+            let message = record.args().to_string();
+            if message.contains("Core ML") {
+                let mut lines = CORE_ML_LINES.lock().unwrap();
+                if lines.len() >= 64 {
+                    lines.remove(0);
+                }
+                lines.push(message);
+            }
+        }
+
+        fn flush(&self) {}
+    }
+
+    pub(crate) fn install() {
+        if log::set_logger(&CoreMlCapture).is_ok() {
+            log::set_max_level(log::LevelFilter::Info);
+        }
+    }
+
+    pub(crate) fn take_lines() -> Vec<String> {
+        std::mem::take(&mut *CORE_ML_LINES.lock().unwrap())
+    }
+}
+
+/// Drains captured whisper.cpp Core ML log lines (empty if another global
+/// logger is installed and capture is unavailable).
+#[cfg(feature = "whisper")]
+pub fn take_coreml_log() -> Vec<String> {
+    native_log::take_lines()
+}
 
 /// Raw output of a transcription engine: text plus optional segments.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
