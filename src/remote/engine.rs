@@ -77,8 +77,6 @@ impl RemoteEngine {
             .unwrap_or("recording.wav")
             .to_string();
 
-        // WAV recordings are losslessly re-encoded as FLAC (~2-4x smaller
-        // upload). If the endpoint rejects the request, retry with the WAV.
         let flac = if extension.as_deref() == Some("wav") {
             let path = audio_path.to_path_buf();
             tokio::task::spawn_blocking(move || encode_wav_as_flac(&path))
@@ -331,9 +329,6 @@ fn is_verbose_unsupported(err: &RemoteError) -> bool {
     })
 }
 
-/// Losslessly re-encodes a 16-bit PCM WAV as FLAC for upload. Returns `None`
-/// when the file isn't a readable 16-bit WAV or encoding fails, in which case
-/// the caller uploads the original file.
 fn encode_wav_as_flac(audio_path: &Path) -> Option<Vec<u8>> {
     use flacenc::bitsink::ByteSink;
     use flacenc::component::BitRepr;
@@ -361,8 +356,7 @@ fn encode_wav_as_flac(audio_path: &Path) -> Option<Vec<u8>> {
         spec.bits_per_sample as usize,
         spec.sample_rate as usize,
     );
-    let stream =
-        flacenc::encode_with_fixed_block_size(&config, source, config.block_size).ok()?;
+    let stream = flacenc::encode_with_fixed_block_size(&config, source, config.block_size).ok()?;
     let mut sink = ByteSink::new();
     stream.write(&mut sink).ok()?;
     Some(sink.into_inner())
