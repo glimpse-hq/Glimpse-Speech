@@ -17,7 +17,7 @@ nvidia = ["dep:parakeet-rs"]
 parakeet = ["nvidia"]
 all = ["whisper", "nvidia"]
 api = ["dep:axum", "dep:tower-http"]
-remote = ["reqwest/multipart"]
+remote = ["reqwest/multipart", "dep:flacenc"]
 cli = ["api", "dep:clap", "dep:directories"]
 
 [dependencies]
@@ -25,6 +25,7 @@ anyhow = "1"
 axum = { version = "0.8", features = ["multipart"], optional = true }
 clap = { version = "4.5", features = ["derive"], optional = true }
 directories = { version = "6", optional = true }
+flacenc = { version = "0.5", default-features = false, optional = true }
 hound = "3.5.1"
 httpdate = "1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }

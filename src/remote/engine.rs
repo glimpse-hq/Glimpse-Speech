@@ -76,6 +76,26 @@ impl RemoteEngine {
             .and_then(|name| name.to_str())
             .unwrap_or("recording.wav")
             .to_string();
+
+        // WAV recordings are losslessly re-encoded as FLAC (~2-4x smaller
+        // upload). If the endpoint rejects the request, retry with the WAV.
+        let flac = if extension.as_deref() == Some("wav") {
+            let path = audio_path.to_path_buf();
+            tokio::task::spawn_blocking(move || encode_wav_as_flac(&path))
+                .await
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+        let flac_file_name = format!(
+            "{}.flac",
+            audio_path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("recording")
+        );
+        let mut use_flac = flac.is_some();
         let api_key = self.config.api_key.trim();
         let language = params
             .language
@@ -86,17 +106,23 @@ impl RemoteEngine {
         let mut effective_format = plan.response_format;
         let mut granularities = plan.timestamp_granularities.clone();
         let body = loop {
-            let file = tokio::fs::File::open(audio_path).await.map_err(|err| {
-                transport_error(format!(
-                    "Failed to read recording at {}: {err}",
-                    audio_path.display()
-                ))
-            })?;
-            let stream = ReaderStream::new(file);
-            let file_part = multipart::Part::stream(reqwest::Body::wrap_stream(stream))
-                .file_name(file_name.clone())
-                .mime_str(mime_type)
-                .map_err(|err| transport_error(format!("Failed to prepare audio upload: {err}")))?;
+            let file_part = if let (true, Some(flac)) = (use_flac, flac.as_ref()) {
+                multipart::Part::bytes(flac.clone())
+                    .file_name(flac_file_name.clone())
+                    .mime_str("audio/flac")
+            } else {
+                let file = tokio::fs::File::open(audio_path).await.map_err(|err| {
+                    transport_error(format!(
+                        "Failed to read recording at {}: {err}",
+                        audio_path.display()
+                    ))
+                })?;
+                let stream = ReaderStream::new(file);
+                multipart::Part::stream(reqwest::Body::wrap_stream(stream))
+                    .file_name(file_name.clone())
+                    .mime_str(mime_type)
+            }
+            .map_err(|err| transport_error(format!("Failed to prepare audio upload: {err}")))?;
             let form = build_transcription_form(
                 &profile,
                 file_part,
@@ -130,6 +156,10 @@ impl RemoteEngine {
                 break body_text;
             }
             let err = parse_upstream_error(status, retry_after, &body_text);
+            if use_flac && err.kind == RemoteErrorKind::InvalidRequest {
+                use_flac = false;
+                continue;
+            }
             if profile.sends_response_format
                 && effective_format == ResponseFormat::VerboseJson
                 && is_verbose_unsupported(&err)
@@ -299,6 +329,43 @@ fn is_verbose_unsupported(err: &RemoteError) -> bool {
         let lowered = field.to_ascii_lowercase();
         needles.iter().any(|needle| lowered.contains(needle))
     })
+}
+
+/// Losslessly re-encodes a 16-bit PCM WAV as FLAC for upload. Returns `None`
+/// when the file isn't a readable 16-bit WAV or encoding fails, in which case
+/// the caller uploads the original file.
+fn encode_wav_as_flac(audio_path: &Path) -> Option<Vec<u8>> {
+    use flacenc::bitsink::ByteSink;
+    use flacenc::component::BitRepr;
+    use flacenc::error::Verify;
+
+    let mut reader = hound::WavReader::open(audio_path).ok()?;
+    let spec = reader.spec();
+    if spec.sample_format != hound::SampleFormat::Int || spec.bits_per_sample != 16 {
+        return None;
+    }
+
+    let samples: Vec<i32> = reader
+        .samples::<i16>()
+        .map(|sample| sample.map(i32::from))
+        .collect::<Result<_, _>>()
+        .ok()?;
+    if samples.is_empty() {
+        return None;
+    }
+
+    let config = flacenc::config::Encoder::default().into_verified().ok()?;
+    let source = flacenc::source::MemSource::from_samples(
+        &samples,
+        spec.channels as usize,
+        spec.bits_per_sample as usize,
+        spec.sample_rate as usize,
+    );
+    let stream =
+        flacenc::encode_with_fixed_block_size(&config, source, config.block_size).ok()?;
+    let mut sink = ByteSink::new();
+    stream.write(&mut sink).ok()?;
+    Some(sink.into_inner())
 }
 
 fn audio_mime_for_extension(extension: Option<&str>) -> &'static str {
