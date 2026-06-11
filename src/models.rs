@@ -696,9 +696,8 @@ fn verify_extracted_dir(dir: &Path, file: &RemoteFile) -> Result<()> {
     if !target.is_dir() {
         return Err(anyhow!("{} is missing", file.path));
     }
-    let Ok(data) = fs::read(extraction_manifest_path(&target)) else {
-        return Ok(());
-    };
+    let data = fs::read(extraction_manifest_path(&target))
+        .with_context(|| format!("read extraction manifest for {}", file.path))?;
     let entries: Vec<ExtractedEntry> = serde_json::from_slice(&data)
         .with_context(|| format!("parse extraction manifest for {}", file.path))?;
     for entry in &entries {
