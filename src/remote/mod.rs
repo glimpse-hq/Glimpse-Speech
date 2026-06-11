@@ -220,7 +220,6 @@ fn classify_upstream_error(
         404 => RemoteErrorKind::NotFound,
         408 | 429 => RemoteErrorKind::RateLimited,
         400 | 413 | 415 | 422 => RemoteErrorKind::InvalidRequest,
-        502 | 503 | 504 => RemoteErrorKind::UpstreamUnavailable,
         code if code >= 500 => RemoteErrorKind::UpstreamUnavailable,
         _ => RemoteErrorKind::Other,
     }

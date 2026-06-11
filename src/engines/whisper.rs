@@ -94,6 +94,7 @@ impl TranscriptionEngine for WhisperEngine {
 
         let context_params = WhisperContextParameters {
             use_gpu: params.use_gpu,
+            flash_attn: true,
             ..WhisperContextParameters::default()
         };
         let context = WhisperContext::new_with_params(model_path_str, context_params)?;
@@ -124,10 +125,8 @@ impl TranscriptionEngine for WhisperEngine {
         let whisper_params = params.unwrap_or_default();
         let language = normalize_whisper_language(whisper_params.language.as_deref())?;
 
-        let mut full_params = FullParams::new(SamplingStrategy::BeamSearch {
-            beam_size: 3,
-            patience: -1.0,
-        });
+        let mut full_params = FullParams::new(SamplingStrategy::Greedy { best_of: 5 });
+        full_params.set_no_context(true);
         full_params.set_language(language.as_deref());
         full_params.set_translate(whisper_params.translate);
         full_params.set_print_special(whisper_params.print_special);

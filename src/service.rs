@@ -110,6 +110,7 @@ enum EngineInstance {
 
 impl SpeechService {
     pub fn new(config: SpeechConfig) -> Self {
+        crate::silence_native_logs();
         Self {
             model_manager: ModelInstallManager::new(config.model_cache_dir),
             resolver: config.resolver,
@@ -119,6 +120,7 @@ impl SpeechService {
     }
 
     pub fn new_loose_with_engine(model_cache_dir: PathBuf, engine: ModelEngine) -> Self {
+        crate::silence_native_logs();
         Self {
             model_manager: ModelInstallManager::new(model_cache_dir),
             resolver: Arc::new(|_| None),
@@ -511,15 +513,17 @@ fn prepare_audio(audio: AudioInput) -> Result<PreparedAudio> {
             sample_rate,
         } => {
             let sample_count = samples.len();
-            let normalized: Vec<f32> = samples
-                .into_iter()
-                .map(|sample| sample as f32 / i16::MAX as f32)
-                .collect();
             if sample_rate == 16_000 {
+                let normalized = samples
+                    .into_iter()
+                    .map(|sample| sample as f32 / i16::MAX as f32)
+                    .collect();
                 (normalized, sample_rate, sample_count)
             } else {
+                // Normalize and resample in a single pass over one output
+                // buffer instead of materializing an intermediate f32 copy.
                 (
-                    resample_linear(&normalized, sample_rate.max(1), 16_000),
+                    resample_i16_to_f32(&samples, sample_rate.max(1), 16_000),
                     sample_rate,
                     sample_count,
                 )
@@ -559,12 +563,15 @@ fn audio_duration_ms(sample_count: usize, sample_rate: u32) -> u128 {
         not(all(target_os = "macos", target_arch = "x86_64"))
     )
 ))]
-fn resample_linear(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
+/// Normalizes i16 PCM to f32 and linearly resamples it in a single pass.
+fn resample_i16_to_f32(samples: &[i16], from_rate: u32, to_rate: u32) -> Vec<f32> {
+    const SCALE: f32 = 1.0 / i16::MAX as f32;
+
     if samples.is_empty() {
         return Vec::new();
     }
     if from_rate == 0 || to_rate == 0 || from_rate == to_rate {
-        return samples.to_vec();
+        return samples.iter().map(|s| *s as f32 * SCALE).collect();
     }
 
     let ratio = to_rate as f64 / from_rate as f64;
@@ -576,8 +583,8 @@ fn resample_linear(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
         let src_pos = idx as f64 / ratio;
         let base = src_pos.floor() as usize;
         let frac = (src_pos - base as f64) as f32;
-        let current = samples[base.min(last_index)];
-        let next = samples[(base + 1).min(last_index)];
+        let current = samples[base.min(last_index)] as f32 * SCALE;
+        let next = samples[(base + 1).min(last_index)] as f32 * SCALE;
         output.push(current + (next - current) * frac);
     }
 
