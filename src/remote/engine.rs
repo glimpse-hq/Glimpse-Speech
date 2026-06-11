@@ -1,4 +1,7 @@
-use std::{path::Path, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use reqwest::{header::RETRY_AFTER, multipart, Client};
 use serde::Deserialize;
@@ -79,7 +82,7 @@ impl RemoteEngine {
 
         let flac = if extension.as_deref() == Some("wav") {
             let path = audio_path.to_path_buf();
-            tokio::task::spawn_blocking(move || encode_wav_as_flac(&path))
+            tokio::task::spawn_blocking(move || encode_wav_to_flac_file(&path))
                 .await
                 .ok()
                 .flatten()
@@ -104,23 +107,25 @@ impl RemoteEngine {
         let mut effective_format = plan.response_format;
         let mut granularities = plan.timestamp_granularities.clone();
         let body = loop {
-            let file_part = if let (true, Some(flac)) = (use_flac, flac.as_ref()) {
-                multipart::Part::bytes(flac.clone())
-                    .file_name(flac_file_name.clone())
-                    .mime_str("audio/flac")
-            } else {
-                let file = tokio::fs::File::open(audio_path).await.map_err(|err| {
-                    transport_error(format!(
-                        "Failed to read recording at {}: {err}",
-                        audio_path.display()
-                    ))
+            let (upload_path, upload_name, upload_mime) =
+                if let (true, Some(flac)) = (use_flac, flac.as_ref()) {
+                    (flac.0.as_path(), &flac_file_name, "audio/flac")
+                } else {
+                    (audio_path, &file_name, mime_type)
+                };
+            let file = tokio::fs::File::open(upload_path).await.map_err(|err| {
+                transport_error(format!(
+                    "Failed to read recording at {}: {err}",
+                    upload_path.display()
+                ))
+            })?;
+            let stream = ReaderStream::new(file);
+            let file_part = multipart::Part::stream(reqwest::Body::wrap_stream(stream))
+                .file_name(upload_name.clone())
+                .mime_str(upload_mime)
+                .map_err(|err| {
+                    transport_error(format!("Failed to prepare audio upload: {err}"))
                 })?;
-                let stream = ReaderStream::new(file);
-                multipart::Part::stream(reqwest::Body::wrap_stream(stream))
-                    .file_name(file_name.clone())
-                    .mime_str(mime_type)
-            }
-            .map_err(|err| transport_error(format!("Failed to prepare audio upload: {err}")))?;
             let form = build_transcription_form(
                 &profile,
                 file_part,
@@ -154,10 +159,6 @@ impl RemoteEngine {
                 break body_text;
             }
             let err = parse_upstream_error(status, retry_after, &body_text);
-            if use_flac && err.kind == RemoteErrorKind::InvalidRequest {
-                use_flac = false;
-                continue;
-            }
             if profile.sends_response_format
                 && effective_format == ResponseFormat::VerboseJson
                 && is_verbose_unsupported(&err)
@@ -168,6 +169,10 @@ impl RemoteEngine {
                 } else {
                     granularities.clear();
                 }
+                continue;
+            }
+            if use_flac && is_flac_unsupported(&err) {
+                use_flac = false;
                 continue;
             }
             return Err(err);
@@ -329,37 +334,114 @@ fn is_verbose_unsupported(err: &RemoteError) -> bool {
     })
 }
 
-fn encode_wav_as_flac(audio_path: &Path) -> Option<Vec<u8>> {
+struct TempFlacFile(PathBuf);
+
+impl Drop for TempFlacFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+struct WavSampleSource {
+    reader: hound::WavReader<std::io::BufReader<std::fs::File>>,
+    channels: usize,
+    sample_rate: usize,
+    buffer: Vec<i32>,
+}
+
+impl flacenc::source::Source for WavSampleSource {
+    fn channels(&self) -> usize {
+        self.channels
+    }
+
+    fn bits_per_sample(&self) -> usize {
+        16
+    }
+
+    fn sample_rate(&self) -> usize {
+        self.sample_rate
+    }
+
+    fn read_samples<F: flacenc::source::Fill>(
+        &mut self,
+        block_size: usize,
+        dest: &mut F,
+    ) -> Result<usize, flacenc::error::SourceError> {
+        self.buffer.clear();
+        for sample in self.reader.samples::<i16>().take(block_size * self.channels) {
+            let sample = sample.map_err(flacenc::error::SourceError::from_io_error)?;
+            self.buffer.push(i32::from(sample));
+        }
+        dest.fill_interleaved(&self.buffer)?;
+        Ok(self.buffer.len() / self.channels)
+    }
+
+    fn len_hint(&self) -> Option<usize> {
+        Some(self.reader.duration() as usize)
+    }
+}
+
+fn encode_wav_to_flac_file(audio_path: &Path) -> Option<TempFlacFile> {
     use flacenc::bitsink::ByteSink;
     use flacenc::component::BitRepr;
     use flacenc::error::Verify;
 
-    let mut reader = hound::WavReader::open(audio_path).ok()?;
+    let reader = hound::WavReader::open(audio_path).ok()?;
     let spec = reader.spec();
-    if spec.sample_format != hound::SampleFormat::Int || spec.bits_per_sample != 16 {
-        return None;
-    }
-
-    let samples: Vec<i32> = reader
-        .samples::<i16>()
-        .map(|sample| sample.map(i32::from))
-        .collect::<Result<_, _>>()
-        .ok()?;
-    if samples.is_empty() {
+    if spec.sample_format != hound::SampleFormat::Int
+        || spec.bits_per_sample != 16
+        || reader.duration() == 0
+    {
         return None;
     }
 
     let config = flacenc::config::Encoder::default().into_verified().ok()?;
-    let source = flacenc::source::MemSource::from_samples(
-        &samples,
-        spec.channels as usize,
-        spec.bits_per_sample as usize,
-        spec.sample_rate as usize,
-    );
+    let source = WavSampleSource {
+        channels: spec.channels as usize,
+        sample_rate: spec.sample_rate as usize,
+        buffer: Vec::new(),
+        reader,
+    };
     let stream = flacenc::encode_with_fixed_block_size(&config, source, config.block_size).ok()?;
     let mut sink = ByteSink::new();
     stream.write(&mut sink).ok()?;
-    Some(sink.into_inner())
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let temp = TempFlacFile(std::env::temp_dir().join(format!(
+        "glimpse-speech-upload-{}-{nanos}.flac",
+        std::process::id(),
+    )));
+    std::fs::write(&temp.0, sink.as_slice()).ok()?;
+    Some(temp)
+}
+
+fn is_flac_unsupported(err: &RemoteError) -> bool {
+    if err.kind != RemoteErrorKind::InvalidRequest {
+        return false;
+    }
+    let needles = [
+        "flac",
+        "file format",
+        "audio format",
+        "unsupported format",
+        "invalid format",
+        "decod",
+        "corrupt",
+    ];
+    let haystack = [
+        err.message.as_str(),
+        err.param.as_deref().unwrap_or(""),
+        err.code.as_deref().unwrap_or(""),
+        err.error_type.as_deref().unwrap_or(""),
+    ];
+    err.param.as_deref() == Some("file")
+        || haystack.iter().any(|field| {
+            let lowered = field.to_ascii_lowercase();
+            needles.iter().any(|needle| lowered.contains(needle))
+        })
 }
 
 fn audio_mime_for_extension(extension: Option<&str>) -> &'static str {

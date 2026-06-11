@@ -16,10 +16,7 @@ use std::path::Path;
 #[cfg(feature = "whisper")]
 pub(crate) fn silence_native_logs() {
     static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        native_log::install();
-        whisper_rs::install_logging_hooks();
-    });
+    ONCE.call_once(native_log::install);
 }
 
 #[cfg(not(feature = "whisper"))]
@@ -27,34 +24,35 @@ pub(crate) fn silence_native_logs() {}
 
 #[cfg(feature = "whisper")]
 mod native_log {
+    use std::ffi::{c_char, c_void, CStr};
     use std::sync::Mutex;
+
+    use whisper_rs::whisper_rs_sys;
 
     static CORE_ML_LINES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
-    struct CoreMlCapture;
-
-    impl log::Log for CoreMlCapture {
-        fn enabled(&self, _: &log::Metadata) -> bool {
-            true
+    unsafe extern "C" fn capture(
+        _level: whisper_rs_sys::ggml_log_level,
+        text: *const c_char,
+        _user_data: *mut c_void,
+    ) {
+        if text.is_null() {
+            return;
         }
-
-        fn log(&self, record: &log::Record) {
-            let message = record.args().to_string();
-            if message.contains("Core ML") {
-                let mut lines = CORE_ML_LINES.lock().unwrap();
-                if lines.len() >= 64 {
-                    lines.remove(0);
-                }
-                lines.push(message);
+        let message = unsafe { CStr::from_ptr(text) }.to_string_lossy();
+        if message.contains("Core ML") {
+            let mut lines = CORE_ML_LINES.lock().unwrap();
+            if lines.len() >= 64 {
+                lines.remove(0);
             }
+            lines.push(message.trim().to_string());
         }
-
-        fn flush(&self) {}
     }
 
     pub(crate) fn install() {
-        if log::set_logger(&CoreMlCapture).is_ok() {
-            log::set_max_level(log::LevelFilter::Info);
+        unsafe {
+            whisper_rs_sys::whisper_log_set(Some(capture), std::ptr::null_mut());
+            whisper_rs_sys::ggml_log_set(Some(capture), std::ptr::null_mut());
         }
     }
 
@@ -63,8 +61,7 @@ mod native_log {
     }
 }
 
-/// Drains captured whisper.cpp Core ML log lines (empty if another global
-/// logger is installed and capture is unavailable).
+/// Drains captured whisper.cpp Core ML log lines.
 #[cfg(feature = "whisper")]
 pub fn take_coreml_log() -> Vec<String> {
     native_log::take_lines()

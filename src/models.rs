@@ -201,6 +201,7 @@ impl ModelInstallManager {
         for file in &spec.files {
             // Archives are verified before extraction; the zip is gone afterwards.
             if file.extract {
+                verify_extracted_dir(&dir, file)?;
                 continue;
             }
             let path = dir.join(&file.path);
@@ -426,7 +427,7 @@ impl ModelInstallManager {
                             extract_archive(&download_path, &target_path, file)
                                 .with_context(|| format!("extract {}", file.path))?;
                         } else if replace_existing {
-                            replace_existing_file(&download_path, &target_path).with_context(
+                            replace_existing_path(&download_path, &target_path).with_context(
                                 || format!("replace model file {}", target_path.display()),
                             )?;
                         }
@@ -552,7 +553,7 @@ fn missing_files(dir: &Path, spec: &InstallSpec) -> Vec<String> {
 fn file_ready(dir: &Path, file: &RemoteFile) -> bool {
     let path = dir.join(&file.path);
     if file.extract {
-        return path.is_dir();
+        return path.is_dir() && verify_extracted_dir(dir, file).is_ok();
     }
     if !path.is_file() {
         return false;
@@ -632,16 +633,89 @@ fn extract_archive(zip_path: &Path, target_path: &Path, file: &RemoteFile) -> Re
         if !staged.is_dir() {
             return Err(anyhow!("archive did not contain {}", file.path));
         }
-        if target_path.exists() {
-            fs::remove_dir_all(target_path)?;
-        }
-        fs::rename(&staged, target_path)?;
+        let manifest = collect_extraction_manifest(&staged)
+            .with_context(|| format!("index extracted contents of {}", file.path))?;
+        replace_existing_path(&staged, target_path)?;
+        fs::write(
+            extraction_manifest_path(target_path),
+            serde_json::to_vec(&manifest)?,
+        )
+        .with_context(|| format!("write extraction manifest for {}", file.path))?;
         Ok(())
     })();
     cleanup_zip();
     let _ = fs::remove_dir_all(&staging);
 
     result
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ExtractedEntry {
+    path: String,
+    size: u64,
+}
+
+fn extraction_manifest_path(target_path: &Path) -> PathBuf {
+    let name = target_path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    target_path.with_file_name(format!(".{name}.manifest.json"))
+}
+
+fn collect_extraction_manifest(root: &Path) -> io::Result<Vec<ExtractedEntry>> {
+    fn walk(root: &Path, dir: &Path, entries: &mut Vec<ExtractedEntry>) -> io::Result<()> {
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let metadata = entry.metadata()?;
+            if metadata.is_dir() {
+                walk(root, &entry.path(), entries)?;
+            } else {
+                let relative = entry
+                    .path()
+                    .strip_prefix(root)
+                    .map_err(io::Error::other)?
+                    .to_string_lossy()
+                    .into_owned();
+                entries.push(ExtractedEntry {
+                    path: relative,
+                    size: metadata.len(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    let mut entries = Vec::new();
+    walk(root, root, &mut entries)?;
+    Ok(entries)
+}
+
+fn verify_extracted_dir(dir: &Path, file: &RemoteFile) -> Result<()> {
+    let target = dir.join(&file.path);
+    if !target.is_dir() {
+        return Err(anyhow!("{} is missing", file.path));
+    }
+    let Ok(data) = fs::read(extraction_manifest_path(&target)) else {
+        return Ok(());
+    };
+    let entries: Vec<ExtractedEntry> = serde_json::from_slice(&data)
+        .with_context(|| format!("parse extraction manifest for {}", file.path))?;
+    for entry in &entries {
+        let size = fs::metadata(target.join(&entry.path))
+            .map(|metadata| metadata.len())
+            .map_err(|_| anyhow!("{} is missing {}", file.path, entry.path))?;
+        if size != entry.size {
+            return Err(anyhow!(
+                "{} has unexpected size for {}: expected {}, got {}",
+                file.path,
+                entry.path,
+                entry.size,
+                size
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn extract_zip(zip_path: &Path, target_dir: &Path) -> Result<()> {
@@ -674,7 +748,7 @@ fn extract_zip(zip_path: &Path, target_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn replace_existing_file(source: &Path, target: &Path) -> io::Result<()> {
+fn replace_existing_path(source: &Path, target: &Path) -> io::Result<()> {
     if !target.exists() {
         return fs::rename(source, target);
     }
@@ -683,7 +757,11 @@ fn replace_existing_file(source: &Path, target: &Path) -> io::Result<()> {
     fs::rename(target, &backup)?;
     match fs::rename(source, target) {
         Ok(()) => {
-            let _ = fs::remove_file(&backup);
+            let _ = if backup.is_dir() {
+                fs::remove_dir_all(&backup)
+            } else {
+                fs::remove_file(&backup)
+            };
             Ok(())
         }
         Err(rename_error) => {
@@ -890,7 +968,7 @@ mod tests {
     }
 
     #[test]
-    fn replace_existing_file_restores_target_on_failed_swap() {
+    fn replace_existing_path_restores_target_on_failed_swap() {
         let root =
             std::env::temp_dir().join(format!("glimpse-speech-replace-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
@@ -899,7 +977,7 @@ mod tests {
         let missing_source = root.join("download.bin");
         fs::write(&target, b"old").unwrap();
 
-        let result = replace_existing_file(&missing_source, &target);
+        let result = replace_existing_path(&missing_source, &target);
 
         assert!(result.is_err());
         assert_eq!(fs::read(&target).unwrap(), b"old");
