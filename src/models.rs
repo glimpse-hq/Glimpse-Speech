@@ -248,7 +248,7 @@ impl ModelInstallManager {
             .with_context(|| format!("create model directory {}", dir.display()))?;
 
         // A cancelled add-on download must not wipe an existing install.
-        let fresh_install = !spec.files.iter().any(|file| file_ready(&dir, file));
+        let fresh_install = !spec.files.iter().any(|file| dir.join(&file.path).exists());
 
         for file in &spec.files {
             if let Err(err) = self.download_file(&spec.id, file, &dir, &options).await {
