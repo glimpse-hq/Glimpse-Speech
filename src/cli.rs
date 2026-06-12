@@ -426,7 +426,7 @@ fn print_transcription_response(
 
     match response_format {
         "json" => println!("{}", serde_json::json!({ "text": response.text })),
-        "verbose_json" => println!("{}", verbose_json(&response)?),
+        "verbose_json" => println!("{}", verbose_json(response)?),
         "text" => println!("{}", response.text),
         "srt" => print!("{}", format_srt(&response)),
         "vtt" => print!("{}", format_vtt(&response)),
@@ -435,35 +435,13 @@ fn print_transcription_response(
     Ok(())
 }
 
-use crate::api::{caption_segments, format_srt, format_vtt};
+use crate::api::{format_srt, format_vtt, verbose_response};
 
-fn verbose_json(response: &Transcription) -> anyhow::Result<String> {
-    let segments = caption_segments(response)
-        .into_iter()
-        .enumerate()
-        .map(|(id, segment)| {
-            serde_json::json!({
-                "id": id,
-                "seek": 0,
-                "start": segment.start,
-                "end": segment.end,
-                "text": segment.text,
-                "tokens": [],
-                "temperature": 0.0,
-                "avg_logprob": 0.0,
-                "compression_ratio": 0.0,
-                "no_speech_prob": 0.0
-            })
-        })
-        .collect::<Vec<_>>();
-
-    Ok(serde_json::to_string_pretty(&serde_json::json!({
-        "task": "transcribe",
-        "language": response.language,
-        "duration": response.duration_ms as f32 / 1000.0,
-        "text": response.text,
-        "segments": segments
-    }))?)
+fn verbose_json(response: Transcription) -> anyhow::Result<String> {
+    Ok(serde_json::to_string_pretty(&verbose_response(
+        response,
+        &[],
+    ))?)
 }
 
 #[cfg(test)]
@@ -482,7 +460,7 @@ mod tests {
         };
 
         let json: serde_json::Value =
-            serde_json::from_str(&verbose_json(&response).unwrap()).unwrap();
+            serde_json::from_str(&verbose_json(response).unwrap()).unwrap();
         assert_eq!(json["text"], "hello world");
         assert_eq!(json["segments"][0]["text"], "hello world");
         assert_eq!(json["segments"][0]["start"], 0.0);

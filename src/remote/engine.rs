@@ -318,17 +318,22 @@ fn upstream_segment_text(item: &UpstreamSegment) -> String {
 }
 
 fn is_verbose_unsupported(err: &RemoteError) -> bool {
-    if err.kind != RemoteErrorKind::InvalidRequest {
-        return false;
-    }
-    let needles = ["verbose_json", "response_format", "timestamp_granularit"];
-    let haystack = [
+    err.kind == RemoteErrorKind::InvalidRequest
+        && error_mentions(
+            err,
+            &["verbose_json", "response_format", "timestamp_granularit"],
+        )
+}
+
+fn error_mentions(err: &RemoteError, needles: &[&str]) -> bool {
+    [
         err.message.as_str(),
         err.param.as_deref().unwrap_or(""),
         err.code.as_deref().unwrap_or(""),
         err.error_type.as_deref().unwrap_or(""),
-    ];
-    haystack.iter().any(|field| {
+    ]
+    .iter()
+    .any(|field| {
         let lowered = field.to_ascii_lowercase();
         needles.iter().any(|needle| lowered.contains(needle))
     })
@@ -422,26 +427,19 @@ fn is_flac_unsupported(err: &RemoteError) -> bool {
     if err.kind != RemoteErrorKind::InvalidRequest {
         return false;
     }
-    let needles = [
-        "flac",
-        "file format",
-        "audio format",
-        "unsupported format",
-        "invalid format",
-        "decod",
-        "corrupt",
-    ];
-    let haystack = [
-        err.message.as_str(),
-        err.param.as_deref().unwrap_or(""),
-        err.code.as_deref().unwrap_or(""),
-        err.error_type.as_deref().unwrap_or(""),
-    ];
     err.param.as_deref() == Some("file")
-        || haystack.iter().any(|field| {
-            let lowered = field.to_ascii_lowercase();
-            needles.iter().any(|needle| lowered.contains(needle))
-        })
+        || error_mentions(
+            err,
+            &[
+                "flac",
+                "file format",
+                "audio format",
+                "unsupported format",
+                "invalid format",
+                "decod",
+                "corrupt",
+            ],
+        )
 }
 
 fn audio_mime_for_extension(extension: Option<&str>) -> &'static str {

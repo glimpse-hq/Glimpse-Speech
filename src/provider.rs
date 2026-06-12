@@ -154,12 +154,7 @@ impl RemoteUpstream {
             AudioInput::WavPath(path) => path.clone(),
             _ => {
                 return match &self.fallback {
-                    Some(fallback) => match local_fallback_request(fallback, request) {
-                        Some(request) => Box::pin(fallback.transcribe(request)).await,
-                        None => Err(TranscribeError::Local(anyhow!(
-                            "No local transcription model is installed for fallback"
-                        ))),
-                    },
+                    Some(fallback) => transcribe_via_fallback(fallback, request).await,
                     None => Err(TranscribeError::Remote(crate::remote::config_error(
                         "Remote provider requires an audio file upload",
                     ))),
@@ -200,15 +195,23 @@ impl RemoteUpstream {
                     "Remote speech temporarily unavailable, falling back to local: {}",
                     err.user_message()
                 );
-                match local_fallback_request(fallback, request) {
-                    Some(request) => Box::pin(fallback.transcribe(request)).await,
-                    None => Err(TranscribeError::Local(anyhow!(
-                        "No local transcription model is installed for fallback"
-                    ))),
-                }
+                transcribe_via_fallback(fallback, request).await
             }
             Err(err) => Err(TranscribeError::Remote(err)),
         }
+    }
+}
+
+#[cfg(feature = "remote")]
+async fn transcribe_via_fallback(
+    fallback: &SpeechProvider,
+    request: TranscribeRequest,
+) -> Result<Transcription, TranscribeError> {
+    match local_fallback_request(fallback, request) {
+        Some(request) => Box::pin(fallback.transcribe(request)).await,
+        None => Err(TranscribeError::Local(anyhow!(
+            "No local transcription model is installed for fallback"
+        ))),
     }
 }
 
@@ -220,11 +223,6 @@ fn local_fallback_request(
     let SpeechProvider::Local(service) = fallback else {
         return None;
     };
-    request.model_id = installed_model_id(service, &request.model_id)?;
+    request.model_id = service.resolve(&request.model_id).ok()?.id;
     Some(request)
-}
-
-#[cfg(feature = "remote")]
-fn installed_model_id(service: &SpeechService, preferred: &str) -> Option<String> {
-    service.resolve(preferred).ok().map(|model| model.id)
 }

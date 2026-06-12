@@ -159,7 +159,7 @@ struct JsonTranscriptionResponse {
 }
 
 #[derive(Debug, Serialize)]
-struct VerboseTranscriptionResponse {
+pub(crate) struct VerboseTranscriptionResponse {
     task: &'static str,
     language: Option<String>,
     duration: f32,
@@ -526,7 +526,7 @@ fn format_transcription_response(
     }
 }
 
-fn verbose_response(
+pub(crate) fn verbose_response(
     response: Transcription,
     timestamp_granularities: &[TimestampGranularity],
 ) -> VerboseTranscriptionResponse {
