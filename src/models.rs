@@ -1202,6 +1202,32 @@ mod tests {
     }
 
     #[test]
+    fn extract_zip_unpacks_and_skips_macosx_metadata() {
+        let root =
+            std::env::temp_dir().join(format!("glimpse-speech-extract-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let zip_path = root.join("model.zip");
+
+        let mut writer = zip::ZipWriter::new(fs::File::create(&zip_path).unwrap());
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        writer.start_file("model/weights.bin", options).unwrap();
+        io::Write::write_all(&mut writer, b"weights").unwrap();
+        writer.start_file("__MACOSX/junk", options).unwrap();
+        io::Write::write_all(&mut writer, b"junk").unwrap();
+        writer.finish().unwrap();
+
+        let out = root.join("out");
+        extract_zip(&zip_path, &out).unwrap();
+
+        assert_eq!(fs::read(out.join("model/weights.bin")).unwrap(), b"weights");
+        assert!(!out.join("__MACOSX").exists());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn sha256_file_hashes_content() {
         let root =
             std::env::temp_dir().join(format!("glimpse-speech-sha256-{}", std::process::id()));
