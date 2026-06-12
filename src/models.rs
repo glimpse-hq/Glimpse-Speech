@@ -17,6 +17,8 @@ use tokio_util::sync::CancellationToken;
 const MAX_STREAM_RETRIES: usize = 4;
 const DOWNLOAD_REQUEST_TIMEOUT: Duration = Duration::from_secs(60 * 60 * 24);
 const RETRY_BACKOFF_BASE_MS: u64 = 300;
+const WRITE_BUFFER_BYTES: usize = 1024 * 1024;
+const PROGRESS_EMIT_STEP_BYTES: u64 = 1024 * 1024;
 
 static MODEL_DOWNLOAD_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -235,13 +237,25 @@ impl ModelInstallManager {
             return Ok(status);
         }
 
-        for file in &spec.files {
-            if let Err(err) = verify_file(&dir, file) {
-                // Drop only the corrupt artifact so a retry redownloads just
-                // that file instead of wiping sibling files already installed.
-                remove_file_artifacts(&dir, file);
-                return Err(err);
+        // Hashing multi-GB files must not stall the async runtime.
+        let files = spec.files.clone();
+        let verify_dir = dir.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            for (index, file) in files.iter().enumerate() {
+                if let Err(err) = verify_file(&verify_dir, file) {
+                    return Err((index, err));
+                }
             }
+            Ok(())
+        })
+        .await
+        .map_err(|err| anyhow!("verification task failed: {err}"))?;
+
+        if let Err((index, err)) = outcome {
+            // Drop only the corrupt artifact so a retry redownloads just
+            // that file instead of wiping sibling files already installed.
+            remove_file_artifacts(&dir, &spec.files[index]);
+            return Err(err);
         }
 
         Ok(status)
@@ -368,7 +382,7 @@ impl ModelInstallManager {
                 };
             }
 
-            let mut output = if downloaded > 0 {
+            let output = if downloaded > 0 {
                 tokio::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
@@ -380,6 +394,10 @@ impl ModelInstallManager {
                     .await
                     .with_context(|| format!("create file {}", download_path.display()))?
             };
+            let mut output = tokio::io::BufWriter::with_capacity(WRITE_BUFFER_BYTES, output);
+
+            emit_progress(model_id, &file.path, downloaded, total_size, options);
+            let mut last_emitted = downloaded;
 
             loop {
                 if is_cancelled(options) {
@@ -392,7 +410,12 @@ impl ModelInstallManager {
                     Ok(Some(chunk)) => {
                         output.write_all(&chunk).await?;
                         downloaded += chunk.len() as u64;
-                        emit_progress(model_id, &file.path, downloaded, total_size, options);
+                        if downloaded.saturating_sub(last_emitted) >= PROGRESS_EMIT_STEP_BYTES
+                            || (total_size > 0 && downloaded >= total_size)
+                        {
+                            emit_progress(model_id, &file.path, downloaded, total_size, options);
+                            last_emitted = downloaded;
+                        }
                     }
                     Ok(None) => {
                         if total_size > 0 && downloaded < total_size {
@@ -404,6 +427,12 @@ impl ModelInstallManager {
                                 ));
                             }
                             wait_before_retry(retries).await;
+                            // Resume offsets must match bytes actually on disk,
+                            // not bytes accepted into the write buffer.
+                            let _ = output.flush().await;
+                            downloaded = fs::metadata(&download_path)
+                                .map(|metadata| metadata.len())
+                                .unwrap_or(0);
                             break;
                         }
                         output.flush().await?;
@@ -428,6 +457,10 @@ impl ModelInstallManager {
                             .context(err));
                         }
                         wait_before_retry(retries).await;
+                        let _ = output.flush().await;
+                        downloaded = fs::metadata(&download_path)
+                            .map(|metadata| metadata.len())
+                            .unwrap_or(0);
                         break;
                     }
                 }
@@ -826,7 +859,7 @@ fn calculate_dir_size(dir: &Path) -> io::Result<u64> {
 fn sha256_file(path: &Path) -> io::Result<String> {
     let mut file = fs::File::open(path)?;
     let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 1024 * 1024];
+    let mut buffer = vec![0u8; 1024 * 1024];
 
     loop {
         let read = file.read(&mut buffer)?;

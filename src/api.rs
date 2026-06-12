@@ -689,7 +689,7 @@ async fn transcribe_request_from_multipart(
     let mut stream = false;
     let mut uploaded_file: Option<TempUpload> = None;
 
-    while let Some(field) = multipart
+    while let Some(mut field) = multipart
         .next_field()
         .await
         .map_err(|err| map_error(anyhow!(err.to_string())))?
@@ -703,11 +703,7 @@ async fn transcribe_request_from_multipart(
                 let extension = field
                     .file_name()
                     .and_then(|name| PathBuf::from(name).extension().map(|ext| ext.to_owned()));
-                let bytes = field
-                    .bytes()
-                    .await
-                    .map_err(|err| map_error(anyhow!(err.to_string())))?;
-                uploaded_file = Some(write_temp_audio(extension.as_deref(), &bytes).await?);
+                uploaded_file = Some(write_temp_audio(extension.as_deref(), &mut field).await?);
             }
             "model" => model = Some(field_text(field).await?),
             "language" => {
@@ -855,9 +851,11 @@ fn typed_error_body(message: impl Into<String>, error_type: &'static str) -> Err
     }
 }
 
+/// Streams the multipart field to a unique temp file without buffering the
+/// whole upload in memory.
 async fn write_temp_audio(
     extension: Option<&OsStr>,
-    bytes: &[u8],
+    field: &mut axum::extract::multipart::Field<'_>,
 ) -> Result<TempUpload, (StatusCode, Json<ErrorBody>)> {
     for _ in 0..16 {
         let path = temp_audio_path(extension);
@@ -867,7 +865,7 @@ async fn write_temp_audio(
             .open(&path)
             .await;
 
-        let mut file = match file {
+        let file = match file {
             Ok(file) => file,
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(err) => {
@@ -877,11 +875,25 @@ async fn write_temp_audio(
             }
         };
 
-        file.write_all(bytes)
+        let upload = TempUpload::new(path);
+        let mut writer = tokio::io::BufWriter::new(file);
+        while let Some(chunk) = field
+            .chunk()
             .await
-            .with_context(|| format!("write uploaded audio to {}", path.display()))
+            .map_err(|err| map_error(anyhow!(err.to_string())))?
+        {
+            writer
+                .write_all(&chunk)
+                .await
+                .with_context(|| format!("write uploaded audio to {}", upload.path().display()))
+                .map_err(map_server_error)?;
+        }
+        writer
+            .flush()
+            .await
+            .with_context(|| format!("write uploaded audio to {}", upload.path().display()))
             .map_err(map_server_error)?;
-        return Ok(TempUpload::new(path));
+        return Ok(upload);
     }
 
     Err(map_server_error(anyhow!(

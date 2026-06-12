@@ -37,12 +37,12 @@ pub fn read_wav_samples(wav_path: &Path) -> Result<Vec<f32>, Box<dyn std::error:
         return Err(format!("Expected Int sample format, found {:?}", spec.sample_format).into());
     }
 
-    let samples: Result<Vec<f32>, _> = reader
-        .samples::<i16>()
-        .map(|sample| sample.map(|s| s as f32 / PCM16_SCALE))
-        .collect();
+    let mut samples = Vec::with_capacity(reader.len() as usize);
+    for sample in reader.samples::<i16>() {
+        samples.push(sample? as f32 / PCM16_SCALE);
+    }
 
-    Ok(samples?)
+    Ok(samples)
 }
 
 pub fn read_audio_samples(path: &Path) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
