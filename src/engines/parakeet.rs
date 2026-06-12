@@ -191,6 +191,7 @@ fn map_result(
     TranscriptionResult {
         text: text.trim().to_string(),
         segments,
+        words: None,
         language: None,
     }
 }

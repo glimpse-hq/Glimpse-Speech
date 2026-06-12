@@ -31,6 +31,7 @@ pub struct WhisperInferenceParams {
     pub no_speech_thold: f32,
     pub dictionary: Vec<String>,
     pub initial_prompt: Option<String>,
+    pub word_timestamps: bool,
 }
 
 impl Default for WhisperInferenceParams {
@@ -47,6 +48,7 @@ impl Default for WhisperInferenceParams {
             no_speech_thold: 0.2,
             dictionary: Vec::new(),
             initial_prompt: None,
+            word_timestamps: false,
         }
     }
 }
@@ -139,6 +141,7 @@ impl TranscriptionEngine for WhisperEngine {
         full_params.set_suppress_blank(whisper_params.suppress_blank);
         full_params.set_suppress_nst(whisper_params.suppress_non_speech_tokens);
         full_params.set_no_speech_thold(whisper_params.no_speech_thold);
+        full_params.set_token_timestamps(whisper_params.word_timestamps);
 
         let initial_prompt = whisper_params
             .initial_prompt
@@ -151,6 +154,8 @@ impl TranscriptionEngine for WhisperEngine {
 
         state.full(full_params, &samples)?;
 
+        let eot_token = self.context.as_ref().map(|context| context.token_eot());
+        let mut words = whisper_params.word_timestamps.then(Vec::new);
         let num_segments = state.full_n_segments();
         let mut segments = Vec::new();
         let mut full_text = String::new();
@@ -168,6 +173,9 @@ impl TranscriptionEngine for WhisperEngine {
             let start = segment.start_timestamp() as f32 / 100.0;
             let end = segment.end_timestamp() as f32 / 100.0;
 
+            if let (Some(words), Some(eot_token)) = (words.as_mut(), eot_token) {
+                append_segment_words(&segment, eot_token, words);
+            }
             full_text.push_str(&text);
             segments.push(TranscriptionSegment { start, end, text });
         }
@@ -175,8 +183,43 @@ impl TranscriptionEngine for WhisperEngine {
         Ok(TranscriptionResult {
             text: full_text.trim().to_string(),
             segments: Some(segments),
+            words: words.filter(|words| !words.is_empty()),
             language: whisper_rs::get_lang_str(state.full_lang_id_from_state()).map(str::to_string),
         })
+    }
+}
+
+fn append_segment_words(
+    segment: &whisper_rs::WhisperSegment<'_>,
+    eot_token: whisper_rs::WhisperTokenId,
+    words: &mut Vec<TranscriptionSegment>,
+) {
+    for index in 0..segment.n_tokens() {
+        let Some(token) = segment.get_token(index) else {
+            continue;
+        };
+        if token.token_id() >= eot_token {
+            continue;
+        }
+        let Ok(piece) = token.to_str_lossy() else {
+            continue;
+        };
+        if piece.trim().is_empty() {
+            continue;
+        }
+        let data = token.token_data();
+        let end = data.t1 as f32 / 100.0;
+        match words.last_mut() {
+            Some(last) if !piece.starts_with([' ', '\n']) => {
+                last.text.push_str(&piece);
+                last.end = end;
+            }
+            _ => words.push(TranscriptionSegment {
+                start: data.t0 as f32 / 100.0,
+                end,
+                text: piece.trim_start().to_string(),
+            }),
+        }
     }
 }
 

@@ -201,7 +201,7 @@ impl ModelInstallManager {
         }
 
         for file in &spec.files {
-            verify_file(&dir, file)?;
+            verify_file(&dir, file, true)?;
         }
 
         Ok(status)
@@ -221,12 +221,16 @@ impl ModelInstallManager {
         // A cancelled add-on download must not wipe an existing install.
         let fresh_install = !spec.files.iter().any(|file| dir.join(&file.path).exists());
 
+        let mut stream_verified = Vec::with_capacity(spec.files.len());
         for file in &spec.files {
-            if let Err(err) = self.download_file(&spec.id, file, &dir, &options).await {
-                if err.downcast_ref::<DownloadCancelled>().is_some() && fresh_install {
-                    let _ = fs::remove_dir_all(&dir);
+            match self.download_file(&spec.id, file, &dir, &options).await {
+                Ok(verified) => stream_verified.push(verified),
+                Err(err) => {
+                    if err.downcast_ref::<DownloadCancelled>().is_some() && fresh_install {
+                        let _ = fs::remove_dir_all(&dir);
+                    }
+                    return Err(err);
                 }
-                return Err(err);
             }
         }
 
@@ -242,7 +246,7 @@ impl ModelInstallManager {
         let verify_dir = dir.clone();
         let outcome = tokio::task::spawn_blocking(move || {
             for (index, file) in files.iter().enumerate() {
-                if let Err(err) = verify_file(&verify_dir, file) {
+                if let Err(err) = verify_file(&verify_dir, file, !stream_verified[index]) {
                     return Err((index, err));
                 }
             }
@@ -283,14 +287,14 @@ impl ModelInstallManager {
         file: &RemoteFile,
         target_dir: &Path,
         options: &InstallOptions<'_>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let target_path = target_dir.join(&file.path);
         if let Some(parent) = target_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
 
         if file_ready(target_dir, file) {
-            return Ok(());
+            return Ok(false);
         }
 
         let replace_existing = !file.extract && target_path.exists();
@@ -395,6 +399,7 @@ impl ModelInstallManager {
                     .with_context(|| format!("create file {}", download_path.display()))?
             };
             let mut output = tokio::io::BufWriter::with_capacity(WRITE_BUFFER_BYTES, output);
+            let mut hasher = (downloaded == 0 && file.sha256.is_some()).then(Sha256::new);
 
             emit_progress(model_id, &file.path, downloaded, total_size, options);
             let mut last_emitted = downloaded;
@@ -409,6 +414,9 @@ impl ModelInstallManager {
                 match response.chunk().await {
                     Ok(Some(chunk)) => {
                         output.write_all(&chunk).await?;
+                        if let Some(hasher) = hasher.as_mut() {
+                            hasher.update(&chunk);
+                        }
                         downloaded += chunk.len() as u64;
                         if downloaded.saturating_sub(last_emitted) >= PROGRESS_EMIT_STEP_BYTES
                             || (total_size > 0 && downloaded >= total_size)
@@ -437,15 +445,31 @@ impl ModelInstallManager {
                         }
                         output.flush().await?;
                         drop(output);
+                        let sha_verified = match (hasher, &file.sha256) {
+                            (Some(hasher), Some(expected)) => {
+                                let actual = hex_encode(&hasher.finalize());
+                                if !actual.eq_ignore_ascii_case(expected) {
+                                    let _ = fs::remove_file(&download_path);
+                                    return Err(anyhow!(
+                                        "{} has unexpected sha256: expected {}, got {}",
+                                        file.path,
+                                        expected,
+                                        actual
+                                    ));
+                                }
+                                true
+                            }
+                            _ => false,
+                        };
                         if file.extract {
-                            extract_archive(&download_path, &target_path, file)
+                            extract_archive(&download_path, &target_path, file, sha_verified)
                                 .with_context(|| format!("extract {}", file.path))?;
                         } else if replace_existing {
                             replace_existing_path(&download_path, &target_path).with_context(
                                 || format!("replace model file {}", target_path.display()),
                             )?;
                         }
-                        return Ok(());
+                        return Ok(sha_verified);
                     }
                     Err(err) => {
                         if !can_retry(&mut retries) {
@@ -615,7 +639,12 @@ fn sibling_temp_path(path: &Path, purpose: &str) -> PathBuf {
     replacement
 }
 
-fn extract_archive(zip_path: &Path, target_path: &Path, file: &RemoteFile) -> Result<()> {
+fn extract_archive(
+    zip_path: &Path,
+    target_path: &Path,
+    file: &RemoteFile,
+    sha_verified: bool,
+) -> Result<()> {
     let cleanup_zip = || {
         let _ = fs::remove_file(zip_path);
     };
@@ -631,14 +660,16 @@ fn extract_archive(zip_path: &Path, target_path: &Path, file: &RemoteFile) -> Re
         }
     }
 
-    if let Some(expected_sha256) = &file.sha256 {
-        let actual = sha256_file(zip_path)?;
-        if !actual.eq_ignore_ascii_case(expected_sha256) {
-            cleanup_zip();
-            return Err(anyhow!(
-                "{} archive has unexpected sha256: expected {expected_sha256}, got {actual}",
-                file.path
-            ));
+    if !sha_verified {
+        if let Some(expected_sha256) = &file.sha256 {
+            let actual = sha256_file(zip_path)?;
+            if !actual.eq_ignore_ascii_case(expected_sha256) {
+                cleanup_zip();
+                return Err(anyhow!(
+                    "{} archive has unexpected sha256: expected {expected_sha256}, got {actual}",
+                    file.path
+                ));
+            }
         }
     }
 
@@ -709,7 +740,7 @@ fn collect_extraction_manifest(root: &Path) -> io::Result<Vec<ExtractedEntry>> {
     Ok(entries)
 }
 
-fn verify_file(dir: &Path, file: &RemoteFile) -> Result<()> {
+fn verify_file(dir: &Path, file: &RemoteFile, check_sha: bool) -> Result<()> {
     // Archives are verified before extraction; the zip is gone afterwards.
     if file.extract {
         return verify_extracted_dir(dir, file);
@@ -730,7 +761,7 @@ fn verify_file(dir: &Path, file: &RemoteFile) -> Result<()> {
         }
     }
 
-    if let Some(expected_sha256) = &file.sha256 {
+    if let Some(expected_sha256) = check_sha.then_some(file.sha256.as_ref()).flatten() {
         let actual = sha256_file(&path).with_context(|| format!("checksum {}", path.display()))?;
         if !actual.eq_ignore_ascii_case(expected_sha256) {
             return Err(anyhow!(

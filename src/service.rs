@@ -176,7 +176,7 @@ impl SpeechService {
         Ok(Transcription {
             text: transcription.result.text,
             segments: transcription.result.segments,
-            words: None,
+            words: transcription.result.words,
             model_id: resolved_id,
             language: transcription.result.language.or(requested_language),
             duration_ms: transcription.audio_duration_ms,
@@ -410,6 +410,10 @@ fn transcribe_with_engine(
                 language: _request.language,
                 initial_prompt: combined_prompt(_request.prompt, &_request.dictionary),
                 print_timestamps: _request.timestamps || _request.timestamp_granularity.is_some(),
+                word_timestamps: matches!(
+                    _request.timestamp_granularity,
+                    Some(TimestampGranularity::Word)
+                ),
                 ..Default::default()
             });
             transcribe_audio(engine, _request.audio, params)
