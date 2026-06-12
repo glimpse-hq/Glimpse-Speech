@@ -37,6 +37,11 @@ tokio-util = "0.7"
 tower-http = { version = "0.6", features = ["cors"], optional = true }
 zip = { version = "7.2.0", default-features = false, features = ["deflate"] }
 
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
