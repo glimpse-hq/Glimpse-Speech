@@ -1,7 +1,4 @@
-use std::{
-    borrow::Cow,
-    path::{Path, PathBuf},
-};
+use std::{borrow::Cow, path::Path};
 
 use parakeet_rs::{Nemotron, NemotronMode};
 
@@ -18,23 +15,14 @@ pub struct NemotronInferenceParams {
     pub language: Option<String>,
 }
 
+#[derive(Default)]
 pub struct NemotronEngine {
-    loaded_model_path: Option<PathBuf>,
     runtime: Option<Nemotron>,
-}
-
-impl Default for NemotronEngine {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl NemotronEngine {
     pub fn new() -> Self {
-        Self {
-            loaded_model_path: None,
-            runtime: None,
-        }
+        Self::default()
     }
 
     fn runtime_mut(&mut self) -> Result<&mut Nemotron, Box<dyn std::error::Error>> {
@@ -67,11 +55,6 @@ impl NemotronEngine {
             runtime.reset();
         }
     }
-
-    /// Returns true if this engine supports streaming transcription.
-    pub fn supports_streaming(&self) -> bool {
-        true
-    }
 }
 
 impl Drop for NemotronEngine {
@@ -91,13 +74,11 @@ impl TranscriptionEngine for NemotronEngine {
     ) -> Result<(), Box<dyn std::error::Error>> {
         validate_model_path(model_path)?;
         let runtime = Nemotron::from_pretrained(model_path, None).map_err(nemotron_error)?;
-        self.loaded_model_path = Some(model_path.to_path_buf());
         self.runtime = Some(runtime);
         Ok(())
     }
 
     fn unload_model(&mut self) {
-        self.loaded_model_path = None;
         self.runtime = None;
     }
 
@@ -225,15 +206,4 @@ const NEMOTRON_LANGUAGE_CODES: &[&str] = &[
 
 fn io_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
     std::io::Error::other(message.into()).into()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::NemotronModelParams;
-
-    #[test]
-    fn default_params() {
-        let params = NemotronModelParams;
-        assert_eq!(params, NemotronModelParams);
-    }
 }

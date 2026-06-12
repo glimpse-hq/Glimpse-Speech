@@ -419,6 +419,14 @@ impl ModelInstallManager {
                     }
                     Ok(None) => {
                         if total_size > 0 && downloaded < total_size {
+                            if !can_retry(&mut retries) {
+                                let _ = fs::remove_file(&download_path);
+                                return Err(anyhow!(
+                                    "Connection closed early while downloading {}",
+                                    file.path
+                                ));
+                            }
+                            wait_before_retry(retries).await;
                             break;
                         }
                         output.flush().await?;

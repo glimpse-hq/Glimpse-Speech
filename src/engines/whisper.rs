@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
@@ -51,25 +51,15 @@ impl Default for WhisperInferenceParams {
     }
 }
 
+#[derive(Default)]
 pub struct WhisperEngine {
-    loaded_model_path: Option<PathBuf>,
     state: Option<whisper_rs::WhisperState>,
     context: Option<whisper_rs::WhisperContext>,
 }
 
-impl Default for WhisperEngine {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl WhisperEngine {
     pub fn new() -> Self {
-        Self {
-            loaded_model_path: None,
-            state: None,
-            context: None,
-        }
+        Self::default()
     }
 }
 
@@ -102,12 +92,10 @@ impl TranscriptionEngine for WhisperEngine {
 
         self.context = Some(context);
         self.state = Some(state);
-        self.loaded_model_path = Some(model_path.to_path_buf());
         Ok(())
     }
 
     fn unload_model(&mut self) {
-        self.loaded_model_path = None;
         self.state = None;
         self.context = None;
     }
@@ -165,12 +153,8 @@ impl TranscriptionEngine for WhisperEngine {
             let start = segment.start_timestamp() as f32 / 100.0;
             let end = segment.end_timestamp() as f32 / 100.0;
 
-            segments.push(TranscriptionSegment {
-                start,
-                end,
-                text: text.clone(),
-            });
             full_text.push_str(&text);
+            segments.push(TranscriptionSegment { start, end, text });
         }
 
         Ok(TranscriptionResult {

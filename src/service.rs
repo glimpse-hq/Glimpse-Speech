@@ -516,7 +516,7 @@ fn prepare_audio(audio: AudioInput) -> Result<PreparedAudio> {
             if sample_rate == 16_000 {
                 let normalized = samples
                     .into_iter()
-                    .map(|sample| sample as f32 / i16::MAX as f32)
+                    .map(|sample| sample as f32 / 32_768.0)
                     .collect();
                 (normalized, sample_rate, sample_count)
             } else {
@@ -565,7 +565,7 @@ fn audio_duration_ms(sample_count: usize, sample_rate: u32) -> u128 {
 ))]
 /// Normalizes i16 PCM to f32 and linearly resamples it in a single pass.
 fn resample_i16_to_f32(samples: &[i16], from_rate: u32, to_rate: u32) -> Vec<f32> {
-    const SCALE: f32 = 1.0 / i16::MAX as f32;
+    const SCALE: f32 = 1.0 / 32_768.0;
 
     if samples.is_empty() {
         return Vec::new();

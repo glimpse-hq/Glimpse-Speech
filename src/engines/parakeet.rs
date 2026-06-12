@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use parakeet_rs::{ParakeetTDT, TimestampMode, Transcriber};
 
@@ -51,28 +51,16 @@ pub struct ParakeetModelParams {
 }
 
 impl ParakeetModelParams {
-    pub fn tdt_fp32() -> Self {
+    pub fn fp32() -> Self {
         Self {
             quantization: QuantizationType::FP32,
         }
     }
 
-    pub fn tdt_int8() -> Self {
+    pub fn int8() -> Self {
         Self {
             quantization: QuantizationType::Int8,
         }
-    }
-
-    pub fn fp32() -> Self {
-        Self::tdt_fp32()
-    }
-
-    pub fn int8() -> Self {
-        Self::tdt_int8()
-    }
-
-    pub fn quantized(quantization: QuantizationType) -> Self {
-        Self { quantization }
     }
 }
 
@@ -93,23 +81,14 @@ impl Default for ParakeetInferenceParams {
     }
 }
 
+#[derive(Default)]
 pub struct ParakeetEngine {
-    loaded_model_path: Option<PathBuf>,
     runtime: Option<ParakeetTDT>,
-}
-
-impl Default for ParakeetEngine {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl ParakeetEngine {
     pub fn new() -> Self {
-        Self {
-            loaded_model_path: None,
-            runtime: None,
-        }
+        Self::default()
     }
 
     fn runtime_mut(&mut self) -> Result<&mut ParakeetTDT, Box<dyn std::error::Error>> {
@@ -156,13 +135,11 @@ impl TranscriptionEngine for ParakeetEngine {
     ) -> Result<(), Box<dyn std::error::Error>> {
         validate_model_path(model_path, params.quantization)?;
         let runtime = ParakeetTDT::from_pretrained(model_path, None).map_err(parakeet_error)?;
-        self.loaded_model_path = Some(model_path.to_path_buf());
         self.runtime = Some(runtime);
         Ok(())
     }
 
     fn unload_model(&mut self) {
-        self.loaded_model_path = None;
         self.runtime = None;
     }
 

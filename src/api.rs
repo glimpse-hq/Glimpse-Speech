@@ -106,7 +106,8 @@ struct ParsedTranscriptionRequest {
     request: TranscribeRequest,
     response_format: ResponseFormat,
     timestamp_granularities: Vec<TimestampGranularity>,
-    uploaded_file: Option<PathBuf>,
+
+    uploaded_file: Option<TempUpload>,
 }
 
 struct TranscriptionRequestParts {
@@ -119,7 +120,6 @@ struct TranscriptionRequestParts {
     dictionary: Vec<String>,
     timestamps: bool,
     stream: bool,
-    uploaded_file: Option<PathBuf>,
 }
 
 static TEMP_UPLOAD_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -135,12 +135,6 @@ impl TempUpload {
 
     fn path(&self) -> &PathBuf {
         &self.path
-    }
-
-    fn into_path(self) -> PathBuf {
-        let path = self.path.clone();
-        std::mem::forget(self);
-        path
     }
 }
 
@@ -338,14 +332,16 @@ async fn transcribe(
         )));
     }
 
-    let parsed = transcribe_request_from_multipart(request, &state).await?;
+    let ParsedTranscriptionRequest {
+        request,
+        response_format,
+        timestamp_granularities,
+        uploaded_file,
+    } = transcribe_request_from_multipart(request, &state).await?;
 
-    let response_format = parsed.response_format;
-    let timestamp_granularities = parsed.timestamp_granularities.clone();
-    let uploaded_file = parsed.uploaded_file.clone();
     let result = state
         .provider
-        .transcribe(parsed.request)
+        .transcribe(request)
         .await
         .map(|response| {
             state.log("info", format!("Transcribed with {}", response.model_id));
@@ -358,10 +354,7 @@ async fn transcribe(
         })
         .map_err(map_transcribe_error);
 
-    if let Some(path) = uploaded_file {
-        let _ = std::fs::remove_file(path);
-    }
-
+    drop(uploaded_file);
     result
 }
 
@@ -431,7 +424,6 @@ fn build_transcription_request(
         dictionary,
         timestamps,
         stream,
-        uploaded_file,
     } = parts;
 
     if stream {
@@ -467,7 +459,7 @@ fn build_transcription_request(
         },
         response_format,
         timestamp_granularities,
-        uploaded_file,
+        uploaded_file: None,
     })
 }
 
@@ -626,7 +618,7 @@ fn text_response(body: String, content_type: &'static str) -> Response {
     ([(CONTENT_TYPE, content_type)], body).into_response()
 }
 
-fn format_srt(response: &Transcription) -> String {
+pub(crate) fn format_srt(response: &Transcription) -> String {
     caption_segments(response)
         .into_iter()
         .enumerate()
@@ -643,7 +635,7 @@ fn format_srt(response: &Transcription) -> String {
         .join("\n")
 }
 
-fn format_vtt(response: &Transcription) -> String {
+pub(crate) fn format_vtt(response: &Transcription) -> String {
     let cues = caption_segments(response)
         .into_iter()
         .map(|segment| {
@@ -659,7 +651,7 @@ fn format_vtt(response: &Transcription) -> String {
     format!("WEBVTT\n\n{cues}\n")
 }
 
-fn caption_segments(response: &Transcription) -> Vec<crate::TranscriptionSegment> {
+pub(crate) fn caption_segments(response: &Transcription) -> Vec<crate::TranscriptionSegment> {
     let mut segments = response.segments.clone().unwrap_or_default();
     if segments.is_empty() && !response.text.is_empty() {
         segments.push(crate::TranscriptionSegment {
@@ -761,9 +753,8 @@ async fn transcribe_request_from_multipart(
         dictionary,
         timestamps,
         stream,
-        uploaded_file: Some(upload.path().clone()),
     })?;
-    parsed.uploaded_file = Some(upload.into_path());
+    parsed.uploaded_file = Some(upload);
     Ok(parsed)
 }
 
@@ -958,7 +949,6 @@ mod tests {
             dictionary: Vec::new(),
             timestamps: false,
             stream: false,
-            uploaded_file: None,
         });
         assert!(result.is_err());
     }
@@ -975,7 +965,6 @@ mod tests {
             dictionary: Vec::new(),
             timestamps: false,
             stream: false,
-            uploaded_file: None,
         })
         .unwrap();
 

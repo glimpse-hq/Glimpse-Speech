@@ -435,6 +435,8 @@ fn print_transcription_response(
     Ok(())
 }
 
+use crate::api::{caption_segments, format_srt, format_vtt};
+
 fn verbose_json(response: &Transcription) -> anyhow::Result<String> {
     let segments = caption_segments(response)
         .into_iter()
@@ -462,60 +464,6 @@ fn verbose_json(response: &Transcription) -> anyhow::Result<String> {
         "text": response.text,
         "segments": segments
     }))?)
-}
-
-fn format_srt(response: &Transcription) -> String {
-    caption_segments(response)
-        .into_iter()
-        .enumerate()
-        .map(|(idx, segment)| {
-            format!(
-                "{}\n{} --> {}\n{}\n",
-                idx + 1,
-                format_timestamp(segment.start, ','),
-                format_timestamp(segment.end, ','),
-                segment.text.trim()
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn format_vtt(response: &Transcription) -> String {
-    let cues = caption_segments(response)
-        .into_iter()
-        .map(|segment| {
-            format!(
-                "{} --> {}\n{}",
-                format_timestamp(segment.start, '.'),
-                format_timestamp(segment.end, '.'),
-                segment.text.trim()
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    format!("WEBVTT\n\n{cues}\n")
-}
-
-fn caption_segments(response: &Transcription) -> Vec<crate::TranscriptionSegment> {
-    let mut segments = response.segments.clone().unwrap_or_default();
-    if segments.is_empty() && !response.text.is_empty() {
-        segments.push(crate::TranscriptionSegment {
-            start: 0.0,
-            end: response.duration_ms as f32 / 1000.0,
-            text: response.text.clone(),
-        });
-    }
-    segments
-}
-
-fn format_timestamp(seconds: f32, decimal_separator: char) -> String {
-    let millis = (seconds.max(0.0) * 1000.0).round() as u64;
-    let hours = millis / 3_600_000;
-    let minutes = (millis % 3_600_000) / 60_000;
-    let secs = (millis % 60_000) / 1000;
-    let ms = millis % 1000;
-    format!("{hours:02}:{minutes:02}:{secs:02}{decimal_separator}{ms:03}")
 }
 
 #[cfg(test)]
