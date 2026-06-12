@@ -72,6 +72,9 @@ pub fn take_coreml_log() -> Vec<String> {
 pub struct TranscriptionResult {
     pub text: String,
     pub segments: Option<Vec<TranscriptionSegment>>,
+    /// Language detected by the engine, when supported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

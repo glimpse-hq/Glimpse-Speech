@@ -199,38 +199,7 @@ impl ModelInstallManager {
         }
 
         for file in &spec.files {
-            // Archives are verified before extraction; the zip is gone afterwards.
-            if file.extract {
-                verify_extracted_dir(&dir, file)?;
-                continue;
-            }
-            let path = dir.join(&file.path);
-            if let Some(expected_size) = file.size_bytes {
-                let actual_size = fs::metadata(&path)
-                    .with_context(|| format!("read metadata for {}", file.path))?
-                    .len();
-                if actual_size != expected_size {
-                    return Err(anyhow!(
-                        "{} has unexpected size: expected {}, got {}",
-                        file.path,
-                        expected_size,
-                        actual_size
-                    ));
-                }
-            }
-
-            if let Some(expected_sha256) = &file.sha256 {
-                let actual =
-                    sha256_file(&path).with_context(|| format!("checksum {}", path.display()))?;
-                if !actual.eq_ignore_ascii_case(expected_sha256) {
-                    return Err(anyhow!(
-                        "{} has unexpected sha256: expected {}, got {}",
-                        file.path,
-                        expected_sha256,
-                        actual
-                    ));
-                }
-            }
+            verify_file(&dir, file)?;
         }
 
         Ok(status)
@@ -261,13 +230,21 @@ impl ModelInstallManager {
 
         emit_verifying_progress(&spec.id, &options);
 
-        match self.verify(spec) {
-            Ok(status) => Ok(status),
-            Err(err) => {
-                let _ = fs::remove_dir_all(&dir);
-                Err(err)
+        let status = status_from_spec(&dir, spec);
+        if !status.missing_files.is_empty() {
+            return Ok(status);
+        }
+
+        for file in &spec.files {
+            if let Err(err) = verify_file(&dir, file) {
+                // Drop only the corrupt artifact so a retry redownloads just
+                // that file instead of wiping sibling files already installed.
+                remove_file_artifacts(&dir, file);
+                return Err(err);
             }
         }
+
+        Ok(status)
     }
 
     pub fn delete(&self, id: &str) -> Result<ModelStatus> {
@@ -697,6 +674,52 @@ fn collect_extraction_manifest(root: &Path) -> io::Result<Vec<ExtractedEntry>> {
     let mut entries = Vec::new();
     walk(root, root, &mut entries)?;
     Ok(entries)
+}
+
+fn verify_file(dir: &Path, file: &RemoteFile) -> Result<()> {
+    // Archives are verified before extraction; the zip is gone afterwards.
+    if file.extract {
+        return verify_extracted_dir(dir, file);
+    }
+
+    let path = dir.join(&file.path);
+    if let Some(expected_size) = file.size_bytes {
+        let actual_size = fs::metadata(&path)
+            .with_context(|| format!("read metadata for {}", file.path))?
+            .len();
+        if actual_size != expected_size {
+            return Err(anyhow!(
+                "{} has unexpected size: expected {}, got {}",
+                file.path,
+                expected_size,
+                actual_size
+            ));
+        }
+    }
+
+    if let Some(expected_sha256) = &file.sha256 {
+        let actual = sha256_file(&path).with_context(|| format!("checksum {}", path.display()))?;
+        if !actual.eq_ignore_ascii_case(expected_sha256) {
+            return Err(anyhow!(
+                "{} has unexpected sha256: expected {}, got {}",
+                file.path,
+                expected_sha256,
+                actual
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn remove_file_artifacts(dir: &Path, file: &RemoteFile) {
+    let path = dir.join(&file.path);
+    if file.extract {
+        let _ = fs::remove_dir_all(&path);
+        let _ = fs::remove_file(extraction_manifest_path(&path));
+    } else {
+        let _ = fs::remove_file(&path);
+    }
 }
 
 fn verify_extracted_dir(dir: &Path, file: &RemoteFile) -> Result<()> {

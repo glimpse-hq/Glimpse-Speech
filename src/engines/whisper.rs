@@ -160,6 +160,7 @@ impl TranscriptionEngine for WhisperEngine {
         Ok(TranscriptionResult {
             text: full_text.trim().to_string(),
             segments: Some(segments),
+            language: whisper_rs::get_lang_str(state.full_lang_id_from_state()).map(str::to_string),
         })
     }
 }

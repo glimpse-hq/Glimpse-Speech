@@ -178,7 +178,7 @@ impl SpeechService {
             segments: transcription.result.segments,
             words: None,
             model_id: resolved_id,
-            language: requested_language,
+            language: transcription.result.language.or(requested_language),
             duration_ms: transcription.audio_duration_ms,
         })
     }

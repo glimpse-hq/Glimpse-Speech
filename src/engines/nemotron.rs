@@ -102,6 +102,7 @@ impl TranscriptionEngine for NemotronEngine {
         Ok(TranscriptionResult {
             text,
             segments: None,
+            language: None,
         })
     }
 }

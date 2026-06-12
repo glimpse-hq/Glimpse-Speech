@@ -123,9 +123,7 @@ impl RemoteEngine {
             let file_part = multipart::Part::stream(reqwest::Body::wrap_stream(stream))
                 .file_name(upload_name.clone())
                 .mime_str(upload_mime)
-                .map_err(|err| {
-                    transport_error(format!("Failed to prepare audio upload: {err}"))
-                })?;
+                .map_err(|err| transport_error(format!("Failed to prepare audio upload: {err}")))?;
             let form = build_transcription_form(
                 &profile,
                 file_part,
@@ -373,7 +371,11 @@ impl flacenc::source::Source for WavSampleSource {
         dest: &mut F,
     ) -> Result<usize, flacenc::error::SourceError> {
         self.buffer.clear();
-        for sample in self.reader.samples::<i16>().take(block_size * self.channels) {
+        for sample in self
+            .reader
+            .samples::<i16>()
+            .take(block_size * self.channels)
+        {
             let sample = sample.map_err(flacenc::error::SourceError::from_io_error)?;
             self.buffer.push(i32::from(sample));
         }
@@ -466,9 +468,17 @@ fn api_base(endpoint: &str) -> String {
         }
     }
     let base = base.trim_end_matches('/').to_string();
-    if base.is_empty() || base.ends_with("/v1") {
+    if base.is_empty() || ends_with_version_segment(&base) {
         base
     } else {
         format!("{base}/v1")
     }
+}
+
+fn ends_with_version_segment(base: &str) -> bool {
+    base.rsplit('/').next().is_some_and(|segment| {
+        segment.len() > 1
+            && segment.starts_with('v')
+            && segment[1..].bytes().all(|byte| byte.is_ascii_digit())
+    })
 }
