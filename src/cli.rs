@@ -365,6 +365,7 @@ async fn handle_models(
                     sha256,
                     extract: false,
                 }],
+                variant: None,
             };
             let status = manager.install(&spec, Default::default()).await?;
             print_status(status, json)?;

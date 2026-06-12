@@ -10,12 +10,39 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct WhisperModelParams {
     pub use_gpu: bool,
+    pub dtw_preset: Option<whisper_rs::DtwModelPreset>,
 }
 
 impl Default for WhisperModelParams {
     fn default() -> Self {
-        Self { use_gpu: true }
+        Self {
+            use_gpu: true,
+            dtw_preset: None,
+        }
     }
+}
+
+/// Maps a model variant (whisper family, with or without a "whisper-" prefix)
+/// to the DTW alignment-heads preset for that model generation.
+pub fn dtw_preset_for_variant(variant: &str) -> Option<whisper_rs::DtwModelPreset> {
+    use whisper_rs::DtwModelPreset as Preset;
+
+    let family = variant.strip_prefix("whisper-").unwrap_or(variant);
+    Some(match family {
+        "tiny" => Preset::Tiny,
+        "tiny.en" => Preset::TinyEn,
+        "base" => Preset::Base,
+        "base.en" => Preset::BaseEn,
+        "small" => Preset::Small,
+        "small.en" => Preset::SmallEn,
+        "medium" => Preset::Medium,
+        "medium.en" => Preset::MediumEn,
+        "large-v1" => Preset::LargeV1,
+        "large-v2" => Preset::LargeV2,
+        "large-v3" => Preset::LargeV3,
+        "large-v3-turbo" => Preset::LargeV3Turbo,
+        _ => return None,
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -84,11 +111,19 @@ impl TranscriptionEngine for WhisperEngine {
             .to_str()
             .ok_or_else(|| io_error("model path is not valid UTF-8"))?;
 
-        let context_params = WhisperContextParameters {
+        let mut context_params = WhisperContextParameters {
             use_gpu: params.use_gpu,
             flash_attn: true,
             ..WhisperContextParameters::default()
         };
+        // DTW cross-attention alignment gives accurate word timestamps; the
+        // energy heuristic used otherwise drifts.
+        if let Some(model_preset) = params.dtw_preset {
+            context_params.dtw_parameters = whisper_rs::DtwParameters {
+                mode: whisper_rs::DtwMode::ModelPreset { model_preset },
+                ..whisper_rs::DtwParameters::default()
+            };
+        }
         let context = WhisperContext::new_with_params(model_path_str, context_params)?;
         let state = context.create_state()?;
 
@@ -181,6 +216,7 @@ fn append_segment_words(
     eot_token: whisper_rs::WhisperTokenId,
     words: &mut Vec<TranscriptionSegment>,
 ) {
+    let mut tokens: Vec<(String, whisper_rs::WhisperTokenData)> = Vec::new();
     for index in 0..segment.n_tokens() {
         let Some(token) = segment.get_token(index) else {
             continue;
@@ -194,15 +230,32 @@ fn append_segment_words(
         if piece.trim().is_empty() {
             continue;
         }
-        let data = token.token_data();
-        let end = data.t1 as f32 / 100.0;
+        tokens.push((piece.into_owned(), token.token_data()));
+    }
+
+    // With DTW, t_dtw is the aligned onset of each token, so a token ends
+    // where the next one begins. Without it, fall back to the t0/t1 heuristic.
+    let use_dtw = tokens.iter().all(|(_, data)| data.t_dtw >= 0) && !tokens.is_empty();
+    for index in 0..tokens.len() {
+        let (piece, data) = &tokens[index];
+        let (start_cs, end_cs) = if use_dtw {
+            let end = tokens
+                .get(index + 1)
+                .map(|(_, next)| next.t_dtw)
+                .unwrap_or(data.t1.max(data.t_dtw));
+            (data.t_dtw, end.max(data.t_dtw))
+        } else {
+            (data.t0, data.t1.max(data.t0))
+        };
+        let start = start_cs as f32 / 100.0;
+        let end = end_cs as f32 / 100.0;
         match words.last_mut() {
             Some(last) if !piece.starts_with([' ', '\n']) => {
-                last.text.push_str(&piece);
+                last.text.push_str(piece);
                 last.end = end;
             }
             _ => words.push(TranscriptionSegment {
-                start: data.t0 as f32 / 100.0,
+                start,
                 end,
                 text: piece.trim_start().to_string(),
             }),

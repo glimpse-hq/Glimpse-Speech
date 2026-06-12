@@ -66,6 +66,10 @@ pub struct InstallSpec {
     pub engine: ModelEngine,
     pub storage: ModelStorage,
     pub files: Vec<RemoteFile>,
+    /// Engine-specific model identity, e.g. the whisper family
+    /// ("large-v3-turbo"), used to pick model-dependent inference settings.
+    #[serde(default)]
+    pub variant: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,6 +86,7 @@ pub struct ResolvedModel {
     pub id: String,
     pub path: PathBuf,
     pub engine: ModelEngine,
+    pub variant: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -168,6 +173,7 @@ impl ModelInstallManager {
             id: spec.id.clone(),
             path: self.artifact_path(spec),
             engine: spec.engine,
+            variant: spec.variant.clone(),
         })
     }
 
@@ -189,6 +195,7 @@ impl ModelInstallManager {
             id: reference.to_string(),
             path,
             engine,
+            variant: None,
         })
     }
 
@@ -991,6 +998,7 @@ mod tests {
                 sha256: None,
                 extract: false,
             }],
+            variant: None,
         }
     }
 

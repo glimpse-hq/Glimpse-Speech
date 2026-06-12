@@ -161,39 +161,76 @@ fn map_result(
 ) -> TranscriptionResult {
     let parakeet_rs::TranscriptionResult { text, tokens } = raw_result;
 
-    let segments = match timestamp_granularity {
-        TimestampGranularity::Token => None,
-        TimestampGranularity::Word | TimestampGranularity::Segment => {
-            let mapped: Vec<TranscriptionSegment> = tokens
-                .into_iter()
-                .filter_map(|token| {
-                    let text = token.text.trim().to_string();
-                    if text.is_empty() {
-                        None
-                    } else {
-                        Some(TranscriptionSegment {
-                            start: token.start,
-                            end: token.end,
-                            text,
-                        })
-                    }
-                })
-                .collect();
-
-            if mapped.is_empty() {
+    let mapped: Vec<TranscriptionSegment> = tokens
+        .into_iter()
+        .filter_map(|token| {
+            let text = token.text.trim().to_string();
+            if text.is_empty() {
                 None
             } else {
-                Some(mapped)
+                Some(TranscriptionSegment {
+                    start: token.start,
+                    end: token.end,
+                    text,
+                })
             }
+        })
+        .collect();
+
+    let (segments, words) = match timestamp_granularity {
+        TimestampGranularity::Token => (None, None),
+        TimestampGranularity::Segment => ((!mapped.is_empty()).then_some(mapped), None),
+        TimestampGranularity::Word => {
+            let words = attach_punctuation(mapped);
+            let segments = group_words_into_sentences(&words);
+            (
+                (!segments.is_empty()).then_some(segments),
+                (!words.is_empty()).then_some(words),
+            )
         }
     };
 
     TranscriptionResult {
         text: text.trim().to_string(),
         segments,
-        words: None,
+        words,
         language: None,
     }
+}
+
+fn attach_punctuation(words: Vec<TranscriptionSegment>) -> Vec<TranscriptionSegment> {
+    let mut out: Vec<TranscriptionSegment> = Vec::new();
+    for word in words {
+        let punctuation_only = word.text.chars().all(|ch| !ch.is_alphanumeric());
+        match out.last_mut() {
+            Some(last) if punctuation_only => {
+                last.text.push_str(&word.text);
+                last.end = word.end;
+            }
+            _ => out.push(word),
+        }
+    }
+    out
+}
+
+fn group_words_into_sentences(words: &[TranscriptionSegment]) -> Vec<TranscriptionSegment> {
+    let mut sentences: Vec<TranscriptionSegment> = Vec::new();
+    let mut current: Option<TranscriptionSegment> = None;
+    for word in words {
+        match current.as_mut() {
+            Some(sentence) => {
+                sentence.text.push(' ');
+                sentence.text.push_str(&word.text);
+                sentence.end = word.end;
+            }
+            None => current = Some(word.clone()),
+        }
+        if word.text.ends_with(['.', '!', '?', '…']) {
+            sentences.extend(current.take());
+        }
+    }
+    sentences.extend(current);
+    sentences
 }
 
 fn map_timestamp_mode(granularity: TimestampGranularity) -> TimestampMode {

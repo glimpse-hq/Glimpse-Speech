@@ -330,9 +330,15 @@ fn load_engine(resolved: &crate::models::ResolvedModel) -> Result<EngineInstance
         ModelEngine::Whisper => {
             #[cfg(feature = "whisper")]
             {
+                use crate::engines::whisper::{dtw_preset_for_variant, WhisperModelParams};
+
                 let mut engine = crate::engines::whisper::WhisperEngine::new();
+                let params = WhisperModelParams {
+                    dtw_preset: resolved.variant.as_deref().and_then(dtw_preset_for_variant),
+                    ..Default::default()
+                };
                 engine
-                    .load_model(&resolved.path)
+                    .load_model_with_params(&resolved.path, params)
                     .map_err(|err| anyhow!(err.to_string()))?;
                 Ok(EngineInstance::Whisper { engine })
             }
