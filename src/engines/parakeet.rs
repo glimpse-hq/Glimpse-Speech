@@ -134,7 +134,10 @@ impl TranscriptionEngine for ParakeetEngine {
         params: Self::ModelParams,
     ) -> Result<(), Box<dyn std::error::Error>> {
         validate_model_path(model_path, params.quantization)?;
-        let runtime = ParakeetTDT::from_pretrained(model_path, None).map_err(parakeet_error)?;
+        let exec_config = parakeet_rs::ExecutionConfig::default()
+            .with_intra_threads(crate::engines::inference_threads());
+        let runtime =
+            ParakeetTDT::from_pretrained(model_path, Some(exec_config)).map_err(parakeet_error)?;
         self.runtime = Some(runtime);
         Ok(())
     }

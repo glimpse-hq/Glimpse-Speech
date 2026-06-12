@@ -40,6 +40,9 @@ zip = { version = "7.2.0", default-features = false, features = ["deflate"] }
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
 whisper-rs = { version = "0.16.0", features = ["metal", "coreml", "raw-api"], optional = true }
 

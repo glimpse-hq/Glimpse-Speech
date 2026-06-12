@@ -889,6 +889,7 @@ dependencies = [
  "flacenc",
  "hound",
  "httpdate",
+ "libc",
  "parakeet-rs",
  "reqwest",
  "serde",

@@ -73,7 +73,10 @@ impl TranscriptionEngine for NemotronEngine {
         _params: Self::ModelParams,
     ) -> Result<(), Box<dyn std::error::Error>> {
         validate_model_path(model_path)?;
-        let runtime = Nemotron::from_pretrained(model_path, None).map_err(nemotron_error)?;
+        let exec_config = parakeet_rs::ExecutionConfig::default()
+            .with_intra_threads(crate::engines::inference_threads());
+        let runtime =
+            Nemotron::from_pretrained(model_path, Some(exec_config)).map_err(nemotron_error)?;
         self.runtime = Some(runtime);
         Ok(())
     }

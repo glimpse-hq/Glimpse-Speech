@@ -115,6 +115,21 @@ impl TranscriptionEngine for WhisperEngine {
 
         let mut full_params = FullParams::new(SamplingStrategy::Greedy { best_of: 5 });
         full_params.set_no_context(true);
+        full_params.set_n_threads(crate::engines::inference_threads() as i32);
+
+        // Shrink the encoder context to the actual clip length: whisper always
+        // encodes a 30 s window (1500 positions, 320 samples each), so short
+        // dictation clips waste most of that work. The CoreML/ANE encoder has a
+        // fixed-shape output, so this is only safe on GGML/Vulkan builds.
+        // Capped at the model's own n_audio_ctx; whisper.cpp rejects anything
+        // larger, and at the cap it behaves exactly like the default.
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        if let Some(max_audio_ctx) = self.context.as_ref().map(|ctx| ctx.n_audio_ctx()) {
+            if max_audio_ctx > 0 {
+                let audio_ctx = (samples.len() / 320 + 64).min(max_audio_ctx as usize);
+                full_params.set_audio_ctx(audio_ctx as i32);
+            }
+        }
         full_params.set_language(language.as_deref());
         full_params.set_translate(whisper_params.translate);
         full_params.set_print_special(whisper_params.print_special);
