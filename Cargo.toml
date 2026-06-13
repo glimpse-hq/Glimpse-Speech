@@ -1,6 +1,6 @@
 [package]
 name = "glimpse-speech"
-version = "1.4.8"
+version = "1.4.9"
 edition = "2021"
 rust-version = "1.85"
 autoexamples = false
@@ -12,7 +12,7 @@ documentation = "https://docs.rs/glimpse-speech"
 
 [features]
 default = []
-whisper = ["dep:whisper-rs"]
+whisper = ["dep:whisper-rs", "dep:ort"]
 nvidia = ["dep:parakeet-rs"]
 parakeet = ["nvidia"]
 all = ["whisper", "nvidia"]
@@ -60,8 +60,11 @@ whisper-rs = { version = "0.16.0", features = ["vulkan", "raw-api"], optional = 
 [target.'cfg(target_os = "linux")'.dependencies]
 whisper-rs = { version = "0.16.0", features = ["vulkan", "raw-api"], optional = true }
 
+# Intel Mac excluded: ort has no prebuilt onnxruntime there (Silero VAD falls
+# back to keeping all speech, see vad.rs) and parakeet models don't run on it.
 [target.'cfg(not(all(target_os = "macos", target_arch = "x86_64")))'.dependencies]
 parakeet-rs = { version = "0.3.6", optional = true }
+ort = { version = "=2.0.0-rc.12", optional = true }
 
 [[example]]
 name = "whisper"

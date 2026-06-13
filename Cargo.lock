@@ -880,7 +880,7 @@ dependencies = [
 
 [[package]]
 name = "glimpse-speech"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "anyhow",
  "axum",
@@ -890,6 +890,7 @@ dependencies = [
  "hound",
  "httpdate",
  "libc",
+ "ort",
  "parakeet-rs",
  "reqwest",
  "serde",

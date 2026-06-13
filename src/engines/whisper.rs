@@ -71,7 +71,9 @@ impl Default for WhisperInferenceParams {
             print_realtime: false,
             print_timestamps: false,
             suppress_blank: true,
-            suppress_non_speech_tokens: true,
+            // Off: suppressing these makes whisper hallucinate phrases ("Thank
+            // you.") on silence instead of emitting a [BLANK_AUDIO] tag.
+            suppress_non_speech_tokens: false,
             no_speech_thold: 0.2,
             dictionary: Vec::new(),
             initial_prompt: None,
