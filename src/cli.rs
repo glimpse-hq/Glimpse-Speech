@@ -38,6 +38,7 @@ enum CliEngine {
     Whisper,
     Parakeet,
     Nemotron,
+    Unified,
 }
 
 impl From<CliEngine> for ModelEngine {
@@ -46,6 +47,7 @@ impl From<CliEngine> for ModelEngine {
             CliEngine::Whisper => ModelEngine::Whisper,
             CliEngine::Parakeet => ModelEngine::Parakeet,
             CliEngine::Nemotron => ModelEngine::Nemotron,
+            CliEngine::Unified => ModelEngine::Unified,
         }
     }
 }

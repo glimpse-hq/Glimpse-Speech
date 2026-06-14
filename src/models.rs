@@ -28,6 +28,7 @@ pub enum ModelEngine {
     Whisper,
     Parakeet,
     Nemotron,
+    Unified,
 }
 
 impl fmt::Display for ModelEngine {
@@ -36,6 +37,7 @@ impl fmt::Display for ModelEngine {
             ModelEngine::Whisper => write!(f, "whisper"),
             ModelEngine::Parakeet => write!(f, "parakeet"),
             ModelEngine::Nemotron => write!(f, "nemotron"),
+            ModelEngine::Unified => write!(f, "unified"),
         }
     }
 }
@@ -184,7 +186,7 @@ impl ModelInstallManager {
                 .find(|candidate| candidate.is_file())
                 .or_else(|| single_file_in_dir(&self.cache_dir.join(reference)))
                 .ok_or_else(|| anyhow!("Unknown model: {reference}"))?,
-            ModelEngine::Parakeet | ModelEngine::Nemotron => {
+            ModelEngine::Parakeet | ModelEngine::Nemotron | ModelEngine::Unified => {
                 [PathBuf::from(reference), self.cache_dir.join(reference)]
                     .into_iter()
                     .find(|candidate| candidate.is_dir())

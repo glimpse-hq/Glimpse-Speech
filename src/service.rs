@@ -106,6 +106,13 @@ enum EngineInstance {
     Nemotron {
         engine: crate::engines::nemotron::NemotronEngine,
     },
+    #[cfg(all(
+        feature = "nvidia",
+        not(all(target_os = "macos", target_arch = "x86_64"))
+    ))]
+    Unified {
+        engine: crate::engines::unified::UnifiedEngine,
+    },
 }
 
 impl SpeechService {
@@ -247,7 +254,15 @@ impl SpeechService {
                     .map_err(|err| anyhow!(err.to_string()))?;
                 Ok(engine.get_transcript())
             }
-            _ => Err(anyhow!("Streaming is only supported with Nemotron models")),
+            EngineInstance::Unified { engine } => {
+                engine
+                    .transcribe_chunk(chunk)
+                    .map_err(|err| anyhow!(err.to_string()))?;
+                Ok(engine.get_transcript())
+            }
+            _ => Err(anyhow!(
+                "Streaming is only supported with Nemotron and Unified models"
+            )),
         }
     }
 
@@ -257,12 +272,16 @@ impl SpeechService {
     ))]
     pub fn streaming_reset(&self) {
         if let Ok(mut guard) = self.loaded.lock() {
-            if let Some(LoadedEngine {
-                engine: EngineInstance::Nemotron { engine },
-                ..
-            }) = guard.as_mut()
-            {
-                engine.reset();
+            match guard.as_mut() {
+                Some(LoadedEngine {
+                    engine: EngineInstance::Nemotron { engine },
+                    ..
+                }) => engine.reset(),
+                Some(LoadedEngine {
+                    engine: EngineInstance::Unified { engine },
+                    ..
+                }) => engine.reset(),
+                _ => {}
             }
         }
     }
@@ -275,11 +294,20 @@ impl SpeechService {
         self.loaded
             .lock()
             .ok()
-            .and_then(|guard| match guard.as_ref() {
+            .and_then(|mut guard| match guard.as_mut() {
                 Some(LoadedEngine {
                     engine: EngineInstance::Nemotron { engine },
                     ..
                 }) => Some(engine.get_transcript()),
+                Some(LoadedEngine {
+                    engine: EngineInstance::Unified { engine },
+                    ..
+                }) => {
+                    // The unified model buffers a right-context tail that only
+                    // surfaces on flush, so drain it before the final read.
+                    let _ = engine.flush();
+                    Some(engine.get_transcript())
+                }
                 _ => None,
             })
             .unwrap_or_default()
@@ -397,6 +425,29 @@ fn load_engine(resolved: &crate::models::ResolvedModel) -> Result<EngineInstance
                 ))
             }
         }
+        ModelEngine::Unified => {
+            #[cfg(all(
+                feature = "nvidia",
+                not(all(target_os = "macos", target_arch = "x86_64"))
+            ))]
+            {
+                let mut engine = crate::engines::unified::UnifiedEngine::new();
+                engine
+                    .load_model(&resolved.path)
+                    .map_err(|err| anyhow!(err.to_string()))?;
+                Ok(EngineInstance::Unified { engine })
+            }
+
+            #[cfg(not(all(
+                feature = "nvidia",
+                not(all(target_os = "macos", target_arch = "x86_64"))
+            )))]
+            {
+                Err(anyhow!(
+                    "NVIDIA speech support is not enabled on this build"
+                ))
+            }
+        }
     }
 }
 
@@ -456,6 +507,17 @@ fn transcribe_with_engine(
             engine,
             _request.audio,
             Some(crate::engines::nemotron::NemotronInferenceParams {
+                language: _request.language,
+            }),
+        ),
+        #[cfg(all(
+            feature = "nvidia",
+            not(all(target_os = "macos", target_arch = "x86_64"))
+        ))]
+        EngineInstance::Unified { engine } => transcribe_audio(
+            engine,
+            _request.audio,
+            Some(crate::engines::unified::UnifiedInferenceParams {
                 language: _request.language,
             }),
         ),
