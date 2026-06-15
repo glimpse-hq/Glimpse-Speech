@@ -40,6 +40,15 @@ impl fmt::Display for ModelEngine {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelLayout {
+    Whisper,
+    ParakeetTdt,
+    ParakeetUnified,
+    Nemotron,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelStorage {
@@ -64,6 +73,8 @@ pub struct RemoteFile {
 pub struct InstallSpec {
     pub id: String,
     pub engine: ModelEngine,
+    #[serde(default)]
+    pub layout: Option<ModelLayout>,
     pub storage: ModelStorage,
     pub files: Vec<RemoteFile>,
     /// Engine-specific model identity, e.g. the whisper family
@@ -86,6 +97,7 @@ pub struct ResolvedModel {
     pub id: String,
     pub path: PathBuf,
     pub engine: ModelEngine,
+    pub layout: ModelLayout,
     pub variant: Option<String>,
 }
 
@@ -173,6 +185,7 @@ impl ModelInstallManager {
             id: spec.id.clone(),
             path: self.artifact_path(spec),
             engine: spec.engine,
+            layout: spec_layout(spec),
             variant: spec.variant.clone(),
         })
     }
@@ -195,6 +208,7 @@ impl ModelInstallManager {
             id: reference.to_string(),
             path,
             engine,
+            layout: default_layout(engine, None),
             variant: None,
         })
     }
@@ -495,6 +509,25 @@ impl ModelInstallManager {
                         break;
                     }
                 }
+            }
+        }
+    }
+}
+
+fn spec_layout(spec: &InstallSpec) -> ModelLayout {
+    spec.layout
+        .unwrap_or_else(|| default_layout(spec.engine, spec.variant.as_deref()))
+}
+
+fn default_layout(engine: ModelEngine, variant: Option<&str>) -> ModelLayout {
+    match engine {
+        ModelEngine::Whisper => ModelLayout::Whisper,
+        ModelEngine::Nemotron => ModelLayout::Nemotron,
+        ModelEngine::Parakeet => {
+            if variant.is_some_and(|variant| variant.contains("unified")) {
+                ModelLayout::ParakeetUnified
+            } else {
+                ModelLayout::ParakeetTdt
             }
         }
     }
@@ -988,6 +1021,7 @@ mod tests {
         InstallSpec {
             id: id.to_string(),
             engine: ModelEngine::Whisper,
+            layout: None,
             storage: ModelStorage::File {
                 artifact: artifact.to_string(),
             },

@@ -1,32 +1,11 @@
 use std::path::Path;
 
-use parakeet_rs::{ParakeetTDT, TimestampMode, Transcriber};
+use parakeet_rs::{ParakeetTDT, ParakeetUnified, TimestampMode, Transcriber};
 
 use crate::{
-    dictionary::sanitize_dictionary_entries, TranscriptionEngine, TranscriptionResult,
-    TranscriptionSegment,
+    dictionary::sanitize_dictionary_entries, models::ModelLayout, TranscriptionEngine,
+    TranscriptionResult, TranscriptionSegment,
 };
-
-const REQUIRED_TDT_FP32_FILES: [&str; 4] = [
-    "encoder-model.onnx",
-    "encoder-model.onnx.data",
-    "decoder_joint-model.onnx",
-    "vocab.txt",
-];
-
-const REQUIRED_TDT_INT8_FILES: [&str; 3] = [
-    "encoder-model.int8.onnx",
-    "decoder_joint-model.int8.onnx",
-    "vocab.txt",
-];
-
-const CONFLICTING_TDT_INT8_FILES: [&str; 5] = [
-    "encoder-model.onnx",
-    "encoder.onnx",
-    "decoder_joint-model.onnx",
-    "decoder_joint.onnx",
-    "decoder-model.onnx",
-];
 
 const SAMPLE_RATE: u32 = 16_000;
 
@@ -45,20 +24,36 @@ pub enum QuantizationType {
     Int8,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParakeetModelParams {
+    pub layout: ModelLayout,
     pub quantization: QuantizationType,
+}
+
+impl Default for ParakeetModelParams {
+    fn default() -> Self {
+        Self::fp32()
+    }
 }
 
 impl ParakeetModelParams {
     pub fn fp32() -> Self {
         Self {
+            layout: ModelLayout::ParakeetTdt,
             quantization: QuantizationType::FP32,
         }
     }
 
     pub fn int8() -> Self {
         Self {
+            layout: ModelLayout::ParakeetTdt,
+            quantization: QuantizationType::Int8,
+        }
+    }
+
+    pub fn int8_with_layout(layout: ModelLayout) -> Self {
+        Self {
+            layout,
             quantization: QuantizationType::Int8,
         }
     }
@@ -83,7 +78,12 @@ impl Default for ParakeetInferenceParams {
 
 #[derive(Default)]
 pub struct ParakeetEngine {
-    runtime: Option<ParakeetTDT>,
+    runtime: Option<ParakeetRuntime>,
+}
+
+enum ParakeetRuntime {
+    Tdt(ParakeetTDT),
+    Unified(ParakeetUnified),
 }
 
 impl ParakeetEngine {
@@ -91,7 +91,7 @@ impl ParakeetEngine {
         Self::default()
     }
 
-    fn runtime_mut(&mut self) -> Result<&mut ParakeetTDT, Box<dyn std::error::Error>> {
+    fn runtime_mut(&mut self) -> Result<&mut ParakeetRuntime, Box<dyn std::error::Error>> {
         self.runtime
             .as_mut()
             .ok_or_else(|| io_error("Model not loaded. Call load_model() first."))
@@ -110,11 +110,43 @@ impl ParakeetEngine {
         // or dictionary boosting, so these are currently no-ops.
         let _ = (&params.language, &params.dictionary);
 
-        let raw_result = runtime
-            .transcribe_samples(samples, SAMPLE_RATE, 1, Some(mode))
-            .map_err(parakeet_error)?;
+        let raw_result = match runtime {
+            ParakeetRuntime::Tdt(runtime) => runtime
+                .transcribe_samples(samples, SAMPLE_RATE, 1, Some(mode))
+                .map_err(parakeet_error)?,
+            ParakeetRuntime::Unified(runtime) => runtime
+                .transcribe_samples(samples, SAMPLE_RATE, 1, Some(mode))
+                .map_err(parakeet_error)?,
+        };
 
         Ok(map_result(raw_result, params.timestamp_granularity))
+    }
+
+    pub fn transcribe_chunk(
+        &mut self,
+        samples: &[f32],
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        match self.runtime_mut()? {
+            ParakeetRuntime::Unified(runtime) => {
+                runtime.transcribe_chunk(samples).map_err(parakeet_error)
+            }
+            ParakeetRuntime::Tdt(_) => Err(io_error(
+                "Streaming is only supported with unified Parakeet models",
+            )),
+        }
+    }
+
+    pub fn get_transcript(&self) -> String {
+        match self.runtime.as_ref() {
+            Some(ParakeetRuntime::Unified(runtime)) => runtime.get_transcript(),
+            _ => String::new(),
+        }
+    }
+
+    pub fn reset(&mut self) {
+        if let Some(ParakeetRuntime::Unified(runtime)) = self.runtime.as_mut() {
+            runtime.reset();
+        }
     }
 }
 
@@ -133,11 +165,19 @@ impl TranscriptionEngine for ParakeetEngine {
         model_path: &Path,
         params: Self::ModelParams,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        validate_model_path(model_path, params.quantization)?;
+        validate_model_path(model_path)?;
         let exec_config = parakeet_rs::ExecutionConfig::default()
             .with_intra_threads(crate::engines::inference_threads());
-        let runtime =
-            ParakeetTDT::from_pretrained(model_path, Some(exec_config)).map_err(parakeet_error)?;
+        let runtime = match params.layout {
+            ModelLayout::ParakeetUnified => ParakeetRuntime::Unified(
+                ParakeetUnified::from_pretrained(model_path, Some(exec_config))
+                    .map_err(parakeet_error)?,
+            ),
+            _ => ParakeetRuntime::Tdt(
+                ParakeetTDT::from_pretrained(model_path, Some(exec_config))
+                    .map_err(parakeet_error)?,
+            ),
+        };
         self.runtime = Some(runtime);
         Ok(())
     }
@@ -247,10 +287,7 @@ fn normalize_inference_params(params: Option<ParakeetInferenceParams>) -> Parake
     params
 }
 
-fn validate_model_path(
-    model_path: &Path,
-    quantization: QuantizationType,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn validate_model_path(model_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     if !model_path.exists() {
         return Err(io_error(format!(
             "Parakeet model directory not found: {}",
@@ -263,53 +300,6 @@ fn validate_model_path(
             "Parakeet model path must be a directory: {}",
             model_path.display()
         )));
-    }
-
-    let required_files: &[&str] = match quantization {
-        QuantizationType::FP32 => &REQUIRED_TDT_FP32_FILES,
-        QuantizationType::Int8 => &REQUIRED_TDT_INT8_FILES,
-    };
-
-    let missing: Vec<String> = required_files
-        .iter()
-        .filter_map(|name| {
-            let path = model_path.join(name);
-            if path.exists() {
-                None
-            } else {
-                Some((*name).to_string())
-            }
-        })
-        .collect();
-
-    if !missing.is_empty() {
-        return Err(io_error(format!(
-            "Missing Parakeet model files in {}: {}",
-            model_path.display(),
-            missing.join(", ")
-        )));
-    }
-
-    if quantization == QuantizationType::Int8 {
-        let conflicting: Vec<String> = CONFLICTING_TDT_INT8_FILES
-            .iter()
-            .filter_map(|name| {
-                let path = model_path.join(name);
-                if path.exists() {
-                    Some((*name).to_string())
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        if !conflicting.is_empty() {
-            return Err(io_error(format!(
-                "Int8 Parakeet model directory {} contains preferred non-Int8 artifacts that parakeet-rs would load first: {}. Use a clean Int8-only directory.",
-                model_path.display(),
-                conflicting.join(", ")
-            )));
-        }
     }
 
     Ok(())

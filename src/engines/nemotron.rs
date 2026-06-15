@@ -111,13 +111,6 @@ impl TranscriptionEngine for NemotronEngine {
     }
 }
 
-const REQUIRED_FILES: [&str; 4] = [
-    "encoder.onnx",
-    "encoder.onnx.data",
-    "decoder_joint.onnx",
-    "tokenizer.model",
-];
-
 fn validate_model_path(model_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     if !model_path.exists() {
         return Err(io_error(format!(
@@ -130,26 +123,6 @@ fn validate_model_path(model_path: &Path) -> Result<(), Box<dyn std::error::Erro
         return Err(io_error(format!(
             "Nemotron model path must be a directory: {}",
             model_path.display()
-        )));
-    }
-
-    let missing: Vec<String> = REQUIRED_FILES
-        .iter()
-        .filter_map(|name| {
-            let path = model_path.join(name);
-            if path.exists() {
-                None
-            } else {
-                Some((*name).to_string())
-            }
-        })
-        .collect();
-
-    if !missing.is_empty() {
-        return Err(io_error(format!(
-            "Missing Nemotron model files in {}: {}",
-            model_path.display(),
-            missing.join(", ")
         )));
     }
 

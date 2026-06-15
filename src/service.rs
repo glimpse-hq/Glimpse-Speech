@@ -108,6 +108,59 @@ enum EngineInstance {
     },
 }
 
+impl EngineInstance {
+    #[cfg(all(
+        feature = "nvidia",
+        not(all(target_os = "macos", target_arch = "x86_64"))
+    ))]
+    fn streaming_transcribe_chunk(&mut self, chunk: &[f32]) -> Result<String> {
+        match self {
+            EngineInstance::Parakeet { engine } => {
+                engine
+                    .transcribe_chunk(chunk)
+                    .map_err(|err| anyhow!(err.to_string()))?;
+                Ok(engine.get_transcript())
+            }
+            EngineInstance::Nemotron { engine } => {
+                engine
+                    .transcribe_chunk(chunk)
+                    .map_err(|err| anyhow!(err.to_string()))?;
+                Ok(engine.get_transcript())
+            }
+            #[cfg(feature = "whisper")]
+            EngineInstance::Whisper { .. } => Err(anyhow!(
+                "Streaming is only supported with Nemotron or unified Parakeet models"
+            )),
+        }
+    }
+
+    #[cfg(all(
+        feature = "nvidia",
+        not(all(target_os = "macos", target_arch = "x86_64"))
+    ))]
+    fn streaming_reset(&mut self) {
+        match self {
+            EngineInstance::Parakeet { engine } => engine.reset(),
+            EngineInstance::Nemotron { engine } => engine.reset(),
+            #[cfg(feature = "whisper")]
+            EngineInstance::Whisper { .. } => {}
+        }
+    }
+
+    #[cfg(all(
+        feature = "nvidia",
+        not(all(target_os = "macos", target_arch = "x86_64"))
+    ))]
+    fn streaming_get_transcript(&self) -> Option<String> {
+        match self {
+            EngineInstance::Parakeet { engine } => Some(engine.get_transcript()),
+            EngineInstance::Nemotron { engine } => Some(engine.get_transcript()),
+            #[cfg(feature = "whisper")]
+            EngineInstance::Whisper { .. } => None,
+        }
+    }
+}
+
 impl SpeechService {
     pub fn new(config: SpeechConfig) -> Self {
         crate::silence_native_logs();
@@ -240,15 +293,7 @@ impl SpeechService {
         let loaded = guard
             .as_mut()
             .ok_or_else(|| anyhow!("model did not load"))?;
-        match &mut loaded.engine {
-            EngineInstance::Nemotron { engine } => {
-                engine
-                    .transcribe_chunk(chunk)
-                    .map_err(|err| anyhow!(err.to_string()))?;
-                Ok(engine.get_transcript())
-            }
-            _ => Err(anyhow!("Streaming is only supported with Nemotron models")),
-        }
+        loaded.engine.streaming_transcribe_chunk(chunk)
     }
 
     #[cfg(all(
@@ -257,12 +302,8 @@ impl SpeechService {
     ))]
     pub fn streaming_reset(&self) {
         if let Ok(mut guard) = self.loaded.lock() {
-            if let Some(LoadedEngine {
-                engine: EngineInstance::Nemotron { engine },
-                ..
-            }) = guard.as_mut()
-            {
-                engine.reset();
+            if let Some(loaded) = guard.as_mut() {
+                loaded.engine.streaming_reset();
             }
         }
     }
@@ -275,12 +316,10 @@ impl SpeechService {
         self.loaded
             .lock()
             .ok()
-            .and_then(|guard| match guard.as_ref() {
-                Some(LoadedEngine {
-                    engine: EngineInstance::Nemotron { engine },
-                    ..
-                }) => Some(engine.get_transcript()),
-                _ => None,
+            .and_then(|guard| {
+                guard
+                    .as_ref()
+                    .and_then(|loaded| loaded.engine.streaming_get_transcript())
             })
             .unwrap_or_default()
     }
@@ -358,7 +397,9 @@ fn load_engine(resolved: &crate::models::ResolvedModel) -> Result<EngineInstance
                 engine
                     .load_model_with_params(
                         &resolved.path,
-                        crate::engines::parakeet::ParakeetModelParams::int8(),
+                        crate::engines::parakeet::ParakeetModelParams::int8_with_layout(
+                            resolved.layout,
+                        ),
                     )
                     .map_err(|err| anyhow!(err.to_string()))?;
                 Ok(EngineInstance::Parakeet { engine })
