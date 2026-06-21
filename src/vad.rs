@@ -96,7 +96,12 @@ mod silero {
         }
         regions
             .into_iter()
-            .map(|(s, e)| ((s as f32 * FRAME_S - PAD_S).max(0.0), e as f32 * FRAME_S + PAD_S))
+            .map(|(s, e)| {
+                (
+                    (s as f32 * FRAME_S - PAD_S).max(0.0),
+                    e as f32 * FRAME_S + PAD_S,
+                )
+            })
             .collect()
     }
 

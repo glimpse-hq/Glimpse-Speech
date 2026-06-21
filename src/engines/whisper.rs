@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{path::Path, time::Instant};
 
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
@@ -10,6 +10,7 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct WhisperModelParams {
     pub use_gpu: bool,
+    pub gpu_device: i32,
     pub dtw_preset: Option<whisper_rs::DtwModelPreset>,
 }
 
@@ -17,6 +18,7 @@ impl Default for WhisperModelParams {
     fn default() -> Self {
         Self {
             use_gpu: true,
+            gpu_device: 0,
             dtw_preset: None,
         }
     }
@@ -109,13 +111,24 @@ impl TranscriptionEngine for WhisperEngine {
         model_path: &Path,
         params: Self::ModelParams,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let total_started = Instant::now();
+        let model_bytes = std::fs::metadata(model_path)
+            .ok()
+            .map(|metadata| metadata.len());
+        let use_gpu = params.use_gpu;
+        let gpu_device = params.gpu_device;
+        let has_dtw = params.dtw_preset.is_some();
         let model_path_str = model_path
             .to_str()
             .ok_or_else(|| io_error("model path is not valid UTF-8"))?;
 
+        // whisper.cpp disables DTW when flash attention is enabled. Prefer DTW
+        // because Glimpse uses it for accurate word timestamps.
+        let flash_attn = !has_dtw;
         let mut context_params = WhisperContextParameters {
-            use_gpu: params.use_gpu,
-            flash_attn: true,
+            use_gpu,
+            flash_attn,
+            gpu_device,
             ..WhisperContextParameters::default()
         };
         // DTW cross-attention alignment gives accurate word timestamps; the
@@ -126,11 +139,38 @@ impl TranscriptionEngine for WhisperEngine {
                 ..whisper_rs::DtwParameters::default()
             };
         }
+        tracing::info!(
+            "[WhisperEngine] load start path={} bytes={:?} use_gpu={} gpu_device={} flash_attn={} dtw={}",
+            model_path.display(),
+            model_bytes,
+            use_gpu,
+            gpu_device,
+            flash_attn,
+            has_dtw
+        );
+        log_coreml_lines("before_load");
+        let context_started = Instant::now();
         let context = WhisperContext::new_with_params(model_path_str, context_params)?;
-        let state = context.create_state()?;
+        let context_elapsed = context_started.elapsed();
+        let state_started = Instant::now();
+        let state = match context.create_state() {
+            Ok(state) => state,
+            Err(error) => {
+                log_coreml_lines("create_state_error");
+                return Err(error.into());
+            }
+        };
+        let state_elapsed = state_started.elapsed();
+        log_coreml_lines("after_create_state");
 
         self.context = Some(context);
         self.state = Some(state);
+        tracing::info!(
+            "[WhisperEngine] load complete total={:.2}s context={:.2}s create_state={:.2}s",
+            total_started.elapsed().as_secs_f32(),
+            context_elapsed.as_secs_f32(),
+            state_elapsed.as_secs_f32()
+        );
         Ok(())
     }
 
@@ -210,6 +250,12 @@ impl TranscriptionEngine for WhisperEngine {
             words: words.filter(|words| !words.is_empty()),
             language: whisper_rs::get_lang_str(state.full_lang_id_from_state()).map(str::to_string),
         })
+    }
+}
+
+fn log_coreml_lines(phase: &str) {
+    for line in crate::take_coreml_log() {
+        tracing::info!("[WhisperEngine] coreml phase={} {}", phase, line);
     }
 }
 

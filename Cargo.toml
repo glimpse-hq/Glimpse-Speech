@@ -35,6 +35,7 @@ sha2 = "0.11"
 tokio = { version = "1", features = ["fs", "io-util", "net", "rt-multi-thread", "signal", "time"] }
 tokio-util = "0.7"
 tower-http = { version = "0.6", features = ["cors"], optional = true }
+tracing = "0.1"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [profile.release]

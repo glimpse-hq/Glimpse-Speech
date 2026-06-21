@@ -190,7 +190,14 @@ impl ModelInstallManager {
         })
     }
 
-    pub fn resolve_loose(&self, reference: &str, engine: ModelEngine) -> Result<ResolvedModel> {
+    pub fn resolve_loose(
+        &self,
+        reference: &str,
+        fallback_engine: ModelEngine,
+    ) -> Result<ResolvedModel> {
+        // The loose path has no catalog spec, so the engine and layout are
+        // inferred from the model id; `fallback_engine` covers ids with no marker.
+        let engine = infer_engine(reference).unwrap_or(fallback_engine);
         let path = match engine {
             ModelEngine::Whisper => [PathBuf::from(reference), self.cache_dir.join(reference)]
                 .into_iter()
@@ -208,7 +215,7 @@ impl ModelInstallManager {
             id: reference.to_string(),
             path,
             engine,
-            layout: default_layout(engine, None),
+            layout: default_layout(engine, Some(reference)),
             variant: None,
         })
     }
@@ -517,6 +524,21 @@ impl ModelInstallManager {
 fn spec_layout(spec: &InstallSpec) -> ModelLayout {
     spec.layout
         .unwrap_or_else(|| default_layout(spec.engine, spec.variant.as_deref()))
+}
+
+/// Best-effort engine guess from a model id, for the loose CLI path where no
+/// catalog spec names the engine. `None` when the id carries no known marker.
+pub fn infer_engine(reference: &str) -> Option<ModelEngine> {
+    let lower = reference.to_ascii_lowercase();
+    if lower.contains("nemotron") {
+        Some(ModelEngine::Nemotron)
+    } else if lower.contains("parakeet") {
+        Some(ModelEngine::Parakeet)
+    } else if lower.contains("whisper") {
+        Some(ModelEngine::Whisper)
+    } else {
+        None
+    }
 }
 
 fn default_layout(engine: ModelEngine, variant: Option<&str>) -> ModelLayout {

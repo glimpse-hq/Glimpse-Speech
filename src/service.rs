@@ -1,6 +1,7 @@
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
+    time::Instant,
 };
 
 use anyhow::{anyhow, Result};
@@ -218,13 +219,28 @@ impl SpeechService {
     }
 
     pub fn transcribe(&self, request: TranscribeRequest) -> Result<Transcription> {
+        let total_started = Instant::now();
         let requested_language = request.language.clone();
-        let resolved_id = self.ensure_loaded(&request.model_id)?;
+        let requested_model = request.model_id.clone();
+        let resolved_id = self.ensure_loaded(&requested_model)?;
+        let lock_started = Instant::now();
         let mut guard = self.lock_loaded()?;
+        let lock_wait = lock_started.elapsed();
         let loaded = guard
             .as_mut()
             .ok_or_else(|| anyhow!("model did not load"))?;
+        let transcribe_started = Instant::now();
         let transcription = transcribe_with_engine(&mut loaded.engine, request)?;
+        let transcribe_elapsed = transcribe_started.elapsed();
+        loaded.warmed = true;
+        tracing::info!(
+            "[SpeechService] transcribe model={} resolved={} total={:.2}s lock_wait={:.2}s engine={:.2}s",
+            requested_model,
+            resolved_id,
+            total_started.elapsed().as_secs_f32(),
+            lock_wait.as_secs_f32(),
+            transcribe_elapsed.as_secs_f32()
+        );
 
         Ok(Transcription {
             text: transcription.result.text,
@@ -237,16 +253,26 @@ impl SpeechService {
     }
 
     pub fn preload_and_warm(&self, model_id: &str) -> Result<()> {
+        let total_started = Instant::now();
         self.ensure_loaded(model_id)?;
+        let lock_started = Instant::now();
         let mut guard = self.lock_loaded()?;
+        let lock_wait = lock_started.elapsed();
         let loaded = guard
             .as_mut()
             .ok_or_else(|| anyhow!("model did not load"))?;
         if loaded.warmed {
+            tracing::info!(
+                "[SpeechService] warm model={} skipped already_warmed total={:.2}s lock_wait={:.2}s",
+                model_id,
+                total_started.elapsed().as_secs_f32(),
+                lock_wait.as_secs_f32()
+            );
             return Ok(());
         }
 
         let silence = vec![0.0f32; 16_000 * 2];
+        let warm_started = Instant::now();
         let _ = transcribe_with_engine(
             &mut loaded.engine,
             TranscribeRequest {
@@ -260,6 +286,13 @@ impl SpeechService {
             },
         )?;
         loaded.warmed = true;
+        tracing::info!(
+            "[SpeechService] warm model={} total={:.2}s lock_wait={:.2}s silence_transcribe={:.2}s",
+            model_id,
+            total_started.elapsed().as_secs_f32(),
+            lock_wait.as_secs_f32(),
+            warm_started.elapsed().as_secs_f32()
+        );
         Ok(())
     }
 
@@ -325,20 +358,55 @@ impl SpeechService {
     }
 
     fn ensure_loaded(&self, model_id: &str) -> Result<String> {
+        let total_started = Instant::now();
+        let resolve_started = Instant::now();
         let resolved = self.resolve(model_id)?;
+        let resolve_elapsed = resolve_started.elapsed();
+        let lock_started = Instant::now();
         let mut guard = self.lock_loaded()?;
+        let lock_wait = lock_started.elapsed();
         let should_reload = guard
             .as_ref()
             .map(|loaded| loaded.model_id != resolved.id || loaded.path != resolved.path)
             .unwrap_or(true);
 
         if should_reload {
+            let load_started = Instant::now();
+            let path = resolved.path.display().to_string();
+            let bytes = std::fs::metadata(&resolved.path)
+                .ok()
+                .map(|metadata| metadata.len());
+            tracing::info!(
+                "[SpeechService] load start model={} engine={} path={} bytes={:?}",
+                resolved.id,
+                resolved.engine,
+                path,
+                bytes
+            );
+            let engine = load_engine(&resolved)?;
+            let load_elapsed = load_started.elapsed();
             *guard = Some(LoadedEngine {
                 model_id: resolved.id.clone(),
                 path: resolved.path.clone(),
                 warmed: false,
-                engine: load_engine(&resolved)?,
+                engine,
             });
+            tracing::info!(
+                "[SpeechService] ensure_loaded model={} reloaded=true total={:.2}s resolve={:.2}s lock_wait={:.2}s load={:.2}s",
+                resolved.id,
+                total_started.elapsed().as_secs_f32(),
+                resolve_elapsed.as_secs_f32(),
+                lock_wait.as_secs_f32(),
+                load_elapsed.as_secs_f32()
+            );
+        } else {
+            tracing::debug!(
+                "[SpeechService] ensure_loaded model={} reloaded=false total={:.2}s resolve={:.2}s lock_wait={:.2}s",
+                resolved.id,
+                total_started.elapsed().as_secs_f32(),
+                resolve_elapsed.as_secs_f32(),
+                lock_wait.as_secs_f32()
+            );
         }
 
         Ok(resolved.id)
