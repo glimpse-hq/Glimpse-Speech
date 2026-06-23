@@ -37,6 +37,23 @@ pub struct RemoteRequestParams<'a> {
     pub timestamp_granularity: Option<TimestampGranularity>,
 }
 
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DiarizedSegment {
+    pub start: f32,
+    pub end: f32,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<String>,
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DiarizedTranscription {
+    pub transcription: Transcription,
+    pub segments: Option<Vec<DiarizedSegment>>,
+}
+
 pub struct RemoteEngine {
     client: Client,
     config: RemoteConfig,
@@ -56,6 +73,25 @@ impl RemoteEngine {
         audio_path: &Path,
         params: RemoteRequestParams<'_>,
     ) -> Result<Transcription, RemoteError> {
+        self.transcribe_file_inner(audio_path, params, false)
+            .await
+            .map(|response| response.transcription)
+    }
+
+    pub async fn transcribe_file_diarized(
+        &self,
+        audio_path: &Path,
+        params: RemoteRequestParams<'_>,
+    ) -> Result<DiarizedTranscription, RemoteError> {
+        self.transcribe_file_inner(audio_path, params, true).await
+    }
+
+    async fn transcribe_file_inner(
+        &self,
+        audio_path: &Path,
+        params: RemoteRequestParams<'_>,
+        diarize: bool,
+    ) -> Result<DiarizedTranscription, RemoteError> {
         let endpoint = self.config.endpoint.trim();
         if endpoint.is_empty() {
             return Err(config_error("Remote speech endpoint is not configured"));
@@ -66,6 +102,11 @@ impl RemoteEngine {
         }
 
         let profile = resolve_profile(endpoint);
+        if diarize && !profile.supports_diarization {
+            return Err(config_error(
+                "Remote speech endpoint does not support speaker diarization",
+            ));
+        }
         let url = format!("{}/audio/transcriptions", api_base(endpoint));
         let api_key = self.config.api_key.trim();
         let language = params
@@ -87,7 +128,13 @@ impl RemoteEngine {
             .await;
         }
 
-        let plan = plan_request(&profile, params.timestamps, params.timestamp_granularity);
+        let plan = plan_request(
+            &profile,
+            params.timestamps || diarize,
+            params
+                .timestamp_granularity
+                .or(diarize.then_some(TimestampGranularity::Segment)),
+        );
 
         let extension = audio_path
             .extension()
@@ -148,6 +195,7 @@ impl RemoteEngine {
                     language: language.as_deref(),
                     dictionary: params.dictionary,
                     prompt: params.prompt,
+                    diarize,
                 },
             );
 
@@ -190,7 +238,7 @@ impl RemoteEngine {
             return Err(err);
         };
 
-        parse_transcription_body(&body, model, &profile)
+        parse_transcription_body(&body, model, &profile, diarize)
     }
 
     pub async fn list_models(&self) -> Result<Vec<String>, RemoteError> {
@@ -234,7 +282,7 @@ async fn transcribe_base64(
     language: Option<&str>,
     api_key: &str,
     profile: &EndpointProfile,
-) -> Result<Transcription, RemoteError> {
+) -> Result<DiarizedTranscription, RemoteError> {
     let bytes = tokio::fs::read(audio_path).await.map_err(|err| {
         transport_error(format!(
             "Failed to read recording at {}: {err}",
@@ -259,19 +307,21 @@ async fn transcribe_base64(
         client.post(url).json(&request).timeout(DEFAULT_TIMEOUT),
         api_key,
     );
-    let response = builder.send().await.map_err(|err| {
-        transport_error(format!("Failed to reach remote speech endpoint: {err}"))
-    })?;
+    let response = builder
+        .send()
+        .await
+        .map_err(|err| transport_error(format!("Failed to reach remote speech endpoint: {err}")))?;
     let status = response.status();
     let retry_after = parse_retry_after(response.headers().get(RETRY_AFTER));
-    let body_text = response.text().await.map_err(|err| {
-        transport_error(format!("Failed to read remote speech response: {err}"))
-    })?;
+    let body_text = response
+        .text()
+        .await
+        .map_err(|err| transport_error(format!("Failed to read remote speech response: {err}")))?;
     if !status.is_success() {
         return Err(parse_upstream_error(status, retry_after, &body_text));
     }
 
-    parse_transcription_body(&body_text, model, profile)
+    parse_transcription_body(&body_text, model, profile, false)
 }
 
 #[derive(Serialize)]
@@ -320,6 +370,8 @@ struct UpstreamSegment {
     text: String,
     #[serde(default)]
     word: String,
+    #[serde(default, alias = "speaker_id")]
+    speaker: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -348,7 +400,8 @@ fn parse_transcription_body(
     body: &str,
     model: &str,
     profile: &EndpointProfile,
-) -> Result<Transcription, RemoteError> {
+    include_speakers: bool,
+) -> Result<DiarizedTranscription, RemoteError> {
     let parsed = serde_json::from_str::<TranscriptionBody>(body).map_err(|err| RemoteError {
         kind: RemoteErrorKind::Other,
         status: 200,
@@ -365,21 +418,27 @@ fn parse_transcription_body(
             .as_ref()
             .and_then(|usage| usage.prompt_audio_seconds),
     };
+    let diarized_segments = include_speakers
+        .then(|| parsed.segments.as_deref().map(map_diarized_text))
+        .flatten();
     let segments = map_timed_text(parsed.segments);
     let words = if profile.supports_word_timestamps {
         map_timed_text(parsed.words)
     } else {
         None
     };
-    Ok(Transcription {
-        text: parsed.text,
-        segments,
-        words,
-        model_id: model.to_string(),
-        language: parsed.language,
-        duration_ms: duration_seconds
-            .map(|seconds| (seconds.max(0.0) * 1000.0) as u128)
-            .unwrap_or(0),
+    Ok(DiarizedTranscription {
+        transcription: Transcription {
+            text: parsed.text,
+            segments,
+            words,
+            model_id: model.to_string(),
+            language: parsed.language,
+            duration_ms: duration_seconds
+                .map(|seconds| (seconds.max(0.0) * 1000.0) as u128)
+                .unwrap_or(0),
+        },
+        segments: diarized_segments,
     })
 }
 
@@ -394,6 +453,18 @@ fn map_timed_text(items: Option<Vec<UpstreamSegment>>) -> Option<Vec<crate::Tran
             })
             .collect()
     })
+}
+
+fn map_diarized_text(items: &[UpstreamSegment]) -> Vec<DiarizedSegment> {
+    items
+        .iter()
+        .map(|item| DiarizedSegment {
+            start: item.start,
+            end: item.end,
+            text: upstream_segment_text(item),
+            speaker: item.speaker.clone(),
+        })
+        .collect()
 }
 
 fn upstream_segment_text(item: &UpstreamSegment) -> String {
@@ -593,7 +664,8 @@ fn ends_with_version_segment(base: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::ensure_scheme;
+    use super::{ensure_scheme, parse_transcription_body};
+    use crate::remote::provider::resolve_profile;
 
     #[test]
     fn infers_endpoint_scheme() {
@@ -606,6 +678,51 @@ mod tests {
         assert_eq!(
             ensure_scheme("http://localhost:8000"),
             "http://localhost:8000"
+        );
+    }
+
+    #[test]
+    fn preserves_diarized_speaker_ids_separately_from_standard_segments() {
+        let response = parse_transcription_body(
+            r#"{
+                "text": "Hello there",
+                "language": "en",
+                "segments": [{
+                    "start": 0.25,
+                    "end": 1.5,
+                    "text": "Hello there",
+                    "speaker_id": "speaker_0"
+                }],
+                "usage": { "prompt_audio_seconds": 2 }
+            }"#,
+            "voxtral-mini-latest",
+            &resolve_profile("https://api.mistral.ai/v1"),
+            true,
+        )
+        .expect("valid transcription response");
+
+        assert_eq!(
+            response.transcription.segments.as_deref(),
+            Some(
+                [crate::TranscriptionSegment {
+                    start: 0.25,
+                    end: 1.5,
+                    text: "Hello there".to_string(),
+                }]
+                .as_slice()
+            )
+        );
+        assert_eq!(
+            response.segments.as_deref(),
+            Some(
+                [super::DiarizedSegment {
+                    start: 0.25,
+                    end: 1.5,
+                    text: "Hello there".to_string(),
+                    speaker: Some("speaker_0".to_string()),
+                }]
+                .as_slice()
+            )
         );
     }
 }

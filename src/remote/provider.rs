@@ -15,6 +15,7 @@ pub struct EndpointProfile {
     pub uploads_flac: bool,
     pub audio_request: AudioRequest,
     pub models_query: &'static str,
+    pub supports_diarization: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +63,7 @@ impl Compatibility {
                 uploads_flac: true,
                 audio_request: AudioRequest::Multipart,
                 models_query: "",
+                supports_diarization: false,
             },
             Self::SelfHosted => EndpointProfile {
                 timestamp_mode: TimestampMode::OpenAiVerboseJson,
@@ -74,6 +76,7 @@ impl Compatibility {
                 uploads_flac: false,
                 audio_request: AudioRequest::Multipart,
                 models_query: "",
+                supports_diarization: false,
             },
         }
     }
@@ -95,6 +98,7 @@ const MISTRAL: EndpointProfile = EndpointProfile {
     uploads_flac: true,
     audio_request: AudioRequest::Multipart,
     models_query: "",
+    supports_diarization: true,
 };
 
 const OPENROUTER: EndpointProfile = EndpointProfile {
@@ -108,6 +112,7 @@ const OPENROUTER: EndpointProfile = EndpointProfile {
     uploads_flac: false,
     audio_request: AudioRequest::Base64Json,
     models_query: "?output_modalities=transcription",
+    supports_diarization: false,
 };
 
 const HOST_PROFILES: &[HostProfile] = &[
@@ -123,7 +128,9 @@ const HOST_PROFILES: &[HostProfile] = &[
 
 pub fn resolve_profile(endpoint: &str) -> EndpointProfile {
     let endpoint = endpoint.trim().to_ascii_lowercase();
-    let host = reqwest::Url::parse(&endpoint)
+    let url = reqwest::Url::parse(&endpoint)
+        .or_else(|_| reqwest::Url::parse(&format!("https://{endpoint}")));
+    let host = url
         .ok()
         .and_then(|url| url.host_str().map(str::to_ascii_lowercase));
 
@@ -225,6 +232,7 @@ pub struct TranscriptionFormParams<'a> {
     pub language: Option<&'a str>,
     pub dictionary: &'a [String],
     pub prompt: Option<&'a str>,
+    pub(crate) diarize: bool,
 }
 
 pub fn build_transcription_form(
@@ -271,6 +279,10 @@ pub fn build_transcription_form(
 
     if let Some(language) = params.language {
         form = form.text("language", language.to_string());
+    }
+
+    if profile.supports_diarization && params.diarize {
+        form = form.text("diarize", "true");
     }
 
     apply_dictionary_and_prompt(
@@ -377,6 +389,8 @@ mod tests {
         assert_eq!(profile.timestamp_mode, TimestampMode::NativeGranularities);
         assert_eq!(profile.dictionary_mode, DictionaryMode::ContextBias);
         assert!(!profile.sends_response_format);
+
+        assert_eq!(resolve_profile("api.mistral.ai/v1"), profile);
     }
 
     #[test]
