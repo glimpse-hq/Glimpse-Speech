@@ -250,6 +250,7 @@ pub async fn run() -> anyhow::Result<()> {
                 cors: cors_enabled,
                 transcription_provider,
                 local_models: Vec::new(),
+                local_model_source: None,
             })
             .await
         }

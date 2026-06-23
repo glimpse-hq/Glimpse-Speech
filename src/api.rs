@@ -43,6 +43,7 @@ pub struct ApiConfig {
     pub cors: bool,
     pub transcription_provider: Option<Arc<SpeechProvider>>,
     pub local_models: Vec<ApiModelInfo>,
+    pub local_model_source: Option<ApiModelSource>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -62,9 +63,11 @@ struct ApiState {
     api_key: Option<Arc<str>>,
     event_sink: Option<ApiEventSink>,
     local_models: Arc<Vec<ApiModelInfo>>,
+    local_model_source: Option<ApiModelSource>,
 }
 
 pub type ApiEventSink = Arc<dyn Fn(ApiEvent) + Send + Sync + 'static>;
+pub type ApiModelSource = Arc<dyn Fn() -> Vec<ApiModelInfo> + Send + Sync + 'static>;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ApiEvent {
@@ -233,6 +236,7 @@ pub async fn serve_with_shutdown(
         api_key: api_key.map(Arc::from),
         event_sink: config.event_sink,
         local_models: Arc::new(config.local_models),
+        local_model_source: config.local_model_source,
     };
     state.log("info", format!("Local API listening on http://{addr}"));
     let model_management_enabled = !state.local_models.is_empty();
@@ -272,7 +276,12 @@ async fn list_models(
         return Ok(Json(ListResponse::new(data)).into_response());
     }
 
-    Ok(Json(ListResponse::new((*state.local_models).clone())).into_response())
+    let models = state
+        .local_model_source
+        .as_ref()
+        .map(|source| source())
+        .unwrap_or_else(|| (*state.local_models).clone());
+    Ok(Json(ListResponse::new(models)).into_response())
 }
 
 fn remote_model(id: String) -> RemoteModel {
