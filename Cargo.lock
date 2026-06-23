@@ -876,6 +876,7 @@ version = "1.5.0"
 dependencies = [
  "anyhow",
  "axum",
+ "base64 0.13.1",
  "clap",
  "directories",
  "flacenc",

@@ -13,6 +13,14 @@ pub struct EndpointProfile {
     pub supports_word_timestamps: bool,
     pub keep_timestamps_on_format_fallback: bool,
     pub uploads_flac: bool,
+    pub audio_request: AudioRequest,
+    pub models_query: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioRequest {
+    Multipart,
+    Base64Json,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +60,8 @@ impl Compatibility {
                 supports_word_timestamps: true,
                 keep_timestamps_on_format_fallback: false,
                 uploads_flac: true,
+                audio_request: AudioRequest::Multipart,
+                models_query: "",
             },
             Self::SelfHosted => EndpointProfile {
                 timestamp_mode: TimestampMode::OpenAiVerboseJson,
@@ -62,6 +72,8 @@ impl Compatibility {
                 supports_word_timestamps: false,
                 keep_timestamps_on_format_fallback: true,
                 uploads_flac: false,
+                audio_request: AudioRequest::Multipart,
+                models_query: "",
             },
         }
     }
@@ -81,12 +93,33 @@ const MISTRAL: EndpointProfile = EndpointProfile {
     supports_word_timestamps: false,
     keep_timestamps_on_format_fallback: true,
     uploads_flac: true,
+    audio_request: AudioRequest::Multipart,
+    models_query: "",
 };
 
-const HOST_PROFILES: &[HostProfile] = &[HostProfile {
-    host_suffixes: &["mistral.ai"],
-    profile: MISTRAL,
-}];
+const OPENROUTER: EndpointProfile = EndpointProfile {
+    timestamp_mode: TimestampMode::None,
+    dictionary_mode: DictionaryMode::Prompt,
+    sends_response_format: false,
+    sends_temperature: false,
+    duration_source: DurationSource::TopLevel,
+    supports_word_timestamps: false,
+    keep_timestamps_on_format_fallback: false,
+    uploads_flac: false,
+    audio_request: AudioRequest::Base64Json,
+    models_query: "?output_modalities=transcription",
+};
+
+const HOST_PROFILES: &[HostProfile] = &[
+    HostProfile {
+        host_suffixes: &["mistral.ai"],
+        profile: MISTRAL,
+    },
+    HostProfile {
+        host_suffixes: &["openrouter.ai"],
+        profile: OPENROUTER,
+    },
+];
 
 pub fn resolve_profile(endpoint: &str) -> EndpointProfile {
     let endpoint = endpoint.trim().to_ascii_lowercase();

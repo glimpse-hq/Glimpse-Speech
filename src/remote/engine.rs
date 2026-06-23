@@ -4,12 +4,12 @@ use std::{
 };
 
 use reqwest::{header::RETRY_AFTER, multipart, Client};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio_util::io::ReaderStream;
 
 use super::provider::{
     apply_auth, build_transcription_form, is_self_hosted_host, plan_request, resolve_profile,
-    DurationSource, EndpointProfile, TranscriptionFormParams,
+    AudioRequest, DurationSource, EndpointProfile, TranscriptionFormParams,
 };
 use super::{
     config_error, parse_retry_after, parse_upstream_error, transport_error, RemoteError,
@@ -66,8 +66,28 @@ impl RemoteEngine {
         }
 
         let profile = resolve_profile(endpoint);
-        let plan = plan_request(&profile, params.timestamps, params.timestamp_granularity);
         let url = format!("{}/audio/transcriptions", api_base(endpoint));
+        let api_key = self.config.api_key.trim();
+        let language = params
+            .language
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("auto"))
+            .map(str::to_string);
+
+        if profile.audio_request == AudioRequest::Base64Json {
+            return transcribe_base64(
+                &self.client,
+                &url,
+                model,
+                audio_path,
+                language.as_deref(),
+                api_key,
+                &profile,
+            )
+            .await;
+        }
+
+        let plan = plan_request(&profile, params.timestamps, params.timestamp_granularity);
 
         let extension = audio_path
             .extension()
@@ -97,12 +117,6 @@ impl RemoteEngine {
                 .unwrap_or("recording")
         );
         let mut use_flac = flac.is_some();
-        let api_key = self.config.api_key.trim();
-        let language = params
-            .language
-            .map(str::trim)
-            .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("auto"))
-            .map(str::to_string);
 
         let mut effective_format = plan.response_format;
         let mut granularities = plan.timestamp_granularities.clone();
@@ -184,7 +198,8 @@ impl RemoteEngine {
         if endpoint.is_empty() {
             return Ok(Vec::new());
         }
-        let url = format!("{}/models", api_base(endpoint));
+        let profile = resolve_profile(endpoint);
+        let url = format!("{}/models{}", api_base(endpoint), profile.models_query);
         let builder = apply_auth(
             self.client.get(url).timeout(MODELS_TIMEOUT),
             self.config.api_key.trim(),
@@ -209,6 +224,68 @@ impl RemoteEngine {
         })?;
         Ok(parsed.into_ids())
     }
+}
+
+async fn transcribe_base64(
+    client: &Client,
+    url: &str,
+    model: &str,
+    audio_path: &Path,
+    language: Option<&str>,
+    api_key: &str,
+    profile: &EndpointProfile,
+) -> Result<Transcription, RemoteError> {
+    let bytes = tokio::fs::read(audio_path).await.map_err(|err| {
+        transport_error(format!(
+            "Failed to read recording at {}: {err}",
+            audio_path.display()
+        ))
+    })?;
+    let format = audio_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_else(|| "wav".to_string());
+    let request = Base64AudioRequest {
+        model,
+        input_audio: Base64Audio {
+            data: base64::encode(&bytes),
+            format: &format,
+        },
+        language,
+    };
+
+    let builder = apply_auth(
+        client.post(url).json(&request).timeout(DEFAULT_TIMEOUT),
+        api_key,
+    );
+    let response = builder.send().await.map_err(|err| {
+        transport_error(format!("Failed to reach remote speech endpoint: {err}"))
+    })?;
+    let status = response.status();
+    let retry_after = parse_retry_after(response.headers().get(RETRY_AFTER));
+    let body_text = response.text().await.map_err(|err| {
+        transport_error(format!("Failed to read remote speech response: {err}"))
+    })?;
+    if !status.is_success() {
+        return Err(parse_upstream_error(status, retry_after, &body_text));
+    }
+
+    parse_transcription_body(&body_text, model, profile)
+}
+
+#[derive(Serialize)]
+struct Base64AudioRequest<'a> {
+    model: &'a str,
+    input_audio: Base64Audio<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    language: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct Base64Audio<'a> {
+    data: String,
+    format: &'a str,
 }
 
 #[derive(Debug, Deserialize)]
