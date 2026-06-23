@@ -8,8 +8,8 @@ use serde::Deserialize;
 use tokio_util::io::ReaderStream;
 
 use super::provider::{
-    apply_auth, build_transcription_form, plan_request, resolve_profile, DurationSource,
-    EndpointProfile, TranscriptionFormParams,
+    apply_auth, build_transcription_form, is_self_hosted_host, plan_request, resolve_profile,
+    DurationSource, EndpointProfile, TranscriptionFormParams,
 };
 use super::{
     config_error, parse_retry_after, parse_upstream_error, transport_error, RemoteError,
@@ -80,7 +80,7 @@ impl RemoteEngine {
             .unwrap_or("recording.wav")
             .to_string();
 
-        let flac = if extension.as_deref() == Some("wav") {
+        let flac = if profile.uploads_flac && extension.as_deref() == Some("wav") {
             let path = audio_path.to_path_buf();
             tokio::task::spawn_blocking(move || encode_wav_to_flac_file(&path))
                 .await
@@ -438,22 +438,24 @@ fn encode_wav_to_flac_file(audio_path: &Path) -> Option<TempFlacFile> {
 }
 
 fn is_flac_unsupported(err: &RemoteError) -> bool {
-    if err.kind != RemoteErrorKind::InvalidRequest {
-        return false;
+    if err.kind == RemoteErrorKind::InvalidRequest && err.param.as_deref() == Some("file") {
+        return true;
     }
-    err.param.as_deref() == Some("file")
-        || error_mentions(
-            err,
-            &[
-                "flac",
-                "file format",
-                "audio format",
-                "unsupported format",
-                "invalid format",
-                "decod",
-                "corrupt",
-            ],
-        )
+    error_mentions(
+        err,
+        &[
+            "flac",
+            "file format",
+            "audio format",
+            "unsupported format",
+            "invalid format",
+            "decod",
+            "corrupt",
+            "riff",
+            "ffmpeg",
+            "wave file",
+        ],
+    )
 }
 
 fn audio_mime_for_extension(extension: Option<&str>) -> &'static str {
@@ -472,7 +474,9 @@ fn audio_mime_for_extension(extension: Option<&str>) -> &'static str {
 }
 
 fn api_base(endpoint: &str) -> String {
-    let mut base = endpoint.trim().trim_end_matches('/').to_string();
+    let mut base = ensure_scheme(endpoint.trim())
+        .trim_end_matches('/')
+        .to_string();
     for suffix in ["/v1/audio/transcriptions", "/audio/transcriptions"] {
         if base.ends_with(suffix) {
             base.truncate(base.len() - suffix.len());
@@ -487,10 +491,44 @@ fn api_base(endpoint: &str) -> String {
     }
 }
 
+fn ensure_scheme(endpoint: &str) -> String {
+    let trimmed = endpoint.trim();
+    if trimmed.is_empty() || trimmed.contains("://") {
+        return trimmed.to_string();
+    }
+    let authority = trimmed.split('/').next().unwrap_or(trimmed);
+    let host = authority
+        .strip_prefix('[')
+        .and_then(|value| value.split_once(']').map(|(host, _)| host))
+        .unwrap_or_else(|| authority.split(':').next().unwrap_or(authority));
+    let local = is_self_hosted_host(host);
+    let scheme = if local { "http" } else { "https" };
+    format!("{scheme}://{trimmed}")
+}
+
 fn ends_with_version_segment(base: &str) -> bool {
     base.rsplit('/').next().is_some_and(|segment| {
         segment.len() > 1
             && segment.starts_with('v')
             && segment[1..].bytes().all(|byte| byte.is_ascii_digit())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_scheme;
+
+    #[test]
+    fn infers_endpoint_scheme() {
+        assert_eq!(
+            ensure_scheme("server.local:8000"),
+            "http://server.local:8000"
+        );
+        assert_eq!(ensure_scheme("[::1]:8000"), "http://[::1]:8000");
+        assert_eq!(ensure_scheme("api.example.com"), "https://api.example.com");
+        assert_eq!(
+            ensure_scheme("http://localhost:8000"),
+            "http://localhost:8000"
+        );
+    }
 }

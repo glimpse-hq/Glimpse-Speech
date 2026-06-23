@@ -12,6 +12,7 @@ pub struct EndpointProfile {
     pub duration_source: DurationSource,
     pub supports_word_timestamps: bool,
     pub keep_timestamps_on_format_fallback: bool,
+    pub uploads_flac: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +51,7 @@ impl Compatibility {
                 duration_source: DurationSource::TopLevel,
                 supports_word_timestamps: true,
                 keep_timestamps_on_format_fallback: false,
+                uploads_flac: true,
             },
             Self::SelfHosted => EndpointProfile {
                 timestamp_mode: TimestampMode::OpenAiVerboseJson,
@@ -59,6 +61,7 @@ impl Compatibility {
                 duration_source: DurationSource::TopLevel,
                 supports_word_timestamps: false,
                 keep_timestamps_on_format_fallback: true,
+                uploads_flac: false,
             },
         }
     }
@@ -77,6 +80,7 @@ const MISTRAL: EndpointProfile = EndpointProfile {
     duration_source: DurationSource::UsagePromptAudioSeconds,
     supports_word_timestamps: false,
     keep_timestamps_on_format_fallback: true,
+    uploads_flac: true,
 };
 
 const HOST_PROFILES: &[HostProfile] = &[HostProfile {
@@ -101,13 +105,21 @@ pub fn resolve_profile(endpoint: &str) -> EndpointProfile {
         return entry.profile;
     }
 
-    if host
-        .as_deref()
-        .is_some_and(|host| host == "localhost" || host.starts_with("127."))
-    {
+    if host.as_deref().is_some_and(is_self_hosted_host) {
         Compatibility::SelfHosted.base_profile()
     } else {
         Compatibility::DirectOpenAi.base_profile()
+    }
+}
+
+pub(crate) fn is_self_hosted_host(host: &str) -> bool {
+    if host == "localhost" || host.ends_with(".local") {
+        return true;
+    }
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => ip.is_private() || ip.is_loopback() || ip.is_link_local(),
+        Ok(std::net::IpAddr::V6(ip)) => ip.is_loopback(),
+        Err(_) => false,
     }
 }
 
