@@ -48,6 +48,7 @@ pub struct ApiConfig {
 #[derive(Debug, Clone, Serialize)]
 pub struct ApiModelInfo {
     pub id: String,
+    pub object: &'static str,
     pub label: String,
     pub description: String,
     pub tags: Vec<String>,
@@ -96,10 +97,26 @@ struct InstallResponse {
 #[derive(Debug, Serialize)]
 struct RemoteModel {
     id: String,
+    object: &'static str,
     label: String,
     description: String,
     tags: &'static [&'static str],
     capabilities: &'static [&'static str],
+}
+
+#[derive(Debug, Serialize)]
+struct ListResponse<T> {
+    object: &'static str,
+    data: Vec<T>,
+}
+
+impl<T> ListResponse<T> {
+    fn new(data: Vec<T>) -> Self {
+        Self {
+            object: "list",
+            data,
+        }
+    }
 }
 
 struct ParsedTranscriptionRequest {
@@ -251,18 +268,18 @@ async fn list_models(
     state.log("info", "GET /v1/models".to_string());
     if let Some(remote_ids) = state.provider.remote_model_ids().await {
         let remote_ids = remote_ids.map_err(map_transcribe_error)?;
-        return Ok(
-            Json(remote_ids.into_iter().map(remote_model).collect::<Vec<_>>()).into_response(),
-        );
+        let data = remote_ids.into_iter().map(remote_model).collect::<Vec<_>>();
+        return Ok(Json(ListResponse::new(data)).into_response());
     }
 
-    Ok(Json((*state.local_models).clone()).into_response())
+    Ok(Json(ListResponse::new((*state.local_models).clone())).into_response())
 }
 
 fn remote_model(id: String) -> RemoteModel {
     let label = id.clone();
     RemoteModel {
         id,
+        object: "model",
         label,
         description: "Remote transcription model configured for this server.".to_string(),
         tags: &["Remote"],

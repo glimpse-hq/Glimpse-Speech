@@ -207,7 +207,7 @@ impl RemoteEngine {
                 "Failed to parse remote speech models response: {err}"
             ))
         })?;
-        Ok(parsed.data.into_iter().map(|entry| entry.id).collect())
+        Ok(parsed.into_ids())
     }
 }
 
@@ -246,8 +246,20 @@ struct UpstreamSegment {
 }
 
 #[derive(Debug, Deserialize)]
-struct ModelsResponse {
-    data: Vec<ModelEntry>,
+#[serde(untagged)]
+enum ModelsResponse {
+    Wrapped { data: Vec<ModelEntry> },
+    List(Vec<ModelEntry>),
+}
+
+impl ModelsResponse {
+    fn into_ids(self) -> Vec<String> {
+        let entries = match self {
+            ModelsResponse::Wrapped { data } => data,
+            ModelsResponse::List(list) => list,
+        };
+        entries.into_iter().map(|entry| entry.id).collect()
+    }
 }
 
 #[derive(Debug, Deserialize)]
