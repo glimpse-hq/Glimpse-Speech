@@ -147,3 +147,88 @@ fn temp_wav_path() -> Result<TempWav, Box<dyn std::error::Error>> {
 fn io_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
     io::Error::other(message.into()).into()
 }
+
+#[cfg(any(
+    feature = "whisper",
+    all(
+        feature = "nvidia",
+        not(all(target_os = "macos", target_arch = "x86_64"))
+    )
+))]
+pub(crate) fn resample_i16_to_f32(samples: &[i16], from_rate: u32, to_rate: u32) -> Vec<f32> {
+    const SCALE: f32 = 1.0 / PCM16_SCALE;
+
+    if samples.is_empty() {
+        return Vec::new();
+    }
+    if from_rate == 0 || to_rate == 0 || from_rate == to_rate {
+        return samples.iter().map(|&s| s as f32 * SCALE).collect();
+    }
+
+    let step = from_rate as f64 / to_rate as f64;
+    let target_len = ((samples.len() as f64 / step).ceil().max(1.0)) as usize;
+    let last_index = samples.len() - 1;
+    let mut output = Vec::with_capacity(target_len);
+
+    for idx in 0..target_len {
+        let src_pos = idx as f64 * step;
+        let base = src_pos as usize;
+        if base >= last_index {
+            output.push(samples[last_index] as f32 * SCALE);
+        } else {
+            let frac = (src_pos - base as f64) as f32;
+            let current = samples[base] as f32 * SCALE;
+            let next = samples[base + 1] as f32 * SCALE;
+            output.push(current + (next - current) * frac);
+        }
+    }
+
+    output
+}
+
+#[cfg(all(
+    test,
+    any(
+        feature = "whisper",
+        all(
+            feature = "nvidia",
+            not(all(target_os = "macos", target_arch = "x86_64"))
+        )
+    )
+))]
+mod resample_tests {
+    use super::resample_i16_to_f32;
+
+    const SCALE: f32 = 1.0 / 32_768.0;
+
+    #[test]
+    fn passthrough_when_rate_unchanged() {
+        let input = [0i16, 16_384, -16_384, 32_767];
+        let out = resample_i16_to_f32(&input, 16_000, 16_000);
+        let expected: Vec<f32> = input.iter().map(|&s| s as f32 * SCALE).collect();
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn zero_rate_does_not_panic_or_overflow() {
+        let input = [1i16, 2, 3, 4];
+        assert_eq!(resample_i16_to_f32(&input, 0, 16_000).len(), input.len());
+        assert_eq!(resample_i16_to_f32(&input, 48_000, 0).len(), input.len());
+    }
+
+    #[test]
+    fn empty_input_yields_empty_output() {
+        assert!(resample_i16_to_f32(&[], 48_000, 16_000).is_empty());
+    }
+
+    #[test]
+    fn upsampling_interpolates_between_samples() {
+        let input = [0i16, 1000];
+        let out = resample_i16_to_f32(&input, 8_000, 16_000);
+        assert_eq!(out.len(), 4);
+        assert!((out[0] - 0.0).abs() < 1e-9);
+        assert!((out[1] - 500.0 * SCALE).abs() < 1e-6);
+        assert!((out[2] - 1000.0 * SCALE).abs() < 1e-6);
+        assert!((out[3] - 1000.0 * SCALE).abs() < 1e-6);
+    }
+}

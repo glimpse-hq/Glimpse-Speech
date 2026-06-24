@@ -642,7 +642,7 @@ fn prepare_audio(audio: AudioInput) -> Result<PreparedAudio> {
                 // Normalize and resample in a single pass over one output
                 // buffer instead of materializing an intermediate f32 copy.
                 (
-                    resample_i16_to_f32(&samples, sample_rate.max(1), 16_000),
+                    crate::audio::resample_i16_to_f32(&samples, sample_rate, 16_000),
                     sample_rate,
                     sample_count,
                 )
@@ -675,37 +675,41 @@ fn audio_duration_ms(sample_count: usize, sample_rate: u32) -> u128 {
     ((sample_count as u128) * 1000) / sample_rate as u128
 }
 
-#[cfg(any(
-    feature = "whisper",
-    all(
-        feature = "nvidia",
-        not(all(target_os = "macos", target_arch = "x86_64"))
+#[cfg(all(
+    test,
+    any(
+        feature = "whisper",
+        all(
+            feature = "nvidia",
+            not(all(target_os = "macos", target_arch = "x86_64"))
+        )
     )
 ))]
-/// Normalizes i16 PCM to f32 and linearly resamples it in a single pass.
-fn resample_i16_to_f32(samples: &[i16], from_rate: u32, to_rate: u32) -> Vec<f32> {
-    const SCALE: f32 = 1.0 / 32_768.0;
+mod prepare_tests {
+    use super::{prepare_audio, AudioInput};
 
-    if samples.is_empty() {
-        return Vec::new();
-    }
-    if from_rate == 0 || to_rate == 0 || from_rate == to_rate {
-        return samples.iter().map(|s| *s as f32 * SCALE).collect();
-    }
+    #[test]
+    fn pcm_with_zero_sample_rate_does_not_blow_up() {
+        let prepared = prepare_audio(AudioInput::PcmI16 {
+            samples: vec![1i16, 2, 3, 4],
+            sample_rate: 0,
+        })
+        .expect("prepare_audio");
 
-    let ratio = to_rate as f64 / from_rate as f64;
-    let target_len = ((samples.len() as f64) * ratio).ceil().max(1.0) as usize;
-    let last_index = samples.len() - 1;
-    let mut output = Vec::with_capacity(target_len);
-
-    for idx in 0..target_len {
-        let src_pos = idx as f64 / ratio;
-        let base = src_pos.floor() as usize;
-        let frac = (src_pos - base as f64) as f32;
-        let current = samples[base.min(last_index)] as f32 * SCALE;
-        let next = samples[(base + 1).min(last_index)] as f32 * SCALE;
-        output.push(current + (next - current) * frac);
+        assert_eq!(prepared.samples.len(), 20_000);
+        assert_eq!(prepared.duration_ms, 0);
     }
 
-    output
+    #[test]
+    fn pcm_at_16khz_preserves_sample_count_and_duration() {
+        let prepared = prepare_audio(AudioInput::PcmI16 {
+            samples: vec![0i16; 32_000],
+            sample_rate: 16_000,
+        })
+        .expect("prepare_audio");
+
+        assert_eq!(prepared.duration_ms, 2_000);
+        assert_eq!(prepared.samples.len(), 32_000 + 4_000);
+    }
 }
+
