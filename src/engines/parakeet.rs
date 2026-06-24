@@ -3,8 +3,10 @@ use std::path::Path;
 use parakeet_rs::{ParakeetTDT, ParakeetUnified, TimestampMode, Transcriber};
 
 use crate::{
-    dictionary::sanitize_dictionary_entries, models::ModelLayout, TranscriptionEngine,
-    TranscriptionResult, TranscriptionSegment,
+    dictionary::sanitize_dictionary_entries,
+    engines::{io_error, validate_model_dir},
+    models::ModelLayout,
+    TranscriptionEngine, TranscriptionResult, TranscriptionSegment,
 };
 
 const SAMPLE_RATE: u32 = 16_000;
@@ -165,7 +167,7 @@ impl TranscriptionEngine for ParakeetEngine {
         model_path: &Path,
         params: Self::ModelParams,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        validate_model_path(model_path)?;
+        validate_model_dir(model_path, "Parakeet")?;
         let exec_config = parakeet_rs::ExecutionConfig::default()
             .with_intra_threads(crate::engines::inference_threads());
         let runtime = match params.layout {
@@ -287,45 +289,6 @@ fn normalize_inference_params(params: Option<ParakeetInferenceParams>) -> Parake
     params
 }
 
-fn validate_model_path(model_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    if !model_path.exists() {
-        return Err(io_error(format!(
-            "Parakeet model directory not found: {}",
-            model_path.display()
-        )));
-    }
-
-    if !model_path.is_dir() {
-        return Err(io_error(format!(
-            "Parakeet model path must be a directory: {}",
-            model_path.display()
-        )));
-    }
-
-    Ok(())
-}
-
 fn parakeet_error(error: impl std::fmt::Display) -> Box<dyn std::error::Error> {
     io_error(format!("parakeet-rs error: {error}"))
-}
-
-fn io_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
-    std::io::Error::other(message.into()).into()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{ParakeetModelParams, QuantizationType};
-
-    #[test]
-    fn int8_constructor_sets_quantized_mode() {
-        let params = ParakeetModelParams::int8();
-        assert_eq!(params.quantization, QuantizationType::Int8);
-    }
-
-    #[test]
-    fn fp32_constructor_sets_full_precision_mode() {
-        let params = ParakeetModelParams::fp32();
-        assert_eq!(params.quantization, QuantizationType::FP32);
-    }
 }

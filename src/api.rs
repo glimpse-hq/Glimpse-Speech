@@ -799,7 +799,10 @@ fn split_field_values(value: &str) -> Vec<String> {
 }
 
 fn parse_bool(value: &str) -> bool {
-    matches!(value.trim(), "true" | "1" | "yes" | "on")
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "true" | "1" | "yes" | "on"
+    )
 }
 
 fn map_error(error: anyhow::Error) -> (StatusCode, Json<ErrorBody>) {
@@ -961,6 +964,16 @@ mod tests {
             model_id: "whisper_small_q5".to_string(),
             language: Some("en".to_string()),
             duration_ms: 1250,
+        }
+    }
+
+    #[test]
+    fn parse_bool_accepts_case_and_common_truthy_values() {
+        for truthy in ["true", "True", "TRUE", "1", "Yes", "ON", " true "] {
+            assert!(parse_bool(truthy), "{truthy:?} should be truthy");
+        }
+        for falsy in ["false", "False", "0", "no", "", "off"] {
+            assert!(!parse_bool(falsy), "{falsy:?} should be falsy");
         }
     }
 

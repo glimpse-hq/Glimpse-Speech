@@ -2,7 +2,10 @@ use std::{borrow::Cow, path::Path};
 
 use parakeet_rs::{Nemotron, NemotronMode};
 
-use crate::{TranscriptionEngine, TranscriptionResult};
+use crate::{
+    engines::{io_error, validate_model_dir},
+    TranscriptionEngine, TranscriptionResult,
+};
 
 /// Chunk size in samples for streaming (560ms at 16kHz).
 pub const STREAMING_CHUNK_SAMPLES: usize = 8960;
@@ -72,7 +75,7 @@ impl TranscriptionEngine for NemotronEngine {
         model_path: &Path,
         _params: Self::ModelParams,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        validate_model_path(model_path)?;
+        validate_model_dir(model_path, "Nemotron")?;
         let exec_config = parakeet_rs::ExecutionConfig::default()
             .with_intra_threads(crate::engines::inference_threads());
         let runtime =
@@ -109,24 +112,6 @@ impl TranscriptionEngine for NemotronEngine {
             language: None,
         })
     }
-}
-
-fn validate_model_path(model_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    if !model_path.exists() {
-        return Err(io_error(format!(
-            "Nemotron model directory not found: {}",
-            model_path.display()
-        )));
-    }
-
-    if !model_path.is_dir() {
-        return Err(io_error(format!(
-            "Nemotron model path must be a directory: {}",
-            model_path.display()
-        )));
-    }
-
-    Ok(())
 }
 
 fn nemotron_error(error: impl std::fmt::Display) -> Box<dyn std::error::Error> {
@@ -181,7 +166,3 @@ const NEMOTRON_LANGUAGE_CODES: &[&str] = &[
     "pl-PL", "pt", "pt-BR", "pt-PT", "ro", "ro-RO", "ru", "ru-RU", "sk", "sk-SK", "sl", "sl-SI",
     "sv", "sv-SE", "th-TH", "tr", "tr-TR", "uk", "uk-UA", "vi-VN", "zh-CN",
 ];
-
-fn io_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
-    std::io::Error::other(message.into()).into()
-}
