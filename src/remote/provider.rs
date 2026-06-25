@@ -158,7 +158,11 @@ pub(crate) fn is_self_hosted_host(host: &str) -> bool {
     }
     match host.parse::<std::net::IpAddr>() {
         Ok(std::net::IpAddr::V4(ip)) => ip.is_private() || ip.is_loopback() || ip.is_link_local(),
-        Ok(std::net::IpAddr::V6(ip)) => ip.is_loopback(),
+        Ok(std::net::IpAddr::V6(ip)) => {
+            ip.is_loopback()
+                || (ip.segments()[0] & 0xfe00) == 0xfc00
+                || (ip.segments()[0] & 0xffc0) == 0xfe80
+        }
         Err(_) => false,
     }
 }

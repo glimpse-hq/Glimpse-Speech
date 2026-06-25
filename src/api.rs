@@ -258,7 +258,8 @@ pub async fn serve_with_shutdown(
         local_model_source: config.local_model_source,
     };
     state.log("info", format!("Local API listening on http://{addr}"));
-    let model_management_enabled = !state.local_models.is_empty();
+    let model_management_enabled =
+        !state.local_models.is_empty() || state.local_model_source.is_some();
 
     let mut app = Router::new()
         .route("/v1/models", get(list_models))

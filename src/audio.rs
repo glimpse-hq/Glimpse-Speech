@@ -199,7 +199,7 @@ pub(crate) fn resample_i16_to_f32(samples: &[i16], from_rate: u32, to_rate: u32)
 mod resample_tests {
     use super::resample_i16_to_f32;
 
-    const SCALE: f32 = 1.0 / 32_768.0;
+    const SCALE: f32 = 1.0 / super::PCM16_SCALE;
 
     #[test]
     fn passthrough_when_rate_unchanged() {
