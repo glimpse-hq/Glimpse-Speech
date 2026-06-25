@@ -49,11 +49,30 @@ pub struct ApiConfig {
 #[derive(Debug, Clone, Serialize)]
 pub struct ApiModelInfo {
     pub id: String,
-    pub object: &'static str,
+    object: &'static str,
     pub label: String,
     pub description: String,
     pub tags: Vec<String>,
     pub capabilities: Vec<String>,
+}
+
+impl ApiModelInfo {
+    pub fn new(
+        id: String,
+        label: String,
+        description: String,
+        tags: Vec<String>,
+        capabilities: Vec<String>,
+    ) -> Self {
+        Self {
+            id,
+            object: "model",
+            label,
+            description,
+            tags,
+            capabilities,
+        }
+    }
 }
 
 #[derive(Clone)]
