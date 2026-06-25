@@ -43,15 +43,36 @@ pub struct ApiConfig {
     pub cors: bool,
     pub transcription_provider: Option<Arc<SpeechProvider>>,
     pub local_models: Vec<ApiModelInfo>,
+    pub local_model_source: Option<ApiModelSource>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ApiModelInfo {
     pub id: String,
+    object: &'static str,
     pub label: String,
     pub description: String,
     pub tags: Vec<String>,
     pub capabilities: Vec<String>,
+}
+
+impl ApiModelInfo {
+    pub fn new(
+        id: String,
+        label: String,
+        description: String,
+        tags: Vec<String>,
+        capabilities: Vec<String>,
+    ) -> Self {
+        Self {
+            id,
+            object: "model",
+            label,
+            description,
+            tags,
+            capabilities,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -61,9 +82,11 @@ struct ApiState {
     api_key: Option<Arc<str>>,
     event_sink: Option<ApiEventSink>,
     local_models: Arc<Vec<ApiModelInfo>>,
+    local_model_source: Option<ApiModelSource>,
 }
 
 pub type ApiEventSink = Arc<dyn Fn(ApiEvent) + Send + Sync + 'static>;
+pub type ApiModelSource = Arc<dyn Fn() -> Vec<ApiModelInfo> + Send + Sync + 'static>;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ApiEvent {
@@ -96,10 +119,26 @@ struct InstallResponse {
 #[derive(Debug, Serialize)]
 struct RemoteModel {
     id: String,
+    object: &'static str,
     label: String,
     description: String,
     tags: &'static [&'static str],
     capabilities: &'static [&'static str],
+}
+
+#[derive(Debug, Serialize)]
+struct ListResponse<T> {
+    object: &'static str,
+    data: Vec<T>,
+}
+
+impl<T> ListResponse<T> {
+    fn new(data: Vec<T>) -> Self {
+        Self {
+            object: "list",
+            data,
+        }
+    }
 }
 
 struct ParsedTranscriptionRequest {
@@ -216,9 +255,11 @@ pub async fn serve_with_shutdown(
         api_key: api_key.map(Arc::from),
         event_sink: config.event_sink,
         local_models: Arc::new(config.local_models),
+        local_model_source: config.local_model_source,
     };
     state.log("info", format!("Local API listening on http://{addr}"));
-    let model_management_enabled = !state.local_models.is_empty();
+    let model_management_enabled =
+        !state.local_models.is_empty() || state.local_model_source.is_some();
 
     let mut app = Router::new()
         .route("/v1/models", get(list_models))
@@ -251,18 +292,23 @@ async fn list_models(
     state.log("info", "GET /v1/models".to_string());
     if let Some(remote_ids) = state.provider.remote_model_ids().await {
         let remote_ids = remote_ids.map_err(map_transcribe_error)?;
-        return Ok(
-            Json(remote_ids.into_iter().map(remote_model).collect::<Vec<_>>()).into_response(),
-        );
+        let data = remote_ids.into_iter().map(remote_model).collect::<Vec<_>>();
+        return Ok(Json(ListResponse::new(data)).into_response());
     }
 
-    Ok(Json((*state.local_models).clone()).into_response())
+    let models = state
+        .local_model_source
+        .as_ref()
+        .map(|source| source())
+        .unwrap_or_else(|| (*state.local_models).clone());
+    Ok(Json(ListResponse::new(models)).into_response())
 }
 
 fn remote_model(id: String) -> RemoteModel {
     let label = id.clone();
     RemoteModel {
         id,
+        object: "model",
         label,
         description: "Remote transcription model configured for this server.".to_string(),
         tags: &["Remote"],
@@ -773,7 +819,10 @@ fn split_field_values(value: &str) -> Vec<String> {
 }
 
 fn parse_bool(value: &str) -> bool {
-    matches!(value.trim(), "true" | "1" | "yes" | "on")
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "true" | "1" | "yes" | "on"
+    )
 }
 
 fn map_error(error: anyhow::Error) -> (StatusCode, Json<ErrorBody>) {
@@ -935,6 +984,16 @@ mod tests {
             model_id: "whisper_small_q5".to_string(),
             language: Some("en".to_string()),
             duration_ms: 1250,
+        }
+    }
+
+    #[test]
+    fn parse_bool_accepts_case_and_common_truthy_values() {
+        for truthy in ["true", "True", "TRUE", "1", "Yes", "ON", " true "] {
+            assert!(parse_bool(truthy), "{truthy:?} should be truthy");
+        }
+        for falsy in ["false", "False", "0", "no", "", "off"] {
+            assert!(!parse_bool(falsy), "{falsy:?} should be falsy");
         }
     }
 

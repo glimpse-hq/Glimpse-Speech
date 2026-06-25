@@ -3,8 +3,8 @@ use std::{path::Path, time::Instant};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 use crate::{
-    dictionary::build_dictionary_prompt, TranscriptionEngine, TranscriptionResult,
-    TranscriptionSegment,
+    dictionary::build_dictionary_prompt, engines::io_error, TranscriptionEngine,
+    TranscriptionResult, TranscriptionSegment,
 };
 
 #[derive(Debug, Clone)]
@@ -346,8 +346,4 @@ fn normalize_optional_whisper_text(
     }
 
     Ok(Some(trimmed.to_string()))
-}
-
-fn io_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
-    std::io::Error::other(message.into()).into()
 }

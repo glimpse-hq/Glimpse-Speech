@@ -105,31 +105,13 @@ mod silero {
             .collect()
     }
 
-    fn resample_to_16k(samples: &[i16], sample_rate: u32) -> Vec<f32> {
-        if sample_rate == 16_000 {
-            return samples.iter().map(|&s| s as f32 / 32768.0).collect();
-        }
-        let ratio = 16_000.0 / sample_rate as f32;
-        let out_len = (samples.len() as f32 * ratio) as usize;
-        (0..out_len)
-            .map(|i| {
-                let src = i as f32 / ratio;
-                let idx = src as usize;
-                let frac = src - idx as f32;
-                let a = samples.get(idx).copied().unwrap_or(0) as f32;
-                let b = samples.get(idx + 1).copied().unwrap_or(0) as f32;
-                (a + (b - a) * frac) / 32768.0
-            })
-            .collect()
-    }
-
     static VAD: Mutex<Option<SileroVad>> = Mutex::new(None);
 
     /// Speech regions in seconds (padded), detected by the Silero neural VAD.
     /// Returns `None` if the model is unavailable so callers can fall back
     /// without dropping transcript text. Empty `Vec` means no speech.
     pub fn speech_regions(samples: &[i16], sample_rate: u32) -> Option<Vec<(f32, f32)>> {
-        let audio = resample_to_16k(samples, sample_rate);
+        let audio = crate::audio::resample_i16_to_f32(samples, sample_rate, 16_000);
         if audio.len() < WINDOW {
             return Some(Vec::new());
         }

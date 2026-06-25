@@ -12,6 +12,16 @@ pub struct EndpointProfile {
     pub duration_source: DurationSource,
     pub supports_word_timestamps: bool,
     pub keep_timestamps_on_format_fallback: bool,
+    pub uploads_flac: bool,
+    pub audio_request: AudioRequest,
+    pub models_query: &'static str,
+    pub supports_diarization: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioRequest {
+    Multipart,
+    Base64Json,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +60,10 @@ impl Compatibility {
                 duration_source: DurationSource::TopLevel,
                 supports_word_timestamps: true,
                 keep_timestamps_on_format_fallback: false,
+                uploads_flac: true,
+                audio_request: AudioRequest::Multipart,
+                models_query: "",
+                supports_diarization: false,
             },
             Self::SelfHosted => EndpointProfile {
                 timestamp_mode: TimestampMode::OpenAiVerboseJson,
@@ -59,6 +73,10 @@ impl Compatibility {
                 duration_source: DurationSource::TopLevel,
                 supports_word_timestamps: false,
                 keep_timestamps_on_format_fallback: true,
+                uploads_flac: false,
+                audio_request: AudioRequest::Multipart,
+                models_query: "",
+                supports_diarization: false,
             },
         }
     }
@@ -77,16 +95,42 @@ const MISTRAL: EndpointProfile = EndpointProfile {
     duration_source: DurationSource::UsagePromptAudioSeconds,
     supports_word_timestamps: false,
     keep_timestamps_on_format_fallback: true,
+    uploads_flac: true,
+    audio_request: AudioRequest::Multipart,
+    models_query: "",
+    supports_diarization: true,
 };
 
-const HOST_PROFILES: &[HostProfile] = &[HostProfile {
-    host_suffixes: &["mistral.ai"],
-    profile: MISTRAL,
-}];
+const OPENROUTER: EndpointProfile = EndpointProfile {
+    timestamp_mode: TimestampMode::None,
+    dictionary_mode: DictionaryMode::Prompt,
+    sends_response_format: false,
+    sends_temperature: false,
+    duration_source: DurationSource::TopLevel,
+    supports_word_timestamps: false,
+    keep_timestamps_on_format_fallback: false,
+    uploads_flac: false,
+    audio_request: AudioRequest::Base64Json,
+    models_query: "?output_modalities=transcription",
+    supports_diarization: false,
+};
+
+const HOST_PROFILES: &[HostProfile] = &[
+    HostProfile {
+        host_suffixes: &["mistral.ai"],
+        profile: MISTRAL,
+    },
+    HostProfile {
+        host_suffixes: &["openrouter.ai"],
+        profile: OPENROUTER,
+    },
+];
 
 pub fn resolve_profile(endpoint: &str) -> EndpointProfile {
     let endpoint = endpoint.trim().to_ascii_lowercase();
-    let host = reqwest::Url::parse(&endpoint)
+    let url = reqwest::Url::parse(&endpoint)
+        .or_else(|_| reqwest::Url::parse(&format!("https://{endpoint}")));
+    let host = url
         .ok()
         .and_then(|url| url.host_str().map(str::to_ascii_lowercase));
 
@@ -101,13 +145,25 @@ pub fn resolve_profile(endpoint: &str) -> EndpointProfile {
         return entry.profile;
     }
 
-    if host
-        .as_deref()
-        .is_some_and(|host| host == "localhost" || host.starts_with("127."))
-    {
+    if host.as_deref().is_some_and(is_self_hosted_host) {
         Compatibility::SelfHosted.base_profile()
     } else {
         Compatibility::DirectOpenAi.base_profile()
+    }
+}
+
+pub(crate) fn is_self_hosted_host(host: &str) -> bool {
+    if host == "localhost" || host.ends_with(".local") {
+        return true;
+    }
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => ip.is_private() || ip.is_loopback() || ip.is_link_local(),
+        Ok(std::net::IpAddr::V6(ip)) => {
+            ip.is_loopback()
+                || (ip.segments()[0] & 0xfe00) == 0xfc00
+                || (ip.segments()[0] & 0xffc0) == 0xfe80
+        }
+        Err(_) => false,
     }
 }
 
@@ -180,6 +236,7 @@ pub struct TranscriptionFormParams<'a> {
     pub language: Option<&'a str>,
     pub dictionary: &'a [String],
     pub prompt: Option<&'a str>,
+    pub(crate) diarize: bool,
 }
 
 pub fn build_transcription_form(
@@ -226,6 +283,10 @@ pub fn build_transcription_form(
 
     if let Some(language) = params.language {
         form = form.text("language", language.to_string());
+    }
+
+    if profile.supports_diarization && params.diarize {
+        form = form.text("diarize", "true");
     }
 
     apply_dictionary_and_prompt(
@@ -332,6 +393,8 @@ mod tests {
         assert_eq!(profile.timestamp_mode, TimestampMode::NativeGranularities);
         assert_eq!(profile.dictionary_mode, DictionaryMode::ContextBias);
         assert!(!profile.sends_response_format);
+
+        assert_eq!(resolve_profile("api.mistral.ai/v1"), profile);
     }
 
     #[test]
