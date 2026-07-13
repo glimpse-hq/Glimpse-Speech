@@ -29,7 +29,6 @@ pub struct SpeechConfig {
     pub model_cache_dir: PathBuf,
     pub resolver: ModelResolver,
 }
-
 impl SpeechConfig {
     pub fn loose(model_cache_dir: PathBuf) -> Self {
         Self {
@@ -712,4 +711,3 @@ mod prepare_tests {
         assert_eq!(prepared.samples.len(), 32_000 + 4_000);
     }
 }
-

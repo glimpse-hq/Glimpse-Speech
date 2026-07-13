@@ -2,6 +2,7 @@
 name = "glimpse-speech"
 version = "1.5.1"
 edition = "2021"
+resolver = "3"
 rust-version = "1.85"
 autoexamples = false
 description = "A transcription API powered by whisper-rs and NVIDIA speech models via parakeet-rs"
@@ -23,7 +24,7 @@ cli = ["api", "dep:clap", "dep:directories"]
 [dependencies]
 anyhow = "1"
 axum = { version = "0.8", features = ["multipart"], optional = true }
-base64 = { version = "0.13", optional = true }
+base64 = { version = "0.22", optional = true }
 clap = { version = "4.5", features = ["derive"], optional = true }
 directories = { version = "6", optional = true }
 flacenc = { version = "0.5", default-features = false, optional = true }
@@ -35,7 +36,7 @@ serde_json = "1"
 sha2 = "0.11"
 tokio = { version = "1", features = ["fs", "io-util", "net", "rt-multi-thread", "signal", "time"] }
 tokio-util = "0.7"
-tower-http = { version = "0.6", features = ["cors"], optional = true }
+tower-http = { version = "0.7", features = ["cors"], optional = true }
 tracing = "0.1"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 

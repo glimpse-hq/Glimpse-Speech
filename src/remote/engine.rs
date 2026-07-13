@@ -3,6 +3,7 @@ use std::{
     time::Duration,
 };
 
+use base64::Engine as _;
 use reqwest::{header::RETRY_AFTER, multipart, Client};
 use serde::{Deserialize, Serialize};
 use tokio_util::io::ReaderStream;
@@ -297,7 +298,7 @@ async fn transcribe_base64(
     let request = Base64AudioRequest {
         model,
         input_audio: Base64Audio {
-            data: base64::encode(&bytes),
+            data: base64::engine::general_purpose::STANDARD.encode(&bytes),
             format: &format,
         },
         language,
