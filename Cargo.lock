@@ -739,6 +739,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fm-rs"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ad69482ea5749f91a39d48c7dc4c473931b0f96586c5747f6b9deb61a27f189"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -893,6 +903,7 @@ dependencies = [
  "clap",
  "directories",
  "flacenc",
+ "fm-rs",
  "hound",
  "httpdate",
  "libc",

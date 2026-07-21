@@ -1,6 +1,7 @@
 #[cfg(feature = "api")]
 pub mod api;
 pub mod audio;
+pub mod cleanup;
 #[cfg(feature = "cli")]
 pub mod cli;
 pub mod dictionary;

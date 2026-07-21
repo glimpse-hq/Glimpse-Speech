@@ -19,6 +19,7 @@ parakeet = ["nvidia"]
 all = ["whisper", "nvidia"]
 api = ["dep:axum", "dep:tower-http"]
 remote = ["reqwest/multipart", "dep:flacenc", "dep:base64"]
+cleanup-apple = ["dep:fm-rs"]
 cli = ["api", "dep:clap", "dep:directories"]
 
 [dependencies]
@@ -53,6 +54,7 @@ libc = "0.2"
 
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
 whisper-rs = { version = "0.16.0", features = ["metal", "coreml", "raw-api"], optional = true }
+fm-rs = { version = "0.2.1", optional = true }
 
 [target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
 whisper-rs = { version = "0.16.0", features = ["metal", "raw-api"], optional = true }
@@ -68,6 +70,10 @@ whisper-rs = { version = "0.16.0", features = ["vulkan", "raw-api"], optional = 
 [target.'cfg(not(all(target_os = "macos", target_arch = "x86_64")))'.dependencies]
 parakeet-rs = { version = "0.3.6", optional = true }
 ort = { version = "=2.0.0-rc.12", optional = true }
+
+[[example]]
+name = "cleanup"
+required-features = ["cleanup-apple"]
 
 [[example]]
 name = "whisper"
