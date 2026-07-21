@@ -138,14 +138,45 @@ Clean up raw speech-to-text output.
     }
 
     pub fn clean(text: &str) -> anyhow::Result<String> {
+        generate(INSTRUCTIONS, text, 0.0, None)
+    }
+
+    pub fn generate(
+        instructions: &str,
+        prompt: &str,
+        temperature: f32,
+        max_response_tokens: Option<u32>,
+    ) -> anyhow::Result<String> {
         let model = SystemLanguageModel::new().context("load system language model")?;
         model.ensure_available().map_err(|err| anyhow!("model unavailable: {err}"))?;
-        let session = Session::with_instructions(&model, INSTRUCTIONS)
+        let session = Session::with_instructions(&model, instructions)
             .map_err(|err| anyhow!("create session: {err}"))?;
-        let options = GenerationOptions::builder().temperature(0.0).build();
+        let mut options = GenerationOptions::builder().temperature(f64::from(temperature));
+        if let Some(max_tokens) = max_response_tokens {
+            options = options.max_response_tokens(max_tokens);
+        }
         let response = session
-            .respond(text, &options)
-            .map_err(|err| anyhow!("cleanup generation failed: {err}"))?;
+            .respond(prompt, &options.build())
+            .map_err(|err| anyhow!("generation failed: {err}"))?;
         Ok(response.content().trim().to_string())
+    }
+}
+
+/// Run an on-device generation with caller-supplied instructions. Blocking;
+/// call from a blocking-capable thread. Errors on unsupported builds.
+#[allow(unused_variables)]
+pub fn apple_generate(
+    instructions: &str,
+    prompt: &str,
+    temperature: f32,
+    max_response_tokens: Option<u32>,
+) -> anyhow::Result<String> {
+    #[cfg(all(feature = "cleanup-apple", target_os = "macos", target_arch = "aarch64"))]
+    {
+        apple::generate(instructions, prompt, temperature, max_response_tokens)
+    }
+    #[cfg(not(all(feature = "cleanup-apple", target_os = "macos", target_arch = "aarch64")))]
+    {
+        Err(anyhow::anyhow!("on-device model is not supported in this build"))
     }
 }
