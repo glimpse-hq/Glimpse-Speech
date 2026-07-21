@@ -126,33 +126,14 @@ Clean up raw speech-to-text output.
 - Return only the cleaned text.
 </rules>";
 
-    /// FoundationModels is weak-linked; below macOS 26 its symbols are null
-    /// and any call into the shim would crash. Check before every entry point.
+    /// FoundationModels is weak-linked; on macOS < 26 its symbols are null and
+    /// any call into the shim would crash. Probe dyld before every entry point.
     fn os_supports_foundation_models() -> bool {
-        macos_major_version() >= 26
-    }
-
-    fn macos_major_version() -> u32 {
-        let name = c"kern.osproductversion";
-        let mut buf = [0u8; 32];
-        let mut len = buf.len();
-        let rc = unsafe {
-            libc::sysctlbyname(
-                name.as_ptr(),
-                buf.as_mut_ptr().cast(),
-                &mut len,
-                std::ptr::null_mut(),
-                0,
-            )
-        };
-        if rc != 0 {
-            return 0;
-        }
-        std::str::from_utf8(&buf[..len])
-            .ok()
-            .and_then(|version| version.trim_end_matches('\0').split('.').next())
-            .and_then(|major| major.parse().ok())
-            .unwrap_or(0)
+        static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *SUPPORTED.get_or_init(|| {
+            let path = c"/System/Library/Frameworks/FoundationModels.framework/FoundationModels";
+            !unsafe { libc::dlopen(path.as_ptr(), libc::RTLD_LAZY) }.is_null()
+        })
     }
 
     pub fn availability() -> super::AppleAvailability {
