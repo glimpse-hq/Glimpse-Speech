@@ -126,9 +126,41 @@ Clean up raw speech-to-text output.
 - Return only the cleaned text.
 </rules>";
 
+    /// FoundationModels is weak-linked; below macOS 26 its symbols are null
+    /// and any call into the shim would crash. Check before every entry point.
+    fn os_supports_foundation_models() -> bool {
+        macos_major_version() >= 26
+    }
+
+    fn macos_major_version() -> u32 {
+        let name = c"kern.osproductversion";
+        let mut buf = [0u8; 32];
+        let mut len = buf.len();
+        let rc = unsafe {
+            libc::sysctlbyname(
+                name.as_ptr(),
+                buf.as_mut_ptr().cast(),
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if rc != 0 {
+            return 0;
+        }
+        std::str::from_utf8(&buf[..len])
+            .ok()
+            .and_then(|version| version.trim_end_matches('\0').split('.').next())
+            .and_then(|major| major.parse().ok())
+            .unwrap_or(0)
+    }
+
     pub fn availability() -> super::AppleAvailability {
         use fm_rs::ModelAvailability;
         use super::AppleAvailability;
+        if !os_supports_foundation_models() {
+            return AppleAvailability::Unsupported;
+        }
         match SystemLanguageModel::new().map(|model| model.availability()) {
             Ok(ModelAvailability::Available) => AppleAvailability::Available,
             Ok(ModelAvailability::AppleIntelligenceNotEnabled) => AppleAvailability::NotEnabled,
@@ -147,6 +179,9 @@ Clean up raw speech-to-text output.
         temperature: f32,
         max_response_tokens: Option<u32>,
     ) -> anyhow::Result<String> {
+        if !os_supports_foundation_models() {
+            return Err(anyhow!("on-device model requires macOS 26 or later"));
+        }
         let model = SystemLanguageModel::new().context("load system language model")?;
         model.ensure_available().map_err(|err| anyhow!("model unavailable: {err}"))?;
         let session = Session::with_instructions(&model, instructions)

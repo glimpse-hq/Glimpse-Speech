@@ -5,5 +5,8 @@ fn main() {
         && std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos")
     {
         println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
+        // Weak-link so binaries still launch on macOS < 26, where the
+        // framework is absent. cleanup.rs guards every call by OS version.
+        println!("cargo:rustc-link-arg=-Wl,-weak_framework,FoundationModels");
     }
 }
