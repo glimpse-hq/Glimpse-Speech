@@ -191,6 +191,22 @@ impl EngineInstance {
         ),
         all(feature = "apple-speech", target_os = "macos", target_arch = "aarch64")
     ))]
+    fn streaming_configure(&mut self, _language: Option<String>, _dictionary: Vec<String>) {
+        match self {
+            #[cfg(all(feature = "apple-speech", target_os = "macos", target_arch = "aarch64"))]
+            EngineInstance::Apple { engine } => engine.configure_stream(_language, _dictionary),
+            #[allow(unreachable_patterns)]
+            _ => {}
+        }
+    }
+
+    #[cfg(any(
+        all(
+            feature = "nvidia",
+            not(all(target_os = "macos", target_arch = "x86_64"))
+        ),
+        all(feature = "apple-speech", target_os = "macos", target_arch = "aarch64")
+    ))]
     fn streaming_finalize(&mut self) -> Result<String> {
         match self {
             #[cfg(all(feature = "apple-speech", target_os = "macos", target_arch = "aarch64"))]
@@ -410,6 +426,31 @@ impl SpeechService {
         if let Ok(mut guard) = self.loaded.lock() {
             if let Some(loaded) = guard.as_mut() {
                 loaded.engine.streaming_reset();
+            }
+        }
+    }
+
+    /// Sets language and vocabulary for the next streaming session, for
+    /// engines that take per-session configuration.
+    #[cfg(any(
+        all(
+            feature = "nvidia",
+            not(all(target_os = "macos", target_arch = "x86_64"))
+        ),
+        all(feature = "apple-speech", target_os = "macos", target_arch = "aarch64")
+    ))]
+    pub fn streaming_configure(
+        &self,
+        model_id: &str,
+        language: Option<String>,
+        dictionary: Vec<String>,
+    ) {
+        if self.ensure_loaded(model_id).is_err() {
+            return;
+        }
+        if let Ok(mut guard) = self.loaded.lock() {
+            if let Some(loaded) = guard.as_mut() {
+                loaded.engine.streaming_configure(language, dictionary);
             }
         }
     }
