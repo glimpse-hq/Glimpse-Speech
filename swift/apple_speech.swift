@@ -1,4 +1,4 @@
-// C ABI shim over the macOS 26 SpeechAnalyzer/SpeechTranscriber API.
+// C ABI shim over the macOS 26 SpeechAnalyzer/DictationTranscriber API.
 // Compiled with a macOS 14 deployment target; every entry point checks
 // #available so the newer Speech symbols stay weak-linked.
 
@@ -40,7 +40,7 @@ private struct GSError: Error {
 
 @available(macOS 26.0, *)
 private func resolveLocale(_ hint: String?) async -> Locale {
-    let supported = await SpeechTranscriber.supportedLocales
+    let supported = await DictationTranscriber.supportedLocales
     guard let hint, !hint.isEmpty else {
         let current = Locale.current
         if supported.contains(where: { $0.identifier(.bcp47) == current.identifier(.bcp47) }) {
@@ -58,7 +58,7 @@ private func resolveLocale(_ hint: String?) async -> Locale {
 @available(macOS 26.0, *)
 private final class GSSession: @unchecked Sendable {
     let analyzer: SpeechAnalyzer
-    let transcriber: SpeechTranscriber
+    let transcriber: DictationTranscriber
     let continuation: AsyncStream<AnalyzerInput>.Continuation
     let analyzerFormat: AVAudioFormat
     let inputFormat: AVAudioFormat
@@ -72,7 +72,7 @@ private final class GSSession: @unchecked Sendable {
 
     init(
         analyzer: SpeechAnalyzer,
-        transcriber: SpeechTranscriber,
+        transcriber: DictationTranscriber,
         continuation: AsyncStream<AnalyzerInput>.Continuation,
         analyzerFormat: AVAudioFormat,
         inputFormat: AVAudioFormat,
@@ -88,9 +88,10 @@ private final class GSSession: @unchecked Sendable {
 
     static func start(localeHint: String?) async -> Result<GSSession, GSError> {
         let locale = await resolveLocale(localeHint)
-        let transcriber = SpeechTranscriber(
+        let transcriber = DictationTranscriber(
             locale: locale,
-            transcriptionOptions: [],
+            contentHints: [],
+            transcriptionOptions: [.punctuation, .emoji],
             reportingOptions: [.volatileResults],
             attributeOptions: [.audioTimeRange]
         )
@@ -275,7 +276,7 @@ private final class SessionRegistry: @unchecked Sendable {
 public func gs_apple_supported_locales() -> UnsafeMutablePointer<CChar>? {
     guard #available(macOS 26.0, *) else { return strdup("[]") }
     return runBlocking {
-        let locales = await SpeechTranscriber.supportedLocales.map { $0.identifier(.bcp47) }
+        let locales = await DictationTranscriber.supportedLocales.map { $0.identifier(.bcp47) }
         return strdup(jsonString(locales.sorted()))
     }
 }
@@ -285,7 +286,7 @@ public func gs_apple_supported_locales() -> UnsafeMutablePointer<CChar>? {
 public func gs_apple_availability() -> Int32 {
     guard #available(macOS 26.0, *) else { return 1 }
     return runBlocking {
-        await SpeechTranscriber.supportedLocales.isEmpty ? 2 : 0
+        await DictationTranscriber.supportedLocales.isEmpty ? 2 : 0
     }
 }
 
@@ -296,11 +297,11 @@ public func gs_apple_locale_status(_ locale: UnsafePointer<CChar>?) -> Int32 {
     let hint = locale.map { String(cString: $0) }
     return runBlocking {
         let resolved = await resolveLocale(hint)
-        let supported = await SpeechTranscriber.supportedLocales
+        let supported = await DictationTranscriber.supportedLocales
         guard supported.contains(where: { $0.identifier(.bcp47) == resolved.identifier(.bcp47) }) else {
             return 2
         }
-        let installed = await SpeechTranscriber.installedLocales
+        let installed = await DictationTranscriber.installedLocales
         return installed.contains(where: { $0.identifier(.bcp47) == resolved.identifier(.bcp47) }) ? 0 : 1
     }
 }
