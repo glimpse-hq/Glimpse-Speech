@@ -167,6 +167,16 @@ impl ModelInstallManager {
 
     pub fn status(&self, spec: &InstallSpec) -> Result<ModelStatus> {
         validate_spec(spec)?;
+        if spec.engine == ModelEngine::Apple {
+            // The OS owns the model; nothing on disk to check.
+            return Ok(ModelStatus {
+                id: spec.id.clone(),
+                installed: true,
+                bytes_on_disk: 0,
+                missing_files: Vec::new(),
+                directory: self.model_dir(&spec.id).display().to_string(),
+            });
+        }
         Ok(status_from_spec(&self.model_dir(&spec.id), spec))
     }
 

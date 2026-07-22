@@ -19,6 +19,7 @@ unsafe extern "C" {
     fn gs_apple_stream_finish(handle: i64) -> *mut c_char;
     fn gs_apple_stream_cancel(handle: i64);
     fn gs_apple_string_free(ptr: *mut c_char);
+    fn gs_apple_supported_locales() -> *mut c_char;
 }
 
 fn take_string(ptr: *mut c_char) -> Option<String> {
@@ -39,6 +40,12 @@ fn locale_cstring(language: Option<&str>) -> CString {
 /// Whether the OS provides the speech engine (macOS 26+, Apple Silicon).
 pub fn available() -> bool {
     unsafe { gs_apple_availability() == 0 }
+}
+
+/// Supported locales as BCP-47 identifiers, empty when unavailable.
+pub fn supported_locales() -> Vec<String> {
+    let raw = take_string(unsafe { gs_apple_supported_locales() }).unwrap_or_default();
+    serde_json::from_str(&raw).unwrap_or_default()
 }
 
 /// 0 installed, 1 downloadable, 2 unsupported locale, anything else an error.

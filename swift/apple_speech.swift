@@ -270,6 +270,16 @@ private final class SessionRegistry: @unchecked Sendable {
     }
 }
 
+// Supported locales as a JSON array of BCP-47 identifiers.
+@_cdecl("gs_apple_supported_locales")
+public func gs_apple_supported_locales() -> UnsafeMutablePointer<CChar>? {
+    guard #available(macOS 26.0, *) else { return strdup("[]") }
+    return runBlocking {
+        let locales = await SpeechTranscriber.supportedLocales.map { $0.identifier(.bcp47) }
+        return strdup(jsonString(locales.sorted()))
+    }
+}
+
 // Availability: 0 available, 1 unsupported OS, 2 no supported locales.
 @_cdecl("gs_apple_availability")
 public func gs_apple_availability() -> Int32 {
