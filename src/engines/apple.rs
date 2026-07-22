@@ -13,7 +13,11 @@ use crate::{TranscriptionEngine, TranscriptionResult, TranscriptionSegment};
 unsafe extern "C" {
     fn gs_apple_availability() -> i32;
     fn gs_apple_locale_status(locale: *const c_char) -> i32;
-    fn gs_apple_stream_start(locale: *const c_char) -> i64;
+    fn gs_apple_stream_start(
+        locale: *const c_char,
+        long_form: i32,
+        vocabulary_json: *const c_char,
+    ) -> i64;
     fn gs_apple_stream_feed(handle: i64, samples: *const f32, count: usize) -> i32;
     fn gs_apple_stream_text(handle: i64) -> *mut c_char;
     fn gs_apple_stream_finish(handle: i64) -> *mut c_char;
@@ -58,6 +62,9 @@ pub fn locale_status(language: Option<&str>) -> i32 {
 #[derive(Debug, Default, Clone)]
 pub struct AppleInferenceParams {
     pub language: Option<String>,
+    /// Use the long-form transcriber (finer segments, no dictation extras).
+    pub long_form: bool,
+    pub dictionary: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -80,6 +87,24 @@ struct ShimSegment {
 #[derive(Default)]
 pub struct AppleEngine {
     stream: Option<i64>,
+    stream_language: Option<String>,
+    stream_dictionary: Vec<String>,
+}
+
+fn vocabulary_cstring(terms: &[String]) -> CString {
+    if terms.is_empty() {
+        return CString::default();
+    }
+    CString::new(serde_json::to_string(terms).unwrap_or_default()).unwrap_or_default()
+}
+
+fn start_session(language: Option<&str>, long_form: bool, dictionary: &[String]) -> Option<i64> {
+    let locale = locale_cstring(language);
+    let vocabulary = vocabulary_cstring(dictionary);
+    let handle = unsafe {
+        gs_apple_stream_start(locale.as_ptr(), i32::from(long_form), vocabulary.as_ptr())
+    };
+    (handle != 0).then_some(handle)
 }
 
 impl AppleEngine {
@@ -97,15 +122,22 @@ impl AppleEngine {
         Ok(parsed)
     }
 
+    /// Sets language and vocabulary for the next streaming session.
+    pub fn configure_stream(&mut self, language: Option<String>, dictionary: Vec<String>) {
+        self.stream_language = language;
+        self.stream_dictionary = dictionary;
+    }
+
     pub fn transcribe_chunk(&mut self, chunk: &[f32]) -> Result<(), Box<dyn Error>> {
         let handle = match self.stream {
             Some(handle) => handle,
             None => {
-                let locale = locale_cstring(None);
-                let handle = unsafe { gs_apple_stream_start(locale.as_ptr()) };
-                if handle == 0 {
-                    return Err("failed to start apple speech session".into());
-                }
+                let handle = start_session(
+                    self.stream_language.as_deref(),
+                    false,
+                    &self.stream_dictionary,
+                )
+                .ok_or("failed to start apple speech session")?;
                 self.stream = Some(handle);
                 handle
             }
@@ -171,12 +203,10 @@ impl TranscriptionEngine for AppleEngine {
         samples: Vec<f32>,
         params: Option<Self::InferenceParams>,
     ) -> Result<TranscriptionResult, Box<dyn Error>> {
-        let language = params.as_ref().and_then(|params| params.language.clone());
-        let locale = locale_cstring(language.as_deref());
-        let handle = unsafe { gs_apple_stream_start(locale.as_ptr()) };
-        if handle == 0 {
-            return Err("failed to start apple speech session".into());
-        }
+        let params = params.unwrap_or_default();
+        let language = params.language.clone();
+        let handle = start_session(language.as_deref(), params.long_form, &params.dictionary)
+            .ok_or("failed to start apple speech session")?;
         // Feed in ~1s chunks so the analyzer can pipeline while we copy.
         for chunk in samples.chunks(16_000) {
             let status = unsafe { gs_apple_stream_feed(handle, chunk.as_ptr(), chunk.len()) };

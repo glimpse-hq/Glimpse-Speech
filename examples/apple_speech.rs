@@ -10,7 +10,13 @@ fn main() {
         println!("usage: apple_speech <wav-path> [language]");
         return;
     };
-    let language = std::env::args().nth(2);
+    let language = std::env::args().skip_while(|arg| arg != "--lang").nth(1);
+    let dictation = std::env::args().any(|arg| arg == "--dictation");
+    let dictionary: Vec<String> = std::env::args()
+        .skip_while(|arg| arg != "--vocab")
+        .nth(1)
+        .map(|terms| terms.split(',').map(str::to_string).collect())
+        .unwrap_or_default();
 
     let service = SpeechService::new_loose_with_engine(std::env::temp_dir(), ModelEngine::Apple);
 
@@ -41,8 +47,8 @@ fn main() {
             model_id: "apple".to_string(),
             language,
             prompt: None,
-            dictionary: Vec::new(),
-            timestamps: true,
+            dictionary,
+            timestamps: !dictation,
             timestamp_granularity: None,
         })
         .expect("transcription failed");

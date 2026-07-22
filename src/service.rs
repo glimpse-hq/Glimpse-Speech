@@ -689,13 +689,15 @@ fn transcribe_with_engine(
             }),
         ),
         #[cfg(all(feature = "apple-speech", target_os = "macos", target_arch = "aarch64"))]
-        EngineInstance::Apple { engine } => transcribe_audio(
-            engine,
-            _request.audio,
-            Some(crate::engines::apple::AppleInferenceParams {
+        EngineInstance::Apple { engine } => {
+            let long_form = _request.timestamps || _request.timestamp_granularity.is_some();
+            let params = Some(crate::engines::apple::AppleInferenceParams {
                 language: _request.language,
-            }),
-        ),
+                long_form,
+                dictionary: _request.dictionary,
+            });
+            transcribe_audio(engine, _request.audio, params)
+        }
         #[allow(unreachable_patterns)]
         _ => Err(anyhow!("No speech engine support is enabled")),
     }
