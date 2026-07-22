@@ -3,7 +3,10 @@ use glimpse_speech::Transcription;
 
 #[tokio::main]
 async fn main() {
-    println!("apple availability: {:?}", CleanupProvider::apple_availability());
+    println!(
+        "apple availability: {:?}",
+        CleanupProvider::apple_availability()
+    );
 
     let raw = "um so i was thinking uh maybe we should we should move the the launch to thursday \
                because uh the build isnt ready and and jen said the uh the release notes arent done either";

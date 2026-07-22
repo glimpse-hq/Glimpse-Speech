@@ -1,3 +1,5 @@
+#[cfg(all(feature = "apple-speech", target_os = "macos", target_arch = "aarch64"))]
+pub mod apple;
 #[cfg(all(
     feature = "nvidia",
     not(all(target_os = "macos", target_arch = "x86_64"))

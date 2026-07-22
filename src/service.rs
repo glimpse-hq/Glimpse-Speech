@@ -11,7 +11,8 @@ use anyhow::{anyhow, Result};
     all(
         feature = "nvidia",
         not(all(target_os = "macos", target_arch = "x86_64"))
-    )
+    ),
+    all(feature = "apple-speech", target_os = "macos", target_arch = "aarch64")
 ))]
 use crate::TranscriptionEngine;
 
@@ -73,7 +74,8 @@ struct TranscriptionWithDuration {
     all(
         feature = "nvidia",
         not(all(target_os = "macos", target_arch = "x86_64"))
-    )
+    ),
+    all(feature = "apple-speech", target_os = "macos", target_arch = "aarch64")
 ))]
 struct PreparedAudio {
     samples: Vec<f32>,
@@ -106,22 +108,44 @@ enum EngineInstance {
     Nemotron {
         engine: crate::engines::nemotron::NemotronEngine,
     },
+    #[cfg(all(feature = "apple-speech", target_os = "macos", target_arch = "aarch64"))]
+    Apple {
+        engine: crate::engines::apple::AppleEngine,
+    },
 }
 
 impl EngineInstance {
-    #[cfg(all(
-        feature = "nvidia",
-        not(all(target_os = "macos", target_arch = "x86_64"))
+    #[cfg(any(
+        all(
+            feature = "nvidia",
+            not(all(target_os = "macos", target_arch = "x86_64"))
+        ),
+        all(feature = "apple-speech", target_os = "macos", target_arch = "aarch64")
     ))]
     fn streaming_transcribe_chunk(&mut self, chunk: &[f32]) -> Result<String> {
         match self {
+            #[cfg(all(
+                feature = "nvidia",
+                not(all(target_os = "macos", target_arch = "x86_64"))
+            ))]
             EngineInstance::Parakeet { engine } => {
                 engine
                     .transcribe_chunk(chunk)
                     .map_err(|err| anyhow!(err.to_string()))?;
                 Ok(engine.get_transcript())
             }
+            #[cfg(all(
+                feature = "nvidia",
+                not(all(target_os = "macos", target_arch = "x86_64"))
+            ))]
             EngineInstance::Nemotron { engine } => {
+                engine
+                    .transcribe_chunk(chunk)
+                    .map_err(|err| anyhow!(err.to_string()))?;
+                Ok(engine.get_transcript())
+            }
+            #[cfg(all(feature = "apple-speech", target_os = "macos", target_arch = "aarch64"))]
+            EngineInstance::Apple { engine } => {
                 engine
                     .transcribe_chunk(chunk)
                     .map_err(|err| anyhow!(err.to_string()))?;
@@ -129,32 +153,76 @@ impl EngineInstance {
             }
             #[cfg(feature = "whisper")]
             EngineInstance::Whisper { .. } => Err(anyhow!(
-                "Streaming is only supported with Nemotron or unified Parakeet models"
+                "Streaming is only supported with Apple, Nemotron, or unified Parakeet models"
             )),
         }
     }
 
-    #[cfg(all(
-        feature = "nvidia",
-        not(all(target_os = "macos", target_arch = "x86_64"))
+    #[cfg(any(
+        all(
+            feature = "nvidia",
+            not(all(target_os = "macos", target_arch = "x86_64"))
+        ),
+        all(feature = "apple-speech", target_os = "macos", target_arch = "aarch64")
     ))]
     fn streaming_reset(&mut self) {
         match self {
+            #[cfg(all(
+                feature = "nvidia",
+                not(all(target_os = "macos", target_arch = "x86_64"))
+            ))]
             EngineInstance::Parakeet { engine } => engine.reset(),
+            #[cfg(all(
+                feature = "nvidia",
+                not(all(target_os = "macos", target_arch = "x86_64"))
+            ))]
             EngineInstance::Nemotron { engine } => engine.reset(),
+            #[cfg(all(feature = "apple-speech", target_os = "macos", target_arch = "aarch64"))]
+            EngineInstance::Apple { engine } => engine.reset(),
             #[cfg(feature = "whisper")]
             EngineInstance::Whisper { .. } => {}
         }
     }
 
-    #[cfg(all(
-        feature = "nvidia",
-        not(all(target_os = "macos", target_arch = "x86_64"))
+    #[cfg(any(
+        all(
+            feature = "nvidia",
+            not(all(target_os = "macos", target_arch = "x86_64"))
+        ),
+        all(feature = "apple-speech", target_os = "macos", target_arch = "aarch64")
+    ))]
+    fn streaming_finalize(&mut self) -> Result<String> {
+        match self {
+            #[cfg(all(feature = "apple-speech", target_os = "macos", target_arch = "aarch64"))]
+            EngineInstance::Apple { engine } => {
+                engine.finalize().map_err(|err| anyhow!(err.to_string()))
+            }
+            #[allow(unreachable_patterns)]
+            _ => Ok(self.streaming_get_transcript().unwrap_or_default()),
+        }
+    }
+
+    #[cfg(any(
+        all(
+            feature = "nvidia",
+            not(all(target_os = "macos", target_arch = "x86_64"))
+        ),
+        all(feature = "apple-speech", target_os = "macos", target_arch = "aarch64")
     ))]
     fn streaming_get_transcript(&self) -> Option<String> {
         match self {
+            #[cfg(all(
+                feature = "nvidia",
+                not(all(target_os = "macos", target_arch = "x86_64"))
+            ))]
             EngineInstance::Parakeet { engine } => Some(engine.get_transcript()),
+            #[cfg(all(
+                feature = "nvidia",
+                not(all(target_os = "macos", target_arch = "x86_64"))
+            ))]
             EngineInstance::Nemotron { engine } => Some(engine.get_transcript()),
+            #[cfg(all(feature = "apple-speech", target_os = "macos", target_arch = "aarch64"))]
+            EngineInstance::Apple { engine } => Some(engine.get_transcript()),
             #[cfg(feature = "whisper")]
             EngineInstance::Whisper { .. } => None,
         }
@@ -315,9 +383,12 @@ impl SpeechService {
             .and_then(|guard| guard.as_ref().map(|loaded| loaded.model_id.clone()))
     }
 
-    #[cfg(all(
-        feature = "nvidia",
-        not(all(target_os = "macos", target_arch = "x86_64"))
+    #[cfg(any(
+        all(
+            feature = "nvidia",
+            not(all(target_os = "macos", target_arch = "x86_64"))
+        ),
+        all(feature = "apple-speech", target_os = "macos", target_arch = "aarch64")
     ))]
     pub fn streaming_transcribe_chunk(&self, model_id: &str, chunk: &[f32]) -> Result<String> {
         self.ensure_loaded(model_id)?;
@@ -328,9 +399,12 @@ impl SpeechService {
         loaded.engine.streaming_transcribe_chunk(chunk)
     }
 
-    #[cfg(all(
-        feature = "nvidia",
-        not(all(target_os = "macos", target_arch = "x86_64"))
+    #[cfg(any(
+        all(
+            feature = "nvidia",
+            not(all(target_os = "macos", target_arch = "x86_64"))
+        ),
+        all(feature = "apple-speech", target_os = "macos", target_arch = "aarch64")
     ))]
     pub fn streaming_reset(&self) {
         if let Ok(mut guard) = self.loaded.lock() {
@@ -340,9 +414,37 @@ impl SpeechService {
         }
     }
 
-    #[cfg(all(
-        feature = "nvidia",
-        not(all(target_os = "macos", target_arch = "x86_64"))
+    /// Ends the stream and returns the final transcript. Engines that
+    /// finalize per chunk just return the current transcript.
+    #[cfg(any(
+        all(
+            feature = "nvidia",
+            not(all(target_os = "macos", target_arch = "x86_64"))
+        ),
+        all(feature = "apple-speech", target_os = "macos", target_arch = "aarch64")
+    ))]
+    pub fn streaming_finalize(&self) -> String {
+        let Ok(mut guard) = self.loaded.lock() else {
+            return String::new();
+        };
+        let Some(loaded) = guard.as_mut() else {
+            return String::new();
+        };
+        match loaded.engine.streaming_finalize() {
+            Ok(text) => text,
+            Err(err) => {
+                tracing::error!("[SpeechService] streaming finalize failed: {err}");
+                loaded.engine.streaming_get_transcript().unwrap_or_default()
+            }
+        }
+    }
+
+    #[cfg(any(
+        all(
+            feature = "nvidia",
+            not(all(target_os = "macos", target_arch = "x86_64"))
+        ),
+        all(feature = "apple-speech", target_os = "macos", target_arch = "aarch64")
     ))]
     pub fn streaming_get_transcript(&self) -> String {
         self.loaded
@@ -505,6 +607,25 @@ fn load_engine(resolved: &crate::models::ResolvedModel) -> Result<EngineInstance
                 ))
             }
         }
+        ModelEngine::Apple => {
+            #[cfg(all(feature = "apple-speech", target_os = "macos", target_arch = "aarch64"))]
+            {
+                let mut engine = crate::engines::apple::AppleEngine::new();
+                engine
+                    .load_model_with_params(&resolved.path, ())
+                    .map_err(|err| anyhow!(err.to_string()))?;
+                Ok(EngineInstance::Apple { engine })
+            }
+
+            #[cfg(not(all(
+                feature = "apple-speech",
+                target_os = "macos",
+                target_arch = "aarch64"
+            )))]
+            {
+                Err(anyhow!("Apple speech support is not enabled on this build"))
+            }
+        }
     }
 }
 
@@ -567,6 +688,14 @@ fn transcribe_with_engine(
                 language: _request.language,
             }),
         ),
+        #[cfg(all(feature = "apple-speech", target_os = "macos", target_arch = "aarch64"))]
+        EngineInstance::Apple { engine } => transcribe_audio(
+            engine,
+            _request.audio,
+            Some(crate::engines::apple::AppleInferenceParams {
+                language: _request.language,
+            }),
+        ),
         #[allow(unreachable_patterns)]
         _ => Err(anyhow!("No speech engine support is enabled")),
     }
@@ -590,7 +719,8 @@ fn combined_prompt(prompt: Option<String>, dictionary: &[String]) -> Option<Stri
     all(
         feature = "nvidia",
         not(all(target_os = "macos", target_arch = "x86_64"))
-    )
+    ),
+    all(feature = "apple-speech", target_os = "macos", target_arch = "aarch64")
 ))]
 fn transcribe_audio<E: TranscriptionEngine>(
     engine: &mut E,
@@ -612,7 +742,8 @@ fn transcribe_audio<E: TranscriptionEngine>(
     all(
         feature = "nvidia",
         not(all(target_os = "macos", target_arch = "x86_64"))
-    )
+    ),
+    all(feature = "apple-speech", target_os = "macos", target_arch = "aarch64")
 ))]
 fn prepare_audio(audio: AudioInput) -> Result<PreparedAudio> {
     let (mut samples, source_sample_rate, source_sample_count) = match audio {
@@ -665,7 +796,8 @@ fn prepare_audio(audio: AudioInput) -> Result<PreparedAudio> {
     all(
         feature = "nvidia",
         not(all(target_os = "macos", target_arch = "x86_64"))
-    )
+    ),
+    all(feature = "apple-speech", target_os = "macos", target_arch = "aarch64")
 ))]
 fn audio_duration_ms(sample_count: usize, sample_rate: u32) -> u128 {
     if sample_rate == 0 {

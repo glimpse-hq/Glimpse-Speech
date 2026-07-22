@@ -22,24 +22,40 @@ pub enum AppleAvailability {
 
 enum Backend {
     Off,
-    #[cfg(all(feature = "cleanup-apple", target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(
+        feature = "cleanup-apple",
+        target_os = "macos",
+        target_arch = "aarch64"
+    ))]
     Apple,
 }
 
 impl CleanupProvider {
     pub fn off() -> Self {
-        Self { backend: Backend::Off }
+        Self {
+            backend: Backend::Off,
+        }
     }
 
     /// Apple FoundationModels backend. On unsupported builds this is `off`;
     /// on supported builds availability is still checked per call (the user
     /// can toggle Apple Intelligence at any time).
     pub fn apple() -> Self {
-        #[cfg(all(feature = "cleanup-apple", target_os = "macos", target_arch = "aarch64"))]
+        #[cfg(all(
+            feature = "cleanup-apple",
+            target_os = "macos",
+            target_arch = "aarch64"
+        ))]
         {
-            Self { backend: Backend::Apple }
+            Self {
+                backend: Backend::Apple,
+            }
         }
-        #[cfg(not(all(feature = "cleanup-apple", target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(not(all(
+            feature = "cleanup-apple",
+            target_os = "macos",
+            target_arch = "aarch64"
+        )))]
         {
             Self::off()
         }
@@ -47,11 +63,19 @@ impl CleanupProvider {
 
     /// Whether the Apple backend can run right now. For settings UI.
     pub fn apple_availability() -> AppleAvailability {
-        #[cfg(all(feature = "cleanup-apple", target_os = "macos", target_arch = "aarch64"))]
+        #[cfg(all(
+            feature = "cleanup-apple",
+            target_os = "macos",
+            target_arch = "aarch64"
+        ))]
         {
             apple::availability()
         }
-        #[cfg(not(all(feature = "cleanup-apple", target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(not(all(
+            feature = "cleanup-apple",
+            target_os = "macos",
+            target_arch = "aarch64"
+        )))]
         {
             AppleAvailability::Unsupported
         }
@@ -60,17 +84,29 @@ impl CleanupProvider {
     pub async fn apply(&self, transcription: Transcription) -> Transcription {
         match &self.backend {
             Backend::Off => transcription,
-            #[cfg(all(feature = "cleanup-apple", target_os = "macos", target_arch = "aarch64"))]
+            #[cfg(all(
+                feature = "cleanup-apple",
+                target_os = "macos",
+                target_arch = "aarch64"
+            ))]
             Backend::Apple => apply_apple(transcription).await,
         }
     }
 }
 
 /// Inputs longer than this skip cleanup (on-device model context is ~8k tokens).
-#[cfg(all(feature = "cleanup-apple", target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(
+    feature = "cleanup-apple",
+    target_os = "macos",
+    target_arch = "aarch64"
+))]
 const MAX_INPUT_CHARS: usize = 12_000;
 
-#[cfg(all(feature = "cleanup-apple", target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(
+    feature = "cleanup-apple",
+    target_os = "macos",
+    target_arch = "aarch64"
+))]
 async fn apply_apple(mut transcription: Transcription) -> Transcription {
     let text = transcription.text.trim().to_string();
     if text.is_empty() || text.len() > MAX_INPUT_CHARS {
@@ -99,7 +135,11 @@ async fn apply_apple(mut transcription: Transcription) -> Transcription {
 }
 
 /// Reject outputs that look like the model did more than tidy the text.
-#[cfg(all(feature = "cleanup-apple", target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(
+    feature = "cleanup-apple",
+    target_os = "macos",
+    target_arch = "aarch64"
+))]
 fn accept(original: &str, cleaned: &str) -> bool {
     let cleaned = cleaned.trim();
     if cleaned.is_empty() {
@@ -109,7 +149,11 @@ fn accept(original: &str, cleaned: &str) -> bool {
     cleaned.len() <= original_len.saturating_mul(3) / 2 + 32
 }
 
-#[cfg(all(feature = "cleanup-apple", target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(
+    feature = "cleanup-apple",
+    target_os = "macos",
+    target_arch = "aarch64"
+))]
 mod apple {
     use anyhow::{anyhow, Context};
     use fm_rs::{GenerationOptions, Session, SystemLanguageModel};
@@ -137,8 +181,8 @@ Clean up raw speech-to-text output.
     }
 
     pub fn availability() -> super::AppleAvailability {
-        use fm_rs::ModelAvailability;
         use super::AppleAvailability;
+        use fm_rs::ModelAvailability;
         if !os_supports_foundation_models() {
             return AppleAvailability::Unsupported;
         }
@@ -164,7 +208,9 @@ Clean up raw speech-to-text output.
             return Err(anyhow!("on-device model requires macOS 26 or later"));
         }
         let model = SystemLanguageModel::new().context("load system language model")?;
-        model.ensure_available().map_err(|err| anyhow!("model unavailable: {err}"))?;
+        model
+            .ensure_available()
+            .map_err(|err| anyhow!("model unavailable: {err}"))?;
         let session = Session::with_instructions(&model, instructions)
             .map_err(|err| anyhow!("create session: {err}"))?;
         let mut options = GenerationOptions::builder().temperature(f64::from(temperature));
@@ -187,12 +233,22 @@ pub fn apple_generate(
     temperature: f32,
     max_response_tokens: Option<u32>,
 ) -> anyhow::Result<String> {
-    #[cfg(all(feature = "cleanup-apple", target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(
+        feature = "cleanup-apple",
+        target_os = "macos",
+        target_arch = "aarch64"
+    ))]
     {
         apple::generate(instructions, prompt, temperature, max_response_tokens)
     }
-    #[cfg(not(all(feature = "cleanup-apple", target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(not(all(
+        feature = "cleanup-apple",
+        target_os = "macos",
+        target_arch = "aarch64"
+    )))]
     {
-        Err(anyhow::anyhow!("on-device model is not supported in this build"))
+        Err(anyhow::anyhow!(
+            "on-device model is not supported in this build"
+        ))
     }
 }

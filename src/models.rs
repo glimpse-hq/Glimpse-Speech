@@ -28,6 +28,7 @@ pub enum ModelEngine {
     Whisper,
     Parakeet,
     Nemotron,
+    Apple,
 }
 
 impl fmt::Display for ModelEngine {
@@ -36,6 +37,7 @@ impl fmt::Display for ModelEngine {
             ModelEngine::Whisper => write!(f, "whisper"),
             ModelEngine::Parakeet => write!(f, "parakeet"),
             ModelEngine::Nemotron => write!(f, "nemotron"),
+            ModelEngine::Apple => write!(f, "apple"),
         }
     }
 }
@@ -170,6 +172,15 @@ impl ModelInstallManager {
 
     pub fn resolve(&self, spec: &InstallSpec) -> Result<ResolvedModel> {
         validate_spec(spec)?;
+        if spec.engine == ModelEngine::Apple {
+            return Ok(ResolvedModel {
+                id: spec.id.clone(),
+                path: PathBuf::new(),
+                engine: spec.engine,
+                layout: default_layout(spec.engine, spec.variant.as_deref()),
+                variant: spec.variant.clone(),
+            });
+        }
         if spec.engine != ModelEngine::Whisper {
             let status = self.status(spec)?;
             if !status.installed {
@@ -198,6 +209,15 @@ impl ModelInstallManager {
         // The loose path has no catalog spec, so the engine and layout are
         // inferred from the model id; `fallback_engine` covers ids with no marker.
         let engine = infer_engine(reference).unwrap_or(fallback_engine);
+        if engine == ModelEngine::Apple {
+            return Ok(ResolvedModel {
+                id: reference.to_string(),
+                path: PathBuf::new(),
+                engine,
+                layout: default_layout(engine, None),
+                variant: None,
+            });
+        }
         let path = match engine {
             ModelEngine::Whisper => [PathBuf::from(reference), self.cache_dir.join(reference)]
                 .into_iter()
@@ -210,6 +230,7 @@ impl ModelInstallManager {
                     .find(|candidate| candidate.is_dir())
                     .ok_or_else(|| anyhow!("{engine} models require a directory: {reference}"))?
             }
+            ModelEngine::Apple => unreachable!("handled above"),
         };
         Ok(ResolvedModel {
             id: reference.to_string(),
@@ -530,7 +551,9 @@ fn spec_layout(spec: &InstallSpec) -> ModelLayout {
 /// catalog spec names the engine. `None` when the id carries no known marker.
 pub fn infer_engine(reference: &str) -> Option<ModelEngine> {
     let lower = reference.to_ascii_lowercase();
-    if lower.contains("nemotron") {
+    if lower.contains("apple") {
+        Some(ModelEngine::Apple)
+    } else if lower.contains("nemotron") {
         Some(ModelEngine::Nemotron)
     } else if lower.contains("parakeet") {
         Some(ModelEngine::Parakeet)
@@ -552,6 +575,8 @@ fn default_layout(engine: ModelEngine, variant: Option<&str>) -> ModelLayout {
                 ModelLayout::ParakeetTdt
             }
         }
+        // The OS owns the model; layout is meaningless but the field is required.
+        ModelEngine::Apple => ModelLayout::Whisper,
     }
 }
 

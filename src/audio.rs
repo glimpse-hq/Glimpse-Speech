@@ -153,7 +153,8 @@ fn io_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
     all(
         feature = "nvidia",
         not(all(target_os = "macos", target_arch = "x86_64"))
-    )
+    ),
+    all(feature = "apple-speech", target_os = "macos", target_arch = "aarch64")
 ))]
 pub(crate) fn resample_i16_to_f32(samples: &[i16], from_rate: u32, to_rate: u32) -> Vec<f32> {
     const SCALE: f32 = 1.0 / PCM16_SCALE;

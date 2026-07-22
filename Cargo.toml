@@ -20,6 +20,7 @@ all = ["whisper", "nvidia"]
 api = ["dep:axum", "dep:tower-http"]
 remote = ["reqwest/multipart", "dep:flacenc", "dep:base64"]
 cleanup-apple = ["dep:fm-rs"]
+apple-speech = []
 cli = ["api", "dep:clap", "dep:directories"]
 
 [dependencies]
@@ -74,6 +75,10 @@ ort = { version = "=2.0.0-rc.12", optional = true }
 [[example]]
 name = "cleanup"
 required-features = ["cleanup-apple"]
+
+[[example]]
+name = "apple_speech"
+required-features = ["apple-speech"]
 
 [[example]]
 name = "whisper"
