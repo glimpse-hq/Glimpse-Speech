@@ -183,6 +183,20 @@ impl ModelInstallManager {
     pub fn resolve(&self, spec: &InstallSpec) -> Result<ResolvedModel> {
         validate_spec(spec)?;
         if spec.engine == ModelEngine::Apple {
+            #[cfg(all(feature = "apple-speech", target_os = "macos", target_arch = "aarch64"))]
+            {
+                if !crate::engines::apple::available() {
+                    return Err(anyhow!("Apple speech requires macOS 26 or later"));
+                }
+            }
+            #[cfg(not(all(
+                feature = "apple-speech",
+                target_os = "macos",
+                target_arch = "aarch64"
+            )))]
+            {
+                return Err(anyhow!("Apple speech support is not enabled on this build"));
+            }
             return Ok(ResolvedModel {
                 id: spec.id.clone(),
                 path: PathBuf::new(),
@@ -220,6 +234,20 @@ impl ModelInstallManager {
         // inferred from the model id; `fallback_engine` covers ids with no marker.
         let engine = infer_engine(reference).unwrap_or(fallback_engine);
         if engine == ModelEngine::Apple {
+            #[cfg(all(feature = "apple-speech", target_os = "macos", target_arch = "aarch64"))]
+            {
+                if !crate::engines::apple::available() {
+                    return Err(anyhow!("Apple speech requires macOS 26 or later"));
+                }
+            }
+            #[cfg(not(all(
+                feature = "apple-speech",
+                target_os = "macos",
+                target_arch = "aarch64"
+            )))]
+            {
+                return Err(anyhow!("Apple speech support is not enabled on this build"));
+            }
             return Ok(ResolvedModel {
                 id: reference.to_string(),
                 path: PathBuf::new(),

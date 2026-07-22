@@ -39,7 +39,8 @@ fn locale_cstring(language: Option<&str>) -> CString {
 
 /// Whether the OS provides the speech engine (macOS 26+, Apple Silicon).
 pub fn available() -> bool {
-    unsafe { gs_apple_availability() == 0 }
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(|| unsafe { gs_apple_availability() == 0 })
 }
 
 /// Supported locales as BCP-47 identifiers, empty when unavailable.
