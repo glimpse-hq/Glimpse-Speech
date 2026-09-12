@@ -4,10 +4,12 @@ pub mod apple;
 pub mod nemotron;
 #[cfg(nvidia_engines)]
 pub mod parakeet;
+#[cfg(transcribe_engine)]
+pub mod transcribe;
 #[cfg(feature = "whisper")]
 pub mod whisper;
 
-#[cfg(any(feature = "whisper", nvidia_engines))]
+#[cfg(any(feature = "whisper", nvidia_engines, transcribe_engine))]
 pub(crate) fn io_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
     std::io::Error::other(message.into()).into()
 }
@@ -34,7 +36,7 @@ pub(crate) fn validate_model_dir(
 
 /// Inference thread count: physical parallelism, capped where extra threads
 /// stop paying for themselves on hybrid-core CPUs.
-#[cfg(any(feature = "whisper", nvidia_engines))]
+#[cfg(any(feature = "whisper", nvidia_engines, transcribe_engine))]
 pub(crate) fn inference_threads() -> usize {
     const MAX_THREADS: usize = 8;
 
@@ -51,7 +53,10 @@ pub(crate) fn inference_threads() -> usize {
 /// Performance-core count on hybrid Apple Silicon. Evenly-partitioned
 /// parallel ops stall on efficiency cores, so threads beyond the P-core
 /// count hurt more than they help. Absent on Intel Macs (falls back).
-#[cfg(all(target_os = "macos", any(feature = "whisper", nvidia_engines)))]
+#[cfg(all(
+    target_os = "macos",
+    any(feature = "whisper", nvidia_engines, transcribe_engine)
+))]
 fn macos_performance_cores() -> Option<usize> {
     let mut value: libc::c_int = 0;
     let mut size = std::mem::size_of::<libc::c_int>();

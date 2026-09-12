@@ -32,6 +32,8 @@ pub enum ModelEngine {
     /// Built into macOS 26; not selectable as a loose CLI engine.
     #[cfg_attr(feature = "cli", value(skip))]
     Apple,
+    /// A GGUF model run by transcribe.cpp.
+    Transcribe,
 }
 
 impl ModelEngine {
@@ -41,6 +43,7 @@ impl ModelEngine {
             Self::Parakeet => "parakeet",
             Self::Nemotron => "nemotron",
             Self::Apple => "apple",
+            Self::Transcribe => "transcribe",
         }
     }
 }
@@ -58,6 +61,7 @@ pub enum ModelLayout {
     ParakeetTdt,
     ParakeetUnified,
     Nemotron,
+    Transcribe,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -237,6 +241,11 @@ impl ModelInstallManager {
                     .find(|candidate| candidate.is_dir())
                     .ok_or_else(|| anyhow!("{engine} models require a directory: {reference}"))?
             }
+            ModelEngine::Transcribe => [PathBuf::from(reference), self.cache_dir.join(reference)]
+                .into_iter()
+                .find(|candidate| candidate.is_file())
+                .or_else(|| gguf_in_dir(&self.cache_dir.join(reference)))
+                .ok_or_else(|| anyhow!("{engine} models require a GGUF file: {reference}"))?,
             ModelEngine::Apple => unreachable!("handled above"),
         };
         Ok(ResolvedModel {
@@ -579,14 +588,18 @@ fn spec_layout(spec: &InstallSpec) -> ModelLayout {
 /// Best-effort engine guess from a model id, for the loose CLI path where no
 /// catalog spec names the engine. `None` when the id carries no known marker.
 pub fn infer_engine(reference: &str) -> Option<ModelEngine> {
-    const MARKERS: [ModelEngine; 4] = [
+    const MARKERS: [ModelEngine; 5] = [
         ModelEngine::Apple,
         ModelEngine::Nemotron,
         ModelEngine::Parakeet,
         ModelEngine::Whisper,
+        ModelEngine::Transcribe,
     ];
 
     let lower = reference.to_ascii_lowercase();
+    if lower.ends_with(".gguf") {
+        return Some(ModelEngine::Transcribe);
+    }
     MARKERS
         .into_iter()
         .find(|engine| lower.contains(engine.as_str()))
@@ -605,6 +618,7 @@ fn default_layout(engine: ModelEngine, variant: Option<&str>) -> ModelLayout {
         }
         // The OS owns the model; layout is meaningless but the field is required.
         ModelEngine::Apple => ModelLayout::Whisper,
+        ModelEngine::Transcribe => ModelLayout::Transcribe,
     }
 }
 
@@ -658,6 +672,23 @@ fn artifact_path(dir: &Path, storage: &ModelStorage) -> PathBuf {
         ModelStorage::Directory => dir.to_path_buf(),
         ModelStorage::File { artifact } => dir.join(artifact),
     }
+}
+
+/// The single `.gguf` in a directory, when exactly one exists.
+fn gguf_in_dir(dir: &Path) -> Option<PathBuf> {
+    let mut files = fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
+        });
+    let first = files.next()?;
+    files.next().is_none().then_some(first)
 }
 
 fn single_file_in_dir(dir: &Path) -> Option<PathBuf> {

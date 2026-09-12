@@ -12,6 +12,7 @@ fn main() {
     let nvidia = feature("NVIDIA") && !intel_mac;
     let apple_speech = macos_arm && feature("APPLE_SPEECH");
     let apple_cleanup = macos_arm && feature("CLEANUP_APPLE");
+    let transcribe = feature("TRANSCRIBE");
 
     // Named cfgs so source files can gate on capabilities instead of
     // repeating feature and target predicates.
@@ -19,7 +20,11 @@ fn main() {
     emit_cfg("nvidia_engines", nvidia);
     emit_cfg("apple_speech_engine", apple_speech);
     emit_cfg("apple_cleanup", apple_cleanup);
-    emit_cfg("local_engines", whisper || nvidia || apple_speech);
+    emit_cfg("transcribe_engine", transcribe);
+    emit_cfg(
+        "local_engines",
+        whisper || nvidia || apple_speech || transcribe,
+    );
     emit_cfg("streaming_engines", nvidia || apple_speech);
 
     if apple_cleanup || apple_speech {

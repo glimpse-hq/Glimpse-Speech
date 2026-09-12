@@ -85,6 +85,8 @@ enum EngineInstance {
     Nemotron(crate::engines::nemotron::NemotronEngine),
     #[cfg(apple_speech_engine)]
     Apple(crate::engines::apple::AppleEngine),
+    #[cfg(transcribe_engine)]
+    Transcribe(crate::engines::transcribe::TranscribeEngine),
 }
 
 #[cfg(streaming_engines)]
@@ -110,6 +112,10 @@ impl EngineInstance {
             Self::Whisper(_) => Err(anyhow!(
                 "Streaming is only supported with Apple, Nemotron, or unified Parakeet models"
             )),
+            #[cfg(transcribe_engine)]
+            Self::Transcribe(_) => Err(anyhow!(
+                "Streaming is only supported with Apple, Nemotron, or unified Parakeet models"
+            )),
         }
     }
 
@@ -123,6 +129,8 @@ impl EngineInstance {
             Self::Apple(engine) => engine.reset(),
             #[cfg(feature = "whisper")]
             Self::Whisper(_) => {}
+            #[cfg(transcribe_engine)]
+            Self::Transcribe(_) => {}
         }
     }
 
@@ -154,6 +162,8 @@ impl EngineInstance {
             Self::Apple(engine) => Some(engine.get_transcript()),
             #[cfg(feature = "whisper")]
             Self::Whisper(_) => None,
+            #[cfg(transcribe_engine)]
+            Self::Transcribe(_) => None,
         }
     }
 }
@@ -519,6 +529,28 @@ fn load_engine(resolved: &ResolvedModel) -> Result<EngineInstance> {
                 ))
             }
         }
+        ModelEngine::Transcribe => {
+            #[cfg(transcribe_engine)]
+            {
+                use crate::engines::transcribe::{TranscribeEngine, TranscribeModelParams};
+
+                let mut engine = TranscribeEngine::new();
+                let params = TranscribeModelParams {
+                    coreml_encoder: TranscribeEngine::companion_for(&resolved.path),
+                    ..Default::default()
+                };
+                engine
+                    .load_model_with_params(&resolved.path, params)
+                    .map_err(boxed_error)?;
+                Ok(EngineInstance::Transcribe(engine))
+            }
+            #[cfg(not(transcribe_engine))]
+            {
+                Err(anyhow!(
+                    "transcribe.cpp support is not enabled on this build"
+                ))
+            }
+        }
         ModelEngine::Apple => {
             #[cfg(apple_speech_engine)]
             {
@@ -588,6 +620,15 @@ fn transcribe_with_engine(
                 language: _request.language,
                 long_form: _request.timestamps || _request.timestamp_granularity.is_some(),
                 dictionary: _request.dictionary,
+            };
+            transcribe_audio(engine, _request.audio, Some(params))
+        }
+        #[cfg(transcribe_engine)]
+        EngineInstance::Transcribe(engine) => {
+            let params = crate::engines::transcribe::TranscribeInferenceParams {
+                language: _request.language,
+                dictionary: _request.dictionary,
+                timestamps: _request.timestamps || _request.timestamp_granularity.is_some(),
             };
             transcribe_audio(engine, _request.audio, Some(params))
         }

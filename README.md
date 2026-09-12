@@ -1,10 +1,11 @@
 # glimpse-speech
 
-Local speech-to-text for Rust. One crate, three engines, an OpenAI-compatible HTTP API, and a CLI.
+Local speech-to-text for Rust. One crate, four engines, an OpenAI-compatible HTTP API, and a CLI.
 
 - **Whisper** (GGML via [whisper-rs](https://github.com/tazz4843/whisper-rs)): Metal and Core ML/ANE on Apple Silicon, Vulkan on Windows and Linux
 - **Parakeet TDT** (NVIDIA ONNX via [parakeet-rs](https://github.com/altunenes/parakeet-rs)): fast batch transcription, int8 and fp32
 - **Nemotron** (NVIDIA ONNX): streaming transcription with incremental results
+- **transcribe.cpp** (GGUF via [transcribe-cpp](https://github.com/handy-computer/transcribe.cpp)): Qwen3-ASR and other ggml families; Metal plus a Core ML/ANE encoder on Apple Silicon, Vulkan on Windows and Linux
 
 ## Cargo features
 
@@ -12,10 +13,11 @@ Local speech-to-text for Rust. One crate, three engines, an OpenAI-compatible HT
 | --- | --- |
 | `whisper` | `engines::whisper::WhisperEngine` |
 | `nvidia` | `engines::parakeet::ParakeetEngine` and `engines::nemotron::NemotronEngine` |
+| `transcribe` | `engines::transcribe::TranscribeEngine` (builds transcribe.cpp from source: CMake and a C++ toolchain, plus the Vulkan SDK on Windows and Linux) |
 | `api` | The OpenAI-compatible HTTP server (`api::serve`) |
 | `remote` | Proxying to a remote OpenAI-compatible endpoint, with local fallback |
 | `cli` | The `glimpse-speech` binary (implies `api`) |
-| `all` | `whisper` + `nvidia` |
+| `all` | `whisper` + `nvidia` + `transcribe` |
 
 NVIDIA engines are unavailable on Intel macOS (`x86_64-apple-darwin`) because ONNX Runtime ships no prebuilt binary for that target. `parakeet` remains as a compatibility alias for `nvidia`.
 
@@ -26,11 +28,20 @@ NVIDIA engines are unavailable on Intel macOS (`x86_64-apple-darwin`) because ON
 glimpse-speech = { git = "https://github.com/glimpse-hq/Glimpse-Speech.git", tag = "1.5.4", features = ["whisper", "nvidia"] }
 ```
 
-Use the latest tag. For local development:
+The transcribe.cpp dependency is pinned to an exact Git revision, including its
+Core ML bindings. Consumers should pin a Glimpse-Speech revision that includes
+these features. Local development overrides belong in Cargo configuration, not
+in committed dependency paths. For example, from the Glimpse app checkout:
 
-```toml
-glimpse-speech = { path = "../Glimpse-Speech", features = ["whisper", "nvidia", "api", "cli", "remote"] }
+```bash
+cargo check --manifest-path src-tauri/Cargo.toml \
+  --config 'patch."https://github.com/glimpse-hq/Glimpse-Speech.git".glimpse-speech.path="../Glimpse-Speech"'
 ```
+
+Qwen3-ASR is decoded in chunks of at most 15 seconds, split at quiet boundaries
+without overlap or omitted samples. This also fits the default Core ML encoder
+capacity. Input-length and output-truncation errors retry smaller chunks; other
+errors propagate normally. Partial transcripts are never reported as complete.
 
 ## CLI
 
@@ -52,7 +63,7 @@ glimpse-speech serve --port 11435 --remote-endpoint https://api.openai.com/v1 --
 
 Useful flags:
 
-- `--engine whisper|parakeet|nemotron` (default `whisper`)
+- `--engine whisper|parakeet|nemotron|transcribe` (default `whisper`; a `.gguf` model path selects `transcribe` automatically)
 - `--response-format text|json|verbose_json|srt|vtt` (default `text`)
 - `--language`, `--prompt`, `--dictionary <term>` (repeatable), `--timestamps`
 - `--cache-dir <path>` or `GLIMPSE_SPEECH_CACHE_DIR` to override the model cache
