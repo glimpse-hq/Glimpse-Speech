@@ -9,13 +9,13 @@
 use std::path::{Path, PathBuf};
 
 use transcribe_cpp::{
-    Backend, Error, Model, ModelOptions, RunOptions, Session, SessionOptions, TimestampKind,
-    Transcript,
+    Backend, Error, Model, ModelOptions, Qwen3AsrRunOptions, RunExtension, RunOptions, Session,
+    SessionOptions, TimestampKind, Transcript,
 };
 
 use crate::{
     TranscriptionEngine, TranscriptionResult, TranscriptionSegment,
-    dictionary::sanitize_dictionary_entries, engines::io_error,
+    dictionary::build_dictionary_prompt, engines::io_error,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -30,8 +30,7 @@ pub struct TranscribeModelParams {
 #[derive(Debug, Clone, Default)]
 pub struct TranscribeInferenceParams {
     pub language: Option<String>,
-    /// Accepted for API symmetry; transcribe.cpp has no vocabulary biasing
-    /// for these models, so entries are validated and otherwise ignored.
+    /// Vocabulary hints for Qwen3-ASR. Other GGUF families ignore these entries.
     pub dictionary: Vec<String>,
     pub timestamps: bool,
 }
@@ -40,6 +39,7 @@ pub struct TranscribeInferenceParams {
 pub struct TranscribeEngine {
     session: Option<Session>,
     chunk_samples: Option<usize>,
+    supports_context: bool,
 }
 
 impl TranscribeEngine {
@@ -106,12 +106,14 @@ impl TranscriptionEngine for TranscribeEngine {
             || (model.arch() == "parakeet" && uses_coreml))
             .then_some(15 * SAMPLE_RATE);
         self.session = Some(session);
+        self.supports_context = model.arch() == "qwen3_asr";
         Ok(())
     }
 
     fn unload_model(&mut self) {
         self.session = None;
         self.chunk_samples = None;
+        self.supports_context = false;
     }
 
     fn transcribe_samples(
@@ -124,8 +126,16 @@ impl TranscriptionEngine for TranscribeEngine {
             .as_mut()
             .ok_or_else(|| io_error("Model not loaded. Call load_model() first."))?;
         let params = params.unwrap_or_default();
-        let _ = sanitize_dictionary_entries(&params.dictionary);
+        let context = self
+            .supports_context
+            .then(|| build_dictionary_prompt(&params.dictionary))
+            .flatten();
         let options = RunOptions {
+            family: context.map(|context| {
+                RunExtension::Qwen3Asr(Qwen3AsrRunOptions {
+                    context: Some(context),
+                })
+            }),
             language: params
                 .language
                 .as_deref()

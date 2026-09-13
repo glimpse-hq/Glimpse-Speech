@@ -48,8 +48,10 @@ decoder-only GGUF paired with its matching Core ML encoder on Apple Silicon.
 Keep the compiled `<model stem>-encoder.mlmodelc` directory beside the GGUF;
 decoder-only files also recognize the stem without `-decoder`. The compact
 package requires its encoder and cannot serve as a standalone CPU/GPU model.
-Parakeet exposes word timestamps; Qwen does not. This wrapper does not expose
-streaming or custom-word biasing for either GGUF model.
+Parakeet exposes word timestamps; Qwen does not. Qwen uses the request dictionary
+as vocabulary context on every chunk. These are recognition hints, not forced
+replacements. Parakeet does not expose custom-word biasing; neither GGUF model
+exposes streaming.
 
 Qwen's optional ANE companion accelerates the encoder; its decoder still runs
 on Metal. Installing a companion beside an already-loaded model requires

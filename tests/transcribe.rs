@@ -61,3 +61,58 @@ fn rejects_missing_model_file() {
         .expect_err("missing file must fail");
     assert!(err.to_string().contains("not found"));
 }
+
+#[test]
+#[ignore = "requires Qwen GGUF and WAV fixture paths"]
+fn qwen_dictionary_is_applied_per_request_across_chunks() {
+    let (model, wav) = fixture().expect("set both model and WAV fixture paths");
+    let samples = glimpse_speech::audio::read_audio_samples(&wav).unwrap();
+    let mut long = samples.clone();
+    while long.len() <= 16_000 * 30 {
+        long.extend_from_slice(&samples);
+    }
+    let mut companions = vec![None];
+    if let Some(companion) = TranscribeEngine::companion_for(&model) {
+        companions.push(Some(companion));
+    }
+    for coreml_encoder in companions {
+        let mut engine = TranscribeEngine::new();
+        engine
+            .load_model_with_params(
+                &model,
+                TranscribeModelParams {
+                    coreml_encoder,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let plain = TranscribeInferenceParams {
+            language: Some("en".into()),
+            ..Default::default()
+        };
+        let baseline = engine
+            .transcribe_samples(samples.clone(), Some(plain.clone()))
+            .unwrap()
+            .text;
+        let hints = TranscribeInferenceParams {
+            dictionary: vec![
+                "Kennedy".into(),
+                "Glimpse".into(),
+                "José".into(),
+                "東京".into(),
+            ],
+            ..plain.clone()
+        };
+        let result = engine
+            .transcribe_samples(long.clone(), Some(hints))
+            .unwrap();
+        assert!(!result.text.is_empty());
+        assert_eq!(
+            engine
+                .transcribe_samples(samples.clone(), Some(plain))
+                .unwrap()
+                .text,
+            baseline
+        );
+    }
+}

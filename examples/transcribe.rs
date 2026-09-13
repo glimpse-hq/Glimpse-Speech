@@ -1,7 +1,7 @@
 //! Transcribe a WAV with a transcribe.cpp GGUF model.
 //!
 //!     cargo run --example transcribe --features transcribe -- \
-//!         models/Qwen3-ASR-0.6B-Q8_0.gguf samples/jfk.wav [language]
+//!         models/Qwen3-ASR-0.6B-Q8_0.gguf samples/jfk.wav [language] [dictionary words...]
 //!
 //! A `<gguf stem>-encoder.mlmodelc` next to the GGUF is used on Apple Silicon.
 
@@ -45,6 +45,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &wav,
             Some(TranscribeInferenceParams {
                 language: language.clone(),
+                dictionary: args.iter().skip(4).cloned().collect(),
                 ..Default::default()
             }),
         )?;
