@@ -5,7 +5,7 @@ Local speech-to-text for Rust. One crate, four engines, an OpenAI-compatible HTT
 - **Whisper** (GGML via [whisper-rs](https://github.com/tazz4843/whisper-rs)): Metal and Core ML/ANE on Apple Silicon, Vulkan on Windows and Linux
 - **Parakeet TDT** (NVIDIA ONNX via [parakeet-rs](https://github.com/altunenes/parakeet-rs)): fast batch transcription, int8 and fp32
 - **Nemotron** (NVIDIA ONNX): streaming transcription with incremental results
-- **transcribe.cpp** (GGUF via [transcribe-cpp](https://github.com/handy-computer/transcribe.cpp)): Qwen3-ASR and other ggml families; Metal plus a Core ML/ANE encoder on Apple Silicon, Vulkan on Windows and Linux
+- **transcribe.cpp** (GGUF via [transcribe-cpp](https://github.com/handy-computer/transcribe.cpp)): Qwen3-ASR and Parakeet TDT V3; Metal on macOS, optional Core ML/ANE encoders on Apple Silicon, and Vulkan on Windows and Linux
 
 ## Cargo features
 
@@ -42,6 +42,19 @@ Qwen3-ASR is decoded in chunks of at most 15 seconds, split at quiet boundaries
 without overlap or omitted samples. This also fits the default Core ML encoder
 capacity. Input-length and output-truncation errors retry smaller chunks; other
 errors propagate normally. Partial transcripts are never reported as complete.
+
+Parakeet TDT V3 supports either a full GGUF for CPU/GPU inference or a compact
+decoder-only GGUF paired with its matching Core ML encoder on Apple Silicon.
+Keep the compiled `<model stem>-encoder.mlmodelc` directory beside the GGUF;
+decoder-only files also recognize the stem without `-decoder`. The compact
+package requires its encoder and cannot serve as a standalone CPU/GPU model.
+Parakeet exposes word timestamps; Qwen does not. This wrapper does not expose
+streaming or custom-word biasing for either GGUF model.
+
+Qwen's optional ANE companion accelerates the encoder; its decoder still runs
+on Metal. Installing a companion beside an already-loaded model requires
+`SpeechService::unload()` before loading or warming it again. The service cache
+tracks model id and path, not changes to companion files.
 
 ## CLI
 
