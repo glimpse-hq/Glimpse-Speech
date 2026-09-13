@@ -85,6 +85,8 @@ enum EngineInstance {
     Nemotron(crate::engines::nemotron::NemotronEngine),
     #[cfg(apple_speech_engine)]
     Apple(crate::engines::apple::AppleEngine),
+    #[cfg(transcribe_engine)]
+    Transcribe(crate::engines::transcribe::TranscribeEngine),
 }
 
 #[cfg(streaming_engines)]
@@ -110,6 +112,10 @@ impl EngineInstance {
             Self::Whisper(_) => Err(anyhow!(
                 "Streaming is only supported with Apple, Nemotron, or unified Parakeet models"
             )),
+            #[cfg(transcribe_engine)]
+            Self::Transcribe(_) => Err(anyhow!(
+                "Streaming is only supported with Apple, Nemotron, or unified Parakeet models"
+            )),
         }
     }
 
@@ -123,6 +129,8 @@ impl EngineInstance {
             Self::Apple(engine) => engine.reset(),
             #[cfg(feature = "whisper")]
             Self::Whisper(_) => {}
+            #[cfg(transcribe_engine)]
+            Self::Transcribe(_) => {}
         }
     }
 
@@ -154,6 +162,8 @@ impl EngineInstance {
             Self::Apple(engine) => Some(engine.get_transcript()),
             #[cfg(feature = "whisper")]
             Self::Whisper(_) => None,
+            #[cfg(transcribe_engine)]
+            Self::Transcribe(_) => None,
         }
     }
 }
@@ -519,6 +529,39 @@ fn load_engine(resolved: &ResolvedModel) -> Result<EngineInstance> {
                 ))
             }
         }
+        ModelEngine::Transcribe => {
+            #[cfg(transcribe_engine)]
+            {
+                use crate::engines::transcribe::{TranscribeEngine, TranscribeModelParams};
+
+                let mut engine = TranscribeEngine::new();
+                let coreml_encoder = TranscribeEngine::companion_for(&resolved.path);
+                let backend = if coreml_encoder.is_some()
+                    && resolved
+                        .variant
+                        .as_deref()
+                        .is_some_and(|v| v.starts_with("parakeet-"))
+                {
+                    transcribe_cpp::Backend::Cpu
+                } else {
+                    transcribe_cpp::Backend::Auto
+                };
+                let params = TranscribeModelParams {
+                    coreml_encoder,
+                    backend,
+                };
+                engine
+                    .load_model_with_params(&resolved.path, params)
+                    .map_err(boxed_error)?;
+                Ok(EngineInstance::Transcribe(engine))
+            }
+            #[cfg(not(transcribe_engine))]
+            {
+                Err(anyhow!(
+                    "transcribe.cpp support is not enabled on this build"
+                ))
+            }
+        }
         ModelEngine::Apple => {
             #[cfg(apple_speech_engine)]
             {
@@ -591,6 +634,15 @@ fn transcribe_with_engine(
             };
             transcribe_audio(engine, _request.audio, Some(params))
         }
+        #[cfg(transcribe_engine)]
+        EngineInstance::Transcribe(engine) => {
+            let params = crate::engines::transcribe::TranscribeInferenceParams {
+                language: _request.language,
+                dictionary: _request.dictionary,
+                timestamps: _request.timestamps || _request.timestamp_granularity.is_some(),
+            };
+            transcribe_audio(engine, _request.audio, Some(params))
+        }
         #[allow(unreachable_patterns)]
         _ => Err(anyhow!("No speech engine support is enabled")),
     }
@@ -616,9 +668,20 @@ fn transcribe_audio<E: TranscriptionEngine>(
     params: Option<E::InferenceParams>,
 ) -> Result<TranscriptionWithDuration> {
     let prepared = prepare_audio(audio)?;
-    let result = engine
+    let mut result = engine
         .transcribe_samples(prepared.samples, params)
         .map_err(boxed_error)?;
+    // Decoder timings may include the silence added by prepare_audio.
+    let duration = prepared.duration_ms as f32 / 1000.0;
+    for span in result
+        .segments
+        .iter_mut()
+        .chain(result.words.iter_mut())
+        .flatten()
+    {
+        span.start = span.start.clamp(0.0, duration);
+        span.end = span.end.clamp(span.start, duration);
+    }
     Ok(TranscriptionWithDuration {
         result,
         audio_duration_ms: prepared.duration_ms,

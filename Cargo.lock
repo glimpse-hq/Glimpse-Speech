@@ -917,6 +917,7 @@ dependencies = [
  "tokio-util",
  "tower-http 0.7.1",
  "tracing",
+ "transcribe-cpp",
  "whisper-rs",
  "zip",
 ]
@@ -2714,6 +2715,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
+]
+
+[[package]]
+name = "transcribe-cpp"
+version = "0.2.3"
+source = "git+https://github.com/LegendarySpy/transcribe.cpp.git?rev=2945d1f83b0056036560dd42e5ce90e4e5f6c4fc#2945d1f83b0056036560dd42e5ce90e4e5f6c4fc"
+dependencies = [
+ "log",
+ "thiserror",
+ "transcribe-cpp-sys",
+]
+
+[[package]]
+name = "transcribe-cpp-sys"
+version = "0.2.3"
+source = "git+https://github.com/LegendarySpy/transcribe.cpp.git?rev=2945d1f83b0056036560dd42e5ce90e4e5f6c4fc#2945d1f83b0056036560dd42e5ce90e4e5f6c4fc"
+dependencies = [
+ "cmake",
+ "serde_json",
 ]
 
 [[package]]

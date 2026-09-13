@@ -15,8 +15,9 @@ documentation = "https://docs.rs/glimpse-speech"
 default = []
 whisper = ["dep:whisper-rs", "dep:ort"]
 nvidia = ["dep:parakeet-rs"]
+transcribe = ["dep:transcribe-cpp"]
 parakeet = ["nvidia"]
-all = ["whisper", "nvidia"]
+all = ["whisper", "nvidia", "transcribe"]
 api = ["dep:axum", "dep:tower-http"]
 remote = ["reqwest/multipart", "dep:flacenc", "dep:base64"]
 cleanup-apple = ["dep:fm-rs"]
@@ -56,15 +57,19 @@ libc = "0.2"
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
 whisper-rs = { version = "0.16.0", features = ["metal", "coreml", "raw-api"], optional = true }
 fm-rs = { version = "0.3.0", optional = true }
+transcribe-cpp = { git = "https://github.com/LegendarySpy/transcribe.cpp.git", rev = "2945d1f83b0056036560dd42e5ce90e4e5f6c4fc", default-features = false, features = ["metal", "coreml"], optional = true }
 
 [target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
 whisper-rs = { version = "0.16.0", features = ["metal", "raw-api"], optional = true }
+transcribe-cpp = { git = "https://github.com/LegendarySpy/transcribe.cpp.git", rev = "2945d1f83b0056036560dd42e5ce90e4e5f6c4fc", default-features = false, features = ["metal"], optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 whisper-rs = { version = "0.16.0", features = ["vulkan", "raw-api"], optional = true }
+transcribe-cpp = { git = "https://github.com/LegendarySpy/transcribe.cpp.git", rev = "2945d1f83b0056036560dd42e5ce90e4e5f6c4fc", default-features = false, features = ["vulkan"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 whisper-rs = { version = "0.16.0", features = ["vulkan", "raw-api"], optional = true }
+transcribe-cpp = { git = "https://github.com/LegendarySpy/transcribe.cpp.git", rev = "2945d1f83b0056036560dd42e5ce90e4e5f6c4fc", default-features = false, features = ["vulkan"], optional = true }
 
 # Intel Mac excluded: ort has no prebuilt onnxruntime there (Silero VAD falls
 # back to keeping all speech, see vad.rs) and parakeet models don't run on it.
@@ -88,7 +93,15 @@ required-features = ["whisper"]
 name = "nvidia"
 required-features = ["nvidia"]
 
+[[example]]
+name = "transcribe"
+required-features = ["transcribe"]
+
 [[bin]]
 name = "glimpse-speech"
 path = "src/bin/glimpse-speech.rs"
 required-features = ["cli"]
+
+[[example]]
+name = "stream_bench"
+required-features = ["nvidia"]

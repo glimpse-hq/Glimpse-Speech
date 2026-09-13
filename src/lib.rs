@@ -25,6 +25,14 @@ pub(crate) fn silence_native_logs() {
 #[cfg(not(feature = "whisper"))]
 pub(crate) fn silence_native_logs() {}
 
+/// Route transcribe.cpp and its ggml diagnostics into the `log` facade once,
+/// so they never reach the process's stderr.
+#[cfg(transcribe_engine)]
+pub(crate) fn silence_transcribe_cpp_logs() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(transcribe_cpp::init_logging);
+}
+
 #[cfg(feature = "whisper")]
 mod native_log {
     use std::collections::VecDeque;
