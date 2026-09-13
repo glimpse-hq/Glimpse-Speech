@@ -54,8 +54,11 @@ impl TranscribeEngine {
             return None;
         }
         let stem = model_path.file_stem()?.to_str()?;
-        let dir = model_path.with_file_name(format!("{stem}-encoder.mlmodelc"));
-        dir.join("coremldata.bin").is_file().then_some(dir)
+        [Some(stem), stem.strip_suffix("-decoder")]
+            .into_iter()
+            .flatten()
+            .map(|stem| model_path.with_file_name(format!("{stem}-encoder.mlmodelc")))
+            .find(|dir| dir.join("coremldata.bin").is_file())
     }
 }
 
@@ -83,6 +86,7 @@ impl TranscriptionEngine for TranscribeEngine {
             },
         )
         .map_err(transcribe_error)?;
+        let uses_coreml = params.coreml_encoder.is_some();
         let session = model
             .session_with(&SessionOptions {
                 n_threads: crate::engines::inference_threads() as i32,
@@ -96,10 +100,11 @@ impl TranscriptionEngine for TranscribeEngine {
             model.arch(),
             model.backend()
         );
-        // Qwen's native decoder has a 256-token generation budget. Keep each
-        // utterance within the 15-second Core ML encoder capacity too. Other
-        // families retain their native long-audio handling.
-        self.chunk_samples = (model.arch() == "qwen3_asr").then_some(15 * SAMPLE_RATE);
+        // These companions hold 15 seconds of audio. Qwen also needs this
+        // limit without Core ML because of its native generation budget.
+        self.chunk_samples = (model.arch() == "qwen3_asr"
+            || (model.arch() == "parakeet" && uses_coreml))
+            .then_some(15 * SAMPLE_RATE);
         self.session = Some(session);
         Ok(())
     }
@@ -142,7 +147,10 @@ impl TranscriptionEngine for TranscribeEngine {
         let mut language = params.language;
         let mut segments = Vec::new();
         let mut words = Vec::new();
-        for (offset, transcript) in chunks {
+        let mut chunks = chunks.into_iter().peekable();
+        while let Some((offset, transcript)) = chunks.next() {
+            let chunk_end = chunks.peek().map_or(samples.len(), |(next, _)| *next);
+            let chunk_seconds = (chunk_end - offset) as f32 / SAMPLE_RATE as f32;
             let chunk_text = transcript.text.trim();
             if !chunk_text.is_empty() {
                 if !text.is_empty() {
@@ -154,8 +162,11 @@ impl TranscriptionEngine for TranscribeEngine {
                 language = transcript.language;
             }
             let to_segment = |t0_ms: i64, t1_ms: i64, text: &str| TranscriptionSegment {
-                start: offset as f32 / SAMPLE_RATE as f32 + t0_ms as f32 / 1000.0,
-                end: offset as f32 / SAMPLE_RATE as f32 + t1_ms as f32 / 1000.0,
+                // TDT duration predictions can extend beyond the final audio frame.
+                start: offset as f32 / SAMPLE_RATE as f32
+                    + (t0_ms as f32 / 1000.0).clamp(0.0, chunk_seconds),
+                end: offset as f32 / SAMPLE_RATE as f32
+                    + (t1_ms.max(t0_ms) as f32 / 1000.0).clamp(0.0, chunk_seconds),
                 text: text.trim().to_string(),
             };
             segments.extend(
@@ -323,6 +334,10 @@ mod tests {
         std::fs::write(companion.join("coremldata.bin"), b"x").unwrap();
         let expected = cfg!(all(target_os = "macos", target_arch = "aarch64")).then_some(companion);
         assert_eq!(TranscribeEngine::companion_for(&gguf), expected);
+        assert_eq!(
+            TranscribeEngine::companion_for(&dir.join("Model-Q8_0-decoder.gguf")),
+            expected
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

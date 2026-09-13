@@ -2720,7 +2720,7 @@ dependencies = [
 [[package]]
 name = "transcribe-cpp"
 version = "0.2.3"
-source = "git+https://github.com/LegendarySpy/transcribe.cpp.git?rev=50f89073eee6ac06b7fa1a77a96db8fc9dfb7462#50f89073eee6ac06b7fa1a77a96db8fc9dfb7462"
+source = "git+https://github.com/LegendarySpy/transcribe.cpp.git?rev=6b3034e238507ec14968d29d02f23fdb7ad9f930#6b3034e238507ec14968d29d02f23fdb7ad9f930"
 dependencies = [
  "log",
  "thiserror",
@@ -2730,7 +2730,7 @@ dependencies = [
 [[package]]
 name = "transcribe-cpp-sys"
 version = "0.2.3"
-source = "git+https://github.com/LegendarySpy/transcribe.cpp.git?rev=50f89073eee6ac06b7fa1a77a96db8fc9dfb7462#50f89073eee6ac06b7fa1a77a96db8fc9dfb7462"
+source = "git+https://github.com/LegendarySpy/transcribe.cpp.git?rev=6b3034e238507ec14968d29d02f23fdb7ad9f930#6b3034e238507ec14968d29d02f23fdb7ad9f930"
 dependencies = [
  "cmake",
  "serde_json",

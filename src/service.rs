@@ -535,9 +535,20 @@ fn load_engine(resolved: &ResolvedModel) -> Result<EngineInstance> {
                 use crate::engines::transcribe::{TranscribeEngine, TranscribeModelParams};
 
                 let mut engine = TranscribeEngine::new();
+                let coreml_encoder = TranscribeEngine::companion_for(&resolved.path);
+                let backend = if coreml_encoder.is_some()
+                    && resolved
+                        .variant
+                        .as_deref()
+                        .is_some_and(|v| v.starts_with("parakeet-"))
+                {
+                    transcribe_cpp::Backend::Cpu
+                } else {
+                    transcribe_cpp::Backend::Auto
+                };
                 let params = TranscribeModelParams {
-                    coreml_encoder: TranscribeEngine::companion_for(&resolved.path),
-                    ..Default::default()
+                    coreml_encoder,
+                    backend,
                 };
                 engine
                     .load_model_with_params(&resolved.path, params)
@@ -657,9 +668,20 @@ fn transcribe_audio<E: TranscriptionEngine>(
     params: Option<E::InferenceParams>,
 ) -> Result<TranscriptionWithDuration> {
     let prepared = prepare_audio(audio)?;
-    let result = engine
+    let mut result = engine
         .transcribe_samples(prepared.samples, params)
         .map_err(boxed_error)?;
+    // Decoder timings may include the silence added by prepare_audio.
+    let duration = prepared.duration_ms as f32 / 1000.0;
+    for span in result
+        .segments
+        .iter_mut()
+        .chain(result.words.iter_mut())
+        .flatten()
+    {
+        span.start = span.start.clamp(0.0, duration);
+        span.end = span.end.clamp(span.start, duration);
+    }
     Ok(TranscriptionWithDuration {
         result,
         audio_duration_ms: prepared.duration_ms,
