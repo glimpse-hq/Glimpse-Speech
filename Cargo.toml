@@ -57,19 +57,19 @@ libc = "0.2"
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
 whisper-rs = { version = "0.16.0", features = ["metal", "coreml", "raw-api"], optional = true }
 fm-rs = { version = "0.3.0", optional = true }
-transcribe-cpp = { git = "https://github.com/LegendarySpy/transcribe.cpp.git", rev = "2945d1f83b0056036560dd42e5ce90e4e5f6c4fc", default-features = false, features = ["metal", "coreml"], optional = true }
+transcribe-cpp = { git = "https://github.com/LegendarySpy/transcribe.cpp.git", rev = "0fab127761e8fdd3d98a56fd90d12725fdc1fcd2", default-features = false, features = ["metal", "coreml"], optional = true }
 
 [target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
 whisper-rs = { version = "0.16.0", features = ["metal", "raw-api"], optional = true }
-transcribe-cpp = { git = "https://github.com/LegendarySpy/transcribe.cpp.git", rev = "2945d1f83b0056036560dd42e5ce90e4e5f6c4fc", default-features = false, features = ["metal"], optional = true }
+transcribe-cpp = { git = "https://github.com/LegendarySpy/transcribe.cpp.git", rev = "0fab127761e8fdd3d98a56fd90d12725fdc1fcd2", default-features = false, features = ["metal"], optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 whisper-rs = { version = "0.16.0", features = ["vulkan", "raw-api"], optional = true }
-transcribe-cpp = { git = "https://github.com/LegendarySpy/transcribe.cpp.git", rev = "2945d1f83b0056036560dd42e5ce90e4e5f6c4fc", default-features = false, features = ["vulkan"], optional = true }
+transcribe-cpp = { git = "https://github.com/LegendarySpy/transcribe.cpp.git", rev = "0fab127761e8fdd3d98a56fd90d12725fdc1fcd2", default-features = false, features = ["vulkan"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 whisper-rs = { version = "0.16.0", features = ["vulkan", "raw-api"], optional = true }
-transcribe-cpp = { git = "https://github.com/LegendarySpy/transcribe.cpp.git", rev = "2945d1f83b0056036560dd42e5ce90e4e5f6c4fc", default-features = false, features = ["vulkan"], optional = true }
+transcribe-cpp = { git = "https://github.com/LegendarySpy/transcribe.cpp.git", rev = "0fab127761e8fdd3d98a56fd90d12725fdc1fcd2", default-features = false, features = ["vulkan"], optional = true }
 
 # Intel Mac excluded: ort has no prebuilt onnxruntime there (Silero VAD falls
 # back to keeping all speech, see vad.rs) and parakeet models don't run on it.
