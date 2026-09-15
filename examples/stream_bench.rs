@@ -28,7 +28,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let mut samples = samples;
         if let Ok(pad) = std::env::var("STREAM_BENCH_PAD_MS") {
-            samples.extend(std::iter::repeat(0.0f32).take(pad.parse::<usize>().unwrap() * 16));
+            samples.extend(std::iter::repeat_n(
+                0.0f32,
+                pad.parse::<usize>().unwrap() * 16,
+            ));
         }
         engine.reset();
         let chunk = chunk_ms * 16;
@@ -41,7 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let total = t.elapsed().as_secs_f64() * 1000.0;
         let text = engine.get_transcript();
-        let max = per_chunk.iter().cloned().fold(0.0, f64::max);
+        let max = per_chunk.iter().copied().fold(0.0, f64::max);
         let mean = per_chunk.iter().sum::<f64>() / per_chunk.len() as f64;
         println!(
             "{}",

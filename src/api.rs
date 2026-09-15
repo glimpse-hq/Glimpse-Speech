@@ -493,7 +493,7 @@ fn build_transcription_request(
         .unwrap_or("json")
         .parse::<ResponseFormat>()
         .map_err(|value| map_error(anyhow!("Unsupported response_format {value}")))?;
-    let timestamp_granularities = parse_timestamp_granularities(timestamp_granularities)?;
+    let timestamp_granularities = parse_timestamp_granularities(&timestamp_granularities)?;
     if !timestamp_granularities.is_empty() && response_format != ResponseFormat::VerboseJson {
         return Err(map_error(anyhow!(
             "`timestamp_granularities` requires response_format `verbose_json`"
@@ -529,9 +529,7 @@ fn service_timestamp_granularity(values: &[TimestampGranularity]) -> Option<Time
     }
 }
 
-fn parse_timestamp_granularities(
-    values: Vec<String>,
-) -> Result<Vec<TimestampGranularity>, ApiError> {
+fn parse_timestamp_granularities(values: &[String]) -> Result<Vec<TimestampGranularity>, ApiError> {
     let mut parsed = Vec::new();
     for entry in values.iter().flat_map(|value| split_field_values(value)) {
         let granularity = entry
@@ -736,9 +734,11 @@ async fn transcribe_request_from_multipart(
 
         match name.as_str() {
             "file" | "audio" => {
-                let extension = field
-                    .file_name()
-                    .and_then(|name| PathBuf::from(name).extension().map(|ext| ext.to_owned()));
+                let extension = field.file_name().and_then(|name| {
+                    PathBuf::from(name)
+                        .extension()
+                        .map(std::ffi::OsStr::to_owned)
+                });
                 uploaded_file = Some(write_temp_audio(extension.as_deref(), &mut field).await?);
             }
             "model" => model = Some(field_text(field).await?),
@@ -978,7 +978,7 @@ mod tests {
     #[test]
     fn parses_openai_timestamp_granularity_arrays() {
         let parsed =
-            parse_timestamp_granularities(vec!["segment".to_string(), "word,segment".to_string()])
+            parse_timestamp_granularities(&["segment".to_string(), "word,segment".to_string()])
                 .unwrap();
         assert_eq!(
             parsed,

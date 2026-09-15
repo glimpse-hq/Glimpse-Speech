@@ -134,10 +134,11 @@ impl EngineInstance {
         }
     }
 
-    fn streaming_configure(&mut self, _language: Option<String>, _dictionary: Vec<String>) {
+    #[cfg_attr(not(apple_speech_engine), allow(unused_variables))]
+    fn streaming_configure(&mut self, language: Option<String>, dictionary: Vec<String>) {
         match self {
             #[cfg(apple_speech_engine)]
-            Self::Apple(engine) => engine.configure_stream(_language, _dictionary),
+            Self::Apple(engine) => engine.configure_stream(language, dictionary),
             #[allow(unreachable_patterns)]
             _ => {}
         }
@@ -579,69 +580,70 @@ fn load_engine(resolved: &ResolvedModel) -> Result<EngineInstance> {
     }
 }
 
+#[cfg_attr(not(local_engines), allow(unused_variables))]
 fn transcribe_with_engine(
     engine: &mut EngineInstance,
-    _request: TranscribeRequest,
+    request: TranscribeRequest,
 ) -> Result<TranscriptionWithDuration> {
     match engine {
         #[cfg(feature = "whisper")]
         EngineInstance::Whisper(engine) => {
-            let wants_timestamps = _request.timestamps || _request.timestamp_granularity.is_some();
+            let wants_timestamps = request.timestamps || request.timestamp_granularity.is_some();
             let params = crate::engines::whisper::WhisperInferenceParams {
-                dictionary: if _request.prompt.is_some() {
+                dictionary: if request.prompt.is_some() {
                     Vec::new()
                 } else {
-                    _request.dictionary.clone()
+                    request.dictionary.clone()
                 },
-                language: _request.language,
-                initial_prompt: combined_prompt(_request.prompt, &_request.dictionary),
+                language: request.language,
+                initial_prompt: combined_prompt(request.prompt, &request.dictionary),
                 print_timestamps: wants_timestamps,
-                word_timestamps: _request.timestamp_granularity == Some(TimestampGranularity::Word),
+                word_timestamps: request.timestamp_granularity == Some(TimestampGranularity::Word),
                 ..Default::default()
             };
-            transcribe_audio(engine, _request.audio, Some(params))
+            transcribe_audio(engine, request.audio, Some(params))
         }
         #[cfg(nvidia_engines)]
         EngineInstance::Parakeet(engine) => {
             use crate::engines::parakeet::TimestampGranularity as Granularity;
 
-            let timestamp_granularity = match _request.timestamp_granularity {
+            let timestamp_granularity = match request.timestamp_granularity {
                 Some(TimestampGranularity::Word) => Granularity::Word,
                 Some(TimestampGranularity::Segment) => Granularity::Segment,
-                None if _request.timestamps => Granularity::Segment,
+                None if request.timestamps => Granularity::Segment,
                 None => Granularity::Token,
             };
             let params = crate::engines::parakeet::ParakeetInferenceParams {
                 timestamp_granularity,
-                language: _request.language,
-                dictionary: _request.dictionary,
+                language: request.language,
+                dictionary: request.dictionary,
             };
-            transcribe_audio(engine, _request.audio, Some(params))
+            transcribe_audio(engine, request.audio, Some(params))
         }
         #[cfg(nvidia_engines)]
         EngineInstance::Nemotron(engine) => {
             let params = crate::engines::nemotron::NemotronInferenceParams {
-                language: _request.language,
+                language: request.language,
             };
-            transcribe_audio(engine, _request.audio, Some(params))
+            transcribe_audio(engine, request.audio, Some(params))
         }
         #[cfg(apple_speech_engine)]
         EngineInstance::Apple(engine) => {
             let params = crate::engines::apple::AppleInferenceParams {
-                language: _request.language,
-                long_form: _request.timestamps || _request.timestamp_granularity.is_some(),
-                dictionary: _request.dictionary,
+                language: request.language,
+                long_form: request.timestamps || request.timestamp_granularity.is_some(),
+                dictionary: request.dictionary,
             };
-            transcribe_audio(engine, _request.audio, Some(params))
+            transcribe_audio(engine, request.audio, Some(params))
         }
         #[cfg(transcribe_engine)]
         EngineInstance::Transcribe(engine) => {
             let params = crate::engines::transcribe::TranscribeInferenceParams {
-                language: _request.language,
-                dictionary: _request.dictionary,
-                timestamps: _request.timestamps || _request.timestamp_granularity.is_some(),
+                language: request.language,
+                dictionary: request.dictionary,
+                timestamps: request.timestamps || request.timestamp_granularity.is_some(),
             };
-            transcribe_audio(engine, _request.audio, Some(params))
+            transcribe_audio(engine, request.audio, Some(params))
         }
         #[allow(unreachable_patterns)]
         _ => Err(anyhow!("No speech engine support is enabled")),
