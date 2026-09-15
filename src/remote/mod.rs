@@ -72,14 +72,13 @@ impl RemoteError {
             RemoteErrorKind::Unauthorized => {
                 "Remote speech API key is invalid or expired.".to_string()
             }
-            RemoteErrorKind::InvalidRequest => self.message.clone(),
             RemoteErrorKind::NotFound => {
                 "Remote speech endpoint or model was not found.".to_string()
             }
             RemoteErrorKind::UpstreamUnavailable => {
                 "Remote speech provider is temporarily unavailable.".to_string()
             }
-            RemoteErrorKind::Other => self.message.clone(),
+            RemoteErrorKind::InvalidRequest | RemoteErrorKind::Other => self.message.clone(),
         }
     }
 }

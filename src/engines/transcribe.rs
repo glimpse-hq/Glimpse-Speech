@@ -230,8 +230,9 @@ fn decode_chunks(
     max_samples: Option<usize>,
     mut decode: impl FnMut(&[f32]) -> Result<Transcript, Error>,
 ) -> Result<Vec<(usize, Transcript)>, Error> {
-    let mut pending = vec![0..samples.len()];
     let mut results = Vec::new();
+    let mut pending = Vec::new();
+    pending.push(0..samples.len());
     while let Some(range) = pending.pop() {
         let chunk = &samples[range.clone()];
         if let Some(limit) = max_samples.filter(|limit| chunk.len() > *limit) {

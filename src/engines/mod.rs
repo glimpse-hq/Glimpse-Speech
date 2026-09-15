@@ -46,7 +46,7 @@ pub(crate) fn inference_threads() -> usize {
     }
 
     std::thread::available_parallelism()
-        .map_or(4, |n| n.get())
+        .map_or(4, std::num::NonZeroUsize::get)
         .min(MAX_THREADS)
 }
 

@@ -293,8 +293,7 @@ async fn transcribe_base64(
     let format = audio_path
         .extension()
         .and_then(|ext| ext.to_str())
-        .map(str::to_ascii_lowercase)
-        .unwrap_or_else(|| "wav".to_string());
+        .map_or_else(|| "wav".to_string(), str::to_ascii_lowercase);
     let request = Base64AudioRequest {
         model,
         input_audio: Base64Audio {
@@ -608,14 +607,13 @@ fn is_flac_unsupported(err: &RemoteError) -> bool {
 fn audio_mime_for_extension(extension: Option<&str>) -> &'static str {
     match extension {
         Some("wav") => "audio/wav",
-        Some("mp3") => "audio/mpeg",
+        Some("mp3" | "mpga" | "mpeg") => "audio/mpeg",
         Some("m4a" | "mp4") => "audio/mp4",
         Some("aac") => "audio/aac",
         Some("flac") => "audio/flac",
         Some("ogg" | "oga") => "audio/ogg",
         Some("opus") => "audio/opus",
         Some("webm") => "audio/webm",
-        Some("mpga" | "mpeg") => "audio/mpeg",
         _ => "application/octet-stream",
     }
 }

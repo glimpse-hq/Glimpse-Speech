@@ -221,7 +221,10 @@ impl TranscriptionEngine for WhisperEngine {
 
         state.full(full_params, &samples)?;
 
-        let eot_token = self.context.as_ref().map(|context| context.token_eot());
+        let eot_token = self
+            .context
+            .as_ref()
+            .map(whisper_rs::WhisperContext::token_eot);
         let mut words = whisper_params.word_timestamps.then(Vec::new);
         let num_segments = state.full_n_segments();
         let mut segments = Vec::new();

@@ -210,7 +210,7 @@ pub fn plan_request(
         Some(TimestampGranularity::Word) if caps.supports_word_timestamps => {
             vec!["segment", "word"]
         }
-        Some(TimestampGranularity::Word) | Some(TimestampGranularity::Segment) | None => {
+        Some(TimestampGranularity::Word | TimestampGranularity::Segment) | None => {
             vec!["segment"]
         }
     };

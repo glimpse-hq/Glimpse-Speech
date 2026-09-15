@@ -373,7 +373,7 @@ impl ModelInstallManager {
         let mut downloaded = if replace_existing {
             0
         } else {
-            fs::metadata(&download_path).map(|m| m.len()).unwrap_or(0)
+            fs::metadata(&download_path).map_or(0, |m| m.len())
         };
         let mut total_size: u64 = file.size_bytes.unwrap_or(0);
         let mut retries = 0usize;
@@ -503,9 +503,8 @@ impl ModelInstallManager {
                             // Resume offsets must match bytes actually on disk,
                             // not bytes accepted into the write buffer.
                             let _ = output.flush().await;
-                            downloaded = fs::metadata(&download_path)
-                                .map(|metadata| metadata.len())
-                                .unwrap_or(0);
+                            downloaded =
+                                fs::metadata(&download_path).map_or(0, |metadata| metadata.len());
                             break;
                         }
                         output.flush().await?;
@@ -547,9 +546,8 @@ impl ModelInstallManager {
                         }
                         wait_before_retry(retries).await;
                         let _ = output.flush().await;
-                        downloaded = fs::metadata(&download_path)
-                            .map(|metadata| metadata.len())
-                            .unwrap_or(0);
+                        downloaded =
+                            fs::metadata(&download_path).map_or(0, |metadata| metadata.len());
                         break;
                     }
                 }
@@ -607,7 +605,6 @@ pub fn infer_engine(reference: &str) -> Option<ModelEngine> {
 
 fn default_layout(engine: ModelEngine, variant: Option<&str>) -> ModelLayout {
     match engine {
-        ModelEngine::Whisper => ModelLayout::Whisper,
         ModelEngine::Nemotron => ModelLayout::Nemotron,
         ModelEngine::Parakeet => {
             if variant.is_some_and(|variant| variant.contains("unified")) {
@@ -616,8 +613,8 @@ fn default_layout(engine: ModelEngine, variant: Option<&str>) -> ModelLayout {
                 ModelLayout::ParakeetTdt
             }
         }
-        // The OS owns the model; layout is meaningless but the field is required.
-        ModelEngine::Apple => ModelLayout::Whisper,
+        // The OS owns the Apple model; layout is meaningless but the field is required.
+        ModelEngine::Whisper | ModelEngine::Apple => ModelLayout::Whisper,
         ModelEngine::Transcribe => ModelLayout::Transcribe,
     }
 }
