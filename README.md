@@ -25,7 +25,7 @@ NVIDIA engines are unavailable on Intel macOS (`x86_64-apple-darwin`) because ON
 
 ```toml
 [dependencies]
-glimpse-speech = { git = "https://github.com/glimpse-hq/Glimpse-Speech.git", tag = "1.6.1", features = ["whisper", "nvidia"] }
+glimpse-speech = { git = "https://github.com/glimpse-hq/Glimpse-Speech.git", tag = "1.6.2", features = ["whisper", "nvidia"] }
 ```
 
 The transcribe.cpp dependency is pinned to an exact Git revision, including its
