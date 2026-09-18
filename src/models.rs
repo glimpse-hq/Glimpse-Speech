@@ -198,7 +198,17 @@ impl ModelInstallManager {
         if spec.engine == ModelEngine::Apple {
             return resolve_apple(&spec.id, spec.variant.as_deref());
         }
-        if spec.engine != ModelEngine::Whisper {
+        let path = self.artifact_path(spec);
+        if spec.engine == ModelEngine::Whisper {
+            // Any size is accepted so a swapped-in quantization still loads.
+            if !path.is_file() {
+                return Err(anyhow!(
+                    "{} is not fully installed. Missing: {}",
+                    spec.id,
+                    path.display()
+                ));
+            }
+        } else {
             let status = self.status(spec)?;
             if !status.installed {
                 return Err(anyhow!(
@@ -211,7 +221,7 @@ impl ModelInstallManager {
 
         Ok(ResolvedModel {
             id: spec.id.clone(),
-            path: self.artifact_path(spec),
+            path,
             engine: spec.engine,
             layout: spec_layout(spec),
             variant: spec.variant.clone(),
