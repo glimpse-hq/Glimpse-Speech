@@ -198,30 +198,18 @@ impl ModelInstallManager {
         if spec.engine == ModelEngine::Apple {
             return resolve_apple(&spec.id, spec.variant.as_deref());
         }
-        let path = self.artifact_path(spec);
-        if spec.engine == ModelEngine::Whisper {
-            // Any size is accepted so a swapped-in quantization still loads.
-            if !path.is_file() {
-                return Err(anyhow!(
-                    "{} is not fully installed. Missing: {}",
-                    spec.id,
-                    path.display()
-                ));
-            }
-        } else {
-            let status = self.status(spec)?;
-            if !status.installed {
-                return Err(anyhow!(
-                    "{} is not fully installed. Missing: {}",
-                    spec.id,
-                    status.missing_files.join(", ")
-                ));
-            }
+        let status = self.status(spec)?;
+        if !status.installed {
+            return Err(anyhow!(
+                "{} is not fully installed. Missing: {}",
+                spec.id,
+                status.missing_files.join(", ")
+            ));
         }
 
         Ok(ResolvedModel {
             id: spec.id.clone(),
-            path,
+            path: self.artifact_path(spec),
             engine: spec.engine,
             layout: spec_layout(spec),
             variant: spec.variant.clone(),
@@ -1250,9 +1238,9 @@ mod tests {
     }
 
     #[test]
-    fn resolve_accepts_whisper_artifact_with_unexpected_size() {
+    fn resolve_rejects_partial_whisper_artifact() {
         let root =
-            std::env::temp_dir().join(format!("glimpse-speech-quant-{}", std::process::id()));
+            std::env::temp_dir().join(format!("glimpse-speech-partial-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let manager = ModelInstallManager::new(&root);
         let spec = whisper_spec("whisper_turbo", "ggml-turbo.bin", Some(874_188_075));
@@ -1260,9 +1248,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("ggml-turbo.bin"), b"ggml not the expected size").unwrap();
 
-        let resolved = manager.resolve(&spec).unwrap();
-        assert_eq!(resolved.engine, ModelEngine::Whisper);
-        assert_eq!(resolved.path, dir.join("ggml-turbo.bin"));
+        assert!(manager.resolve(&spec).is_err());
 
         let _ = fs::remove_dir_all(&root);
     }
