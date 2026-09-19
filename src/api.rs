@@ -2,7 +2,7 @@ use std::{
     ffi::OsStr,
     future::Future,
     io,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     path::PathBuf,
     str::FromStr,
     sync::{
@@ -450,7 +450,7 @@ fn authorize(state: &ApiState, headers: &HeaderMap) -> Result<(), ApiError> {
         return Err(forbidden("Browser requests need CORS enabled"));
     }
     if state.loopback && !is_loopback_host(headers) {
-        return Err(forbidden("Host must be localhost or 127.0.0.1"));
+        return Err(forbidden("Host must be localhost or a loopback address"));
     }
 
     let Some(expected) = &state.api_key else {
@@ -485,10 +485,9 @@ fn is_loopback_host(headers: &HeaderMap) -> bool {
         Some((name, port)) if port.bytes().all(|b| b.is_ascii_digit()) => name,
         _ => host,
     };
-    matches!(
-        host.to_ascii_lowercase().as_str(),
-        "localhost" | "127.0.0.1" | "[::1]"
-    )
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost")
+        || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 fn forbidden(message: &str) -> ApiError {
