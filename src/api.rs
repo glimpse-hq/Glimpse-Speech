@@ -17,7 +17,10 @@ use axum::{
     Json, Router,
     body::Body,
     extract::{DefaultBodyLimit, FromRequest, Multipart, Path, Request, State},
-    http::{HeaderMap, StatusCode, header::CONTENT_TYPE},
+    http::{
+        HeaderMap, StatusCode,
+        header::{CONTENT_TYPE, HOST, ORIGIN},
+    },
     response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
@@ -83,6 +86,8 @@ struct ApiState {
     service: Arc<SpeechService>,
     provider: Arc<SpeechProvider>,
     api_key: Option<Arc<str>>,
+    loopback: bool,
+    cors: bool,
     event_sink: Option<ApiEventSink>,
     local_models: Arc<Vec<ApiModelInfo>>,
     local_model_source: Option<ApiModelSource>,
@@ -266,6 +271,8 @@ pub async fn serve_with_shutdown(
         service,
         provider,
         api_key: api_key.map(Arc::from),
+        loopback: addr.ip().is_loopback(),
+        cors: cors_enabled,
         event_sink: config.event_sink,
         local_models: Arc::new(config.local_models),
         local_model_source: config.local_model_source,
@@ -437,6 +444,15 @@ impl ApiState {
 }
 
 fn authorize(state: &ApiState, headers: &HeaderMap) -> Result<(), ApiError> {
+    // Browsers still send simple POSTs cross-origin without CORS, and DNS
+    // rebinding reaches loopback under a foreign Host.
+    if !state.cors && headers.contains_key(ORIGIN) {
+        return Err(forbidden("Browser requests need CORS enabled"));
+    }
+    if state.loopback && !is_loopback_host(headers) {
+        return Err(forbidden("Host must be localhost or 127.0.0.1"));
+    }
+
     let Some(expected) = &state.api_key else {
         return Ok(());
     };
@@ -459,6 +475,24 @@ fn authorize(state: &ApiState, headers: &HeaderMap) -> Result<(), ApiError> {
             Json(error_body("Missing or invalid API key")),
         ))
     }
+}
+
+fn is_loopback_host(headers: &HeaderMap) -> bool {
+    let Some(host) = headers.get(HOST).and_then(|value| value.to_str().ok()) else {
+        return false;
+    };
+    let host = match host.rsplit_once(':') {
+        Some((name, port)) if port.bytes().all(|b| b.is_ascii_digit()) => name,
+        _ => host,
+    };
+    matches!(
+        host.to_ascii_lowercase().as_str(),
+        "localhost" | "127.0.0.1" | "[::1]"
+    )
+}
+
+fn forbidden(message: &str) -> ApiError {
+    (StatusCode::FORBIDDEN, Json(error_body(message)))
 }
 
 fn is_multipart_content_type(value: &str) -> bool {
