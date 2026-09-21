@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use tokio_util::io::ReaderStream;
 
 use super::provider::{
-    AudioRequest, DurationSource, EndpointProfile, TranscriptionFormParams, apply_auth,
-    build_transcription_form, is_self_hosted_host, plan_request, resolve_profile,
+    AudioRequest, Diarization, DurationSource, EndpointProfile, TranscriptionFormParams,
+    apply_auth, build_transcription_form, is_self_hosted_host, plan_request, resolve_profile,
 };
 use super::{
     RemoteError, RemoteErrorKind, ResponseFormat, config_error, parse_retry_after,
@@ -103,11 +103,8 @@ impl RemoteEngine {
         }
 
         let profile = resolve_profile(endpoint);
-        if diarize && !profile.supports_diarization {
-            return Err(config_error(
-                "Remote speech endpoint does not support speaker diarization",
-            ));
-        }
+        // Unsupported endpoints and models transcribe without speakers.
+        let mut diarize = diarize && profile.supports_diarization(model);
         let url = format!("{}{}", api_base(endpoint), profile.transcriptions_path);
         let api_key = self.config.api_key.trim();
         let language = params
@@ -131,10 +128,9 @@ impl RemoteEngine {
 
         let plan = plan_request(
             &profile,
-            params.timestamps || diarize,
-            params
-                .timestamp_granularity
-                .or(diarize.then_some(TimestampGranularity::Segment)),
+            params.timestamps,
+            params.timestamp_granularity,
+            diarize,
         );
 
         let extension = audio_path
@@ -234,6 +230,18 @@ impl RemoteEngine {
             }
             if use_flac && is_flac_unsupported(&err) {
                 use_flac = false;
+                continue;
+            }
+            if diarize && is_diarize_unsupported(&err) {
+                diarize = false;
+                let plan = plan_request(
+                    &profile,
+                    params.timestamps,
+                    params.timestamp_granularity,
+                    false,
+                );
+                effective_format = plan.response_format;
+                granularities = plan.timestamp_granularities;
                 continue;
             }
             return Err(err);
@@ -371,7 +379,24 @@ struct UpstreamSegment {
     #[serde(default)]
     word: String,
     #[serde(default, alias = "speaker_id")]
-    speaker: Option<String>,
+    speaker: Option<SpeakerLabel>,
+}
+
+// xAI numbers speakers, the others name them.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum SpeakerLabel {
+    Name(String),
+    Index(i64),
+}
+
+impl SpeakerLabel {
+    fn to_id(&self) -> String {
+        match self {
+            Self::Name(name) => name.clone(),
+            Self::Index(index) => format!("speaker_{index}"),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -418,9 +443,11 @@ fn parse_transcription_body(
             .as_ref()
             .and_then(|usage| usage.prompt_audio_seconds),
     };
-    let diarized_segments = include_speakers
-        .then(|| parsed.segments.as_deref().map(map_diarized_text))
-        .flatten();
+    let diarized_segments = match profile.diarization {
+        _ if !include_speakers => None,
+        Diarization::WordSpeakers => parsed.words.as_deref().and_then(group_speaker_words),
+        _ => parsed.segments.as_deref().map(map_diarized_text),
+    };
     let segments = map_timed_text(parsed.segments);
     let words = if profile.supports_word_timestamps {
         map_timed_text(parsed.words)
@@ -460,9 +487,39 @@ fn map_diarized_text(items: &[UpstreamSegment]) -> Vec<DiarizedSegment> {
             start: item.start,
             end: item.end,
             text: upstream_segment_text(item),
-            speaker: item.speaker.clone(),
+            speaker: item.speaker.as_ref().map(SpeakerLabel::to_id),
         })
         .collect()
+}
+
+// Merges consecutive words from the same speaker into one segment.
+fn group_speaker_words(words: &[UpstreamSegment]) -> Option<Vec<DiarizedSegment>> {
+    if words.iter().all(|word| word.speaker.is_none()) {
+        return None;
+    }
+    let mut segments: Vec<DiarizedSegment> = Vec::new();
+    for word in words {
+        let text = upstream_segment_text(word);
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let speaker = word.speaker.as_ref().map(SpeakerLabel::to_id);
+        match segments.last_mut() {
+            Some(last) if last.speaker == speaker => {
+                last.end = word.end;
+                last.text.push(' ');
+                last.text.push_str(text);
+            }
+            _ => segments.push(DiarizedSegment {
+                start: word.start,
+                end: word.end,
+                text: text.to_string(),
+                speaker,
+            }),
+        }
+    }
+    Some(segments)
 }
 
 fn upstream_segment_text(item: &UpstreamSegment) -> String {
@@ -479,6 +536,11 @@ fn is_verbose_unsupported(err: &RemoteError) -> bool {
             err,
             &["verbose_json", "response_format", "timestamp_granularit"],
         )
+}
+
+fn is_diarize_unsupported(err: &RemoteError) -> bool {
+    err.kind == RemoteErrorKind::InvalidRequest
+        && error_mentions(err, &["diariz", "chunking_strategy"])
 }
 
 fn error_mentions(err: &RemoteError, needles: &[&str]) -> bool {

@@ -4,6 +4,8 @@ pub mod audio;
 pub mod cleanup;
 #[cfg(feature = "cli")]
 pub mod cli;
+#[cfg(transcribe_engine)]
+pub mod diarization;
 pub mod dictionary;
 pub mod engines;
 pub mod models;

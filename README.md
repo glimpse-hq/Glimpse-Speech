@@ -13,7 +13,7 @@ Local speech-to-text for Rust. One crate, four engines, an OpenAI-compatible HTT
 | --- | --- |
 | `whisper` | `engines::whisper::WhisperEngine` |
 | `nvidia` | `engines::parakeet::ParakeetEngine` and `engines::nemotron::NemotronEngine` |
-| `transcribe` | `engines::transcribe::TranscribeEngine` (builds transcribe.cpp from source: CMake and a C++ toolchain, plus the Vulkan SDK on Windows and Linux) |
+| `transcribe` | `engines::transcribe::TranscribeEngine` and `diarization::diarize` (Sortformer speaker diarization) (builds transcribe.cpp from source: CMake and a C++ toolchain, plus the Vulkan SDK on Windows and Linux) |
 | `api` | The OpenAI-compatible HTTP server (`api::serve`) |
 | `remote` | Proxying to a remote OpenAI-compatible endpoint, with local fallback |
 | `cli` | The `glimpse-speech` binary (implies `api`) |
@@ -110,7 +110,7 @@ Auth and networking:
 - Keys are accepted as `Authorization: Bearer <key>` or `x-api-key: <key>`
 - `--cors` enables permissive CORS for browser clients
 
-With `--remote-endpoint` set, transcription requests proxy to the remote service. Endpoint quirks (Mistral, OpenRouter, xAI, self-hosted servers) are detected automatically, WAV uploads are converted to FLAC to cut upload size, and transient remote failures fall back to the local engine when a local model is installed.
+With `--remote-endpoint` set, transcription requests proxy to the remote service. Endpoint quirks (Mistral, OpenRouter, xAI, self-hosted servers) are detected automatically, WAV uploads are converted to FLAC to cut upload size, and transient remote failures fall back to the local engine when a local model is installed. Speaker diarization is requested from endpoints that support it (Mistral, xAI, Fireworks, and OpenAI's diarize model).
 
 ## Library
 
@@ -187,6 +187,7 @@ For Core ML acceleration on Apple Silicon, place the matching `ggml-<name>-encod
 cargo run --example whisper --features whisper -- <model.bin> <audio.wav>
 cargo run --example nvidia --features nvidia -- parakeet <model-dir> <audio.wav>
 cargo run --example nvidia --features nvidia -- nemotron <model-dir> <audio.wav>
+cargo run --example diarize --features transcribe -- <sortformer.gguf> <audio.wav>
 ```
 
 ## Acknowledgments
