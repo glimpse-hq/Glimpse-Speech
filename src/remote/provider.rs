@@ -19,6 +19,11 @@ pub struct EndpointProfile {
     pub transcriptions_path: &'static str,
     /// Sends `format=true` for written-form numbers. Needs a language.
     pub sends_itn_format: bool,
+    pub auth: AuthScheme,
+    pub model_field: &'static str,
+    pub language_field: &'static str,
+    /// Options sent on every transcription request.
+    pub fixed_params: &'static [(&'static str, &'static str)],
 }
 
 impl EndpointProfile {
@@ -46,12 +51,23 @@ pub enum Diarization {
 pub enum AudioRequest {
     Multipart,
     Base64Json,
+    /// Audio bytes as the body, options as query parameters.
+    RawBody,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthScheme {
+    Bearer,
+    Token,
+    XiApiKey,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimestampMode {
     OpenAiVerboseJson,
     NativeGranularities,
+    /// A single on/off option; times come back on words.
+    WordTimings,
     None,
 }
 
@@ -59,7 +75,39 @@ pub enum TimestampMode {
 pub enum DictionaryMode {
     Prompt,
     ContextBias,
-    KeyTerm,
+    KeyTerms(KeyTermRules),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyTermRules {
+    pub field: &'static str,
+    /// Only models starting with this accept key terms.
+    pub model_prefix: &'static str,
+    pub max_chars: usize,
+    pub max_words: usize,
+    pub max_total_chars: usize,
+    pub rejected_chars: &'static [char],
+}
+
+impl KeyTermRules {
+    fn terms(&self, model: &str, dictionary: &[String]) -> Vec<String> {
+        if !model.to_ascii_lowercase().starts_with(self.model_prefix) {
+            return Vec::new();
+        }
+        let mut total = 0;
+        crate::dictionary::sanitize_dictionary_entries(dictionary)
+            .into_iter()
+            .filter(|term| {
+                term.chars().count() <= self.max_chars
+                    && term.split_whitespace().count() <= self.max_words
+                    && !term.contains(self.rejected_chars)
+            })
+            .take_while(|term| {
+                total += term.chars().count();
+                total <= self.max_total_chars
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +139,10 @@ impl Compatibility {
                 diarization: Diarization::None,
                 transcriptions_path: OPENAI_TRANSCRIPTIONS_PATH,
                 sends_itn_format: false,
+                auth: AuthScheme::Bearer,
+                model_field: "model",
+                language_field: "language",
+                fixed_params: &[],
             },
             Self::SelfHosted => EndpointProfile {
                 timestamp_mode: TimestampMode::OpenAiVerboseJson,
@@ -106,6 +158,10 @@ impl Compatibility {
                 diarization: Diarization::None,
                 transcriptions_path: OPENAI_TRANSCRIPTIONS_PATH,
                 sends_itn_format: false,
+                auth: AuthScheme::Bearer,
+                model_field: "model",
+                language_field: "language",
+                fixed_params: &[],
             },
         }
     }
@@ -132,6 +188,10 @@ const MISTRAL: EndpointProfile = EndpointProfile {
     diarization: Diarization::SegmentSpeakers,
     transcriptions_path: OPENAI_TRANSCRIPTIONS_PATH,
     sends_itn_format: false,
+    auth: AuthScheme::Bearer,
+    model_field: "model",
+    language_field: "language",
+    fixed_params: &[],
 };
 
 const OPENROUTER: EndpointProfile = EndpointProfile {
@@ -148,12 +208,23 @@ const OPENROUTER: EndpointProfile = EndpointProfile {
     diarization: Diarization::None,
     transcriptions_path: OPENAI_TRANSCRIPTIONS_PATH,
     sends_itn_format: false,
+    auth: AuthScheme::Bearer,
+    model_field: "model",
+    language_field: "language",
+    fixed_params: &[],
 };
 
 // Words always come back, so there is nothing to request.
 const XAI: EndpointProfile = EndpointProfile {
     timestamp_mode: TimestampMode::None,
-    dictionary_mode: DictionaryMode::KeyTerm,
+    dictionary_mode: DictionaryMode::KeyTerms(KeyTermRules {
+        field: "keyterm",
+        model_prefix: "",
+        max_chars: 50,
+        max_words: usize::MAX,
+        max_total_chars: usize::MAX,
+        rejected_chars: &[],
+    }),
     sends_response_format: false,
     sends_temperature: false,
     duration_source: DurationSource::TopLevel,
@@ -165,6 +236,10 @@ const XAI: EndpointProfile = EndpointProfile {
     diarization: Diarization::WordSpeakers,
     transcriptions_path: "/stt",
     sends_itn_format: true,
+    auth: AuthScheme::Bearer,
+    model_field: "model",
+    language_field: "language",
+    fixed_params: &[],
 };
 
 const OPENAI: EndpointProfile = EndpointProfile {
@@ -178,7 +253,63 @@ const FIREWORKS: EndpointProfile = EndpointProfile {
     ..Compatibility::DirectOpenAi.base_profile()
 };
 
-const XAI_MAX_KEYTERM_CHARS: usize = 50;
+// Spacing and audio events arrive as entries next to the words.
+const ELEVENLABS: EndpointProfile = EndpointProfile {
+    timestamp_mode: TimestampMode::WordTimings,
+    dictionary_mode: DictionaryMode::KeyTerms(KeyTermRules {
+        field: "keyterms",
+        model_prefix: "scribe_v2",
+        max_chars: 49,
+        max_words: 5,
+        max_total_chars: usize::MAX,
+        rejected_chars: &['<', '>', '{', '}', '[', ']', '\\'],
+    }),
+    sends_response_format: false,
+    sends_temperature: false,
+    duration_source: DurationSource::TopLevel,
+    supports_word_timestamps: true,
+    keep_timestamps_on_format_fallback: false,
+    uploads_flac: true,
+    audio_request: AudioRequest::Multipart,
+    models_query: "",
+    diarization: Diarization::WordSpeakers,
+    transcriptions_path: "/speech-to-text",
+    sends_itn_format: false,
+    auth: AuthScheme::XiApiKey,
+    model_field: "model_id",
+    language_field: "language_code",
+    // Otherwise tags like "(laughter)" land in the text.
+    fixed_params: &[("tag_audio_events", "false")],
+};
+
+// Words always come back; utterances add timed segments with speakers.
+const DEEPGRAM: EndpointProfile = EndpointProfile {
+    timestamp_mode: TimestampMode::WordTimings,
+    // The limit is 500 tokens across all terms; over it the request fails.
+    dictionary_mode: DictionaryMode::KeyTerms(KeyTermRules {
+        field: "keyterm",
+        model_prefix: "nova-3",
+        max_chars: 50,
+        max_words: usize::MAX,
+        max_total_chars: 500,
+        rejected_chars: &[],
+    }),
+    sends_response_format: false,
+    sends_temperature: false,
+    duration_source: DurationSource::TopLevel,
+    supports_word_timestamps: true,
+    keep_timestamps_on_format_fallback: false,
+    uploads_flac: true,
+    audio_request: AudioRequest::RawBody,
+    models_query: "",
+    diarization: Diarization::SegmentSpeakers,
+    transcriptions_path: "/listen",
+    sends_itn_format: false,
+    auth: AuthScheme::Token,
+    model_field: "model",
+    language_field: "language",
+    fixed_params: &[("smart_format", "true"), ("punctuate", "true")],
+};
 
 const HOST_PROFILES: &[HostProfile] = &[
     HostProfile {
@@ -200,6 +331,14 @@ const HOST_PROFILES: &[HostProfile] = &[
     HostProfile {
         host_suffixes: &["fireworks.ai"],
         profile: FIREWORKS,
+    },
+    HostProfile {
+        host_suffixes: &["elevenlabs.io"],
+        profile: ELEVENLABS,
+    },
+    HostProfile {
+        host_suffixes: &["deepgram.com"],
+        profile: DEEPGRAM,
     },
 ];
 
@@ -332,7 +471,7 @@ pub fn build_transcription_form(
     params: TranscriptionFormParams<'_>,
 ) -> Form {
     // `file` goes last: xAI ignores fields sent after it.
-    let mut form = Form::new().text("model", params.model.to_string());
+    let mut form = Form::new().text(profile.model_field, params.model.to_string());
 
     let diarized_json = params.diarize && profile.diarization == Diarization::DiarizedJson;
     let wants_timestamps =
@@ -361,20 +500,27 @@ pub fn build_transcription_form(
         form = form.text("temperature", "0");
     }
 
-    let send_granularities = wants_timestamps
-        && match profile.timestamp_mode {
-            TimestampMode::OpenAiVerboseJson => {
-                use_verbose_json || profile.keep_timestamps_on_format_fallback
-            }
-            TimestampMode::NativeGranularities => true,
-            TimestampMode::None => false,
-        };
-    if send_granularities {
-        form = append_timestamps(form, profile.timestamp_mode, params.timestamp_granularities);
+    match profile.timestamp_mode {
+        TimestampMode::OpenAiVerboseJson
+            if wants_timestamps
+                && (use_verbose_json || profile.keep_timestamps_on_format_fallback) =>
+        {
+            form = append_timestamps(form, profile.timestamp_mode, params.timestamp_granularities);
+        }
+        TimestampMode::NativeGranularities if wants_timestamps => {
+            form = append_timestamps(form, profile.timestamp_mode, params.timestamp_granularities);
+        }
+        TimestampMode::WordTimings => {
+            form = form.text(
+                "timestamps_granularity",
+                if wants_timestamps { "word" } else { "none" },
+            );
+        }
+        _ => {}
     }
 
     if let Some(language) = params.language {
-        form = form.text("language", language.to_string());
+        form = form.text(profile.language_field, language.to_string());
         if profile.sends_itn_format {
             form = form.text("format", "true");
         }
@@ -389,16 +535,49 @@ pub fn build_transcription_form(
         form = form.text("diarize", "true");
     }
 
+    for (name, value) in profile.fixed_params {
+        form = form.text(*name, *value);
+    }
+
     // Diarize models reject prompts, which is where the dictionary goes.
     if !diarized_json {
         form = apply_dictionary_and_prompt(
             form,
             profile.dictionary_mode,
+            params.model,
             params.dictionary,
             params.prompt,
         );
     }
     form.part("file", file_part)
+}
+
+/// Adds transcription options to the URL of a raw-body request.
+pub fn append_transcription_query(
+    profile: &EndpointProfile,
+    url: &mut reqwest::Url,
+    params: &TranscriptionFormParams<'_>,
+) {
+    let mut query = url.query_pairs_mut();
+    query.append_pair(profile.model_field, params.model);
+    for (name, value) in profile.fixed_params {
+        query.append_pair(name, value);
+    }
+    match params.language {
+        Some(language) => query.append_pair(profile.language_field, language),
+        None => query.append_pair("detect_language", "true"),
+    };
+    if params.diarize && profile.diarization != Diarization::None {
+        query.append_pair("diarize_model", "latest");
+    }
+    if !params.timestamp_granularities.is_empty() {
+        query.append_pair("utterances", "true");
+    }
+    if let DictionaryMode::KeyTerms(rules) = profile.dictionary_mode {
+        for term in rules.terms(params.model, params.dictionary) {
+            query.append_pair(rules.field, &term);
+        }
+    }
 }
 
 fn append_timestamps(mut form: Form, mode: TimestampMode, granularities: &[&str]) -> Form {
@@ -414,7 +593,7 @@ fn append_timestamps(mut form: Form, mode: TimestampMode, granularities: &[&str]
             TimestampMode::NativeGranularities => {
                 form.text("timestamp_granularities", value.to_string())
             }
-            TimestampMode::None => form,
+            TimestampMode::WordTimings | TimestampMode::None => form,
         };
     }
     form
@@ -423,6 +602,7 @@ fn append_timestamps(mut form: Form, mode: TimestampMode, granularities: &[&str]
 fn apply_dictionary_and_prompt(
     mut form: Form,
     mode: DictionaryMode,
+    model: &str,
     dictionary: &[String],
     prompt: Option<&str>,
 ) -> Form {
@@ -436,12 +616,9 @@ fn apply_dictionary_and_prompt(
                 form = form.text("prompt", prompt);
             }
         }
-        DictionaryMode::KeyTerm => {
-            for term in crate::dictionary::sanitize_dictionary_entries(dictionary)
-                .into_iter()
-                .filter(|term| term.chars().count() <= XAI_MAX_KEYTERM_CHARS)
-            {
-                form = form.text("keyterm", term);
+        DictionaryMode::KeyTerms(rules) => {
+            for term in rules.terms(model, dictionary) {
+                form = form.text(rules.field, term);
             }
         }
         DictionaryMode::ContextBias => {
@@ -479,11 +656,18 @@ fn compose_openai_prompt(extra: Option<&str>, dictionary_terms: Option<&str>) ->
     }
 }
 
-pub fn apply_auth(builder: reqwest::RequestBuilder, api_key: &str) -> reqwest::RequestBuilder {
+pub fn apply_auth(
+    builder: reqwest::RequestBuilder,
+    scheme: AuthScheme,
+    api_key: &str,
+) -> reqwest::RequestBuilder {
     if api_key.is_empty() {
-        builder
-    } else {
-        builder.header("Authorization", format!("Bearer {api_key}"))
+        return builder;
+    }
+    match scheme {
+        AuthScheme::Bearer => builder.header("Authorization", format!("Bearer {api_key}")),
+        AuthScheme::Token => builder.header("Authorization", format!("Token {api_key}")),
+        AuthScheme::XiApiKey => builder.header("xi-api-key", api_key),
     }
 }
 

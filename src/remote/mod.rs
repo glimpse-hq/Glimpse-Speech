@@ -111,6 +111,16 @@ struct ErrorEnvelope {
     error: Option<UpstreamErrorBody>,
     #[serde(default)]
     message: Option<String>,
+    /// ElevenLabs.
+    #[serde(default)]
+    detail: Option<ErrorDetail>,
+    /// Deepgram.
+    #[serde(default)]
+    err_code: Option<String>,
+    #[serde(default)]
+    err_msg: Option<String>,
+    #[serde(default)]
+    category: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -122,6 +132,90 @@ struct UpstreamErrorBody {
     code: Option<String>,
     #[serde(default)]
     param: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ErrorDetail {
+    Body(DetailBody),
+    Validation(Vec<ValidationIssue>),
+    Text(String),
+}
+
+#[derive(Debug, Deserialize)]
+struct DetailBody {
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default, rename = "type")]
+    error_type: Option<String>,
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    param: Option<String>,
+    /// Older responses put the code here.
+    #[serde(default)]
+    status: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ValidationIssue {
+    #[serde(default)]
+    msg: String,
+    #[serde(default)]
+    loc: Vec<serde_json::Value>,
+}
+
+#[derive(Default)]
+struct ErrorFields {
+    message: Option<String>,
+    error_type: Option<String>,
+    code: Option<String>,
+    param: Option<String>,
+}
+
+impl ErrorEnvelope {
+    fn into_fields(self) -> ErrorFields {
+        if let Some(error) = self.error {
+            return ErrorFields {
+                message: Some(error.message),
+                error_type: error.error_type,
+                code: error.code,
+                param: error.param,
+            };
+        }
+        match self.detail {
+            Some(ErrorDetail::Body(detail)) => ErrorFields {
+                message: detail.message,
+                error_type: detail.error_type,
+                code: detail.code.or(detail.status),
+                param: detail.param,
+            },
+            Some(ErrorDetail::Validation(issues)) => ErrorFields {
+                message: Some(
+                    issues
+                        .iter()
+                        .map(|issue| issue.msg.as_str())
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                ),
+                param: issues
+                    .first()
+                    .and_then(|issue| issue.loc.last())
+                    .and_then(|loc| loc.as_str())
+                    .map(str::to_string),
+                ..ErrorFields::default()
+            },
+            Some(ErrorDetail::Text(message)) => ErrorFields {
+                message: Some(message),
+                ..ErrorFields::default()
+            },
+            None => ErrorFields {
+                message: self.err_msg.or(self.message),
+                code: self.err_code.or(self.category),
+                ..ErrorFields::default()
+            },
+        }
+    }
 }
 
 pub fn config_error(message: impl Into<String>) -> RemoteError {
@@ -153,15 +247,11 @@ pub fn parse_upstream_error(
     retry_after: Option<Duration>,
     body: &str,
 ) -> RemoteError {
-    let parsed = serde_json::from_str::<ErrorEnvelope>(body).ok();
-    let upstream = parsed.as_ref().and_then(|envelope| envelope.error.as_ref());
-    let message = upstream
-        .map(|error| error.message.clone())
-        .or_else(|| {
-            parsed
-                .as_ref()
-                .and_then(|envelope| envelope.message.clone())
-        })
+    let fields = serde_json::from_str::<ErrorEnvelope>(body)
+        .map(ErrorEnvelope::into_fields)
+        .unwrap_or_default();
+    let message = fields
+        .message
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| body.trim().to_string());
     let message = if message.is_empty() {
@@ -169,9 +259,12 @@ pub fn parse_upstream_error(
     } else {
         message
     };
-    let error_type = upstream.and_then(|error| error.error_type.clone());
-    let code = upstream.and_then(|error| error.code.clone());
-    let param = upstream.and_then(|error| error.param.clone());
+    let ErrorFields {
+        error_type,
+        code,
+        param,
+        ..
+    } = fields;
     let kind = classify_upstream_error(status, error_type.as_deref(), code.as_deref());
 
     RemoteError {
@@ -190,13 +283,37 @@ fn classify_upstream_error(
     error_type: Option<&str>,
     code: Option<&str>,
 ) -> RemoteErrorKind {
-    if matches_code(code, &["rate_limit_exceeded", "rate_limit"]) {
+    if matches_code(
+        code,
+        &[
+            "rate_limit_exceeded",
+            "rate_limit",
+            "concurrent_limit_exceeded",
+            "system_busy",
+        ],
+    ) {
         return RemoteErrorKind::RateLimited;
     }
-    if matches_code(code, &["insufficient_quota", "billing_not_active"]) {
+    if matches_code(
+        code,
+        &[
+            "insufficient_quota",
+            "billing_not_active",
+            "insufficient_credits",
+            "quota_exceeded",
+        ],
+    ) {
         return RemoteErrorKind::QuotaExceeded;
     }
-    if matches_code(code, &["invalid_api_key", "invalid_authentication"]) {
+    if matches_code(
+        code,
+        &[
+            "invalid_api_key",
+            "invalid_authentication",
+            "missing_api_key",
+            "invalid_auth",
+        ],
+    ) {
         return RemoteErrorKind::Unauthorized;
     }
 

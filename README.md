@@ -110,7 +110,7 @@ Auth and networking:
 - Keys are accepted as `Authorization: Bearer <key>` or `x-api-key: <key>`
 - `--cors` enables permissive CORS for browser clients
 
-With `--remote-endpoint` set, transcription requests proxy to the remote service. Endpoint quirks (Mistral, OpenRouter, xAI, self-hosted servers) are detected automatically, WAV uploads are converted to FLAC to cut upload size, and transient remote failures fall back to the local engine when a local model is installed. Speaker diarization is requested from endpoints that support it (Mistral, xAI, Fireworks, and OpenAI's diarize model).
+With `--remote-endpoint` set, transcription requests proxy to the remote service. Endpoint quirks (Mistral, OpenRouter, xAI, ElevenLabs, Deepgram, self-hosted servers) are detected automatically, WAV uploads are converted to FLAC to cut upload size, and transient remote failures fall back to the local engine when a local model is installed. Speaker diarization is requested from endpoints that support it (Mistral, xAI, ElevenLabs, Deepgram, Fireworks, and OpenAI's diarize model).
 
 ## Library
 
