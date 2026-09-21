@@ -4,13 +4,18 @@ use std::{
 };
 
 use base64::Engine as _;
-use reqwest::{Client, header::RETRY_AFTER, multipart};
+use reqwest::{
+    Client,
+    header::{CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER},
+    multipart,
+};
 use serde::{Deserialize, Serialize};
 use tokio_util::io::ReaderStream;
 
 use super::provider::{
     AudioRequest, Diarization, DurationSource, EndpointProfile, TranscriptionFormParams,
-    apply_auth, build_transcription_form, is_self_hosted_host, plan_request, resolve_profile,
+    append_transcription_query, apply_auth, build_transcription_form, is_self_hosted_host,
+    plan_request, resolve_profile,
 };
 use super::{
     RemoteError, RemoteErrorKind, ResponseFormat, config_error, parse_retry_after,
@@ -177,32 +182,49 @@ impl RemoteEngine {
                     upload_path.display()
                 ))
             })?;
-            let stream = ReaderStream::new(file);
-            let file_part = multipart::Part::stream(reqwest::Body::wrap_stream(stream))
-                .file_name(upload_name.clone())
-                .mime_str(upload_mime)
-                .map_err(|err| transport_error(format!("Failed to prepare audio upload: {err}")))?;
-            let form = build_transcription_form(
-                &profile,
-                file_part,
-                TranscriptionFormParams {
-                    model,
-                    response_format: effective_format,
-                    timestamp_granularities: &granularities,
-                    language: language.as_deref(),
-                    dictionary: params.dictionary,
-                    prompt: params.prompt,
-                    diarize,
-                },
-            );
-
-            let builder = apply_auth(
+            let audio = reqwest::Body::wrap_stream(ReaderStream::new(file));
+            let form_params = TranscriptionFormParams {
+                model,
+                response_format: effective_format,
+                timestamp_granularities: &granularities,
+                language: language.as_deref(),
+                dictionary: params.dictionary,
+                prompt: params.prompt,
+                diarize,
+            };
+            let request = if profile.audio_request == AudioRequest::RawBody {
+                let mut request_url = reqwest::Url::parse(&url)
+                    .map_err(|_| config_error("Remote speech endpoint is not a valid URL"))?;
+                append_transcription_query(&profile, &mut request_url, &form_params);
+                // A known length avoids a chunked upload.
+                let length = tokio::fs::metadata(upload_path)
+                    .await
+                    .map_err(|err| {
+                        transport_error(format!(
+                            "Failed to read recording at {}: {err}",
+                            upload_path.display()
+                        ))
+                    })?
+                    .len();
                 self.client
-                    .post(&url)
-                    .multipart(form)
-                    .timeout(DEFAULT_TIMEOUT),
-                api_key,
-            );
+                    .post(request_url)
+                    .header(CONTENT_TYPE, upload_mime)
+                    .header(CONTENT_LENGTH, length)
+                    .body(audio)
+            } else {
+                let file_part = multipart::Part::stream(audio)
+                    .file_name(upload_name.clone())
+                    .mime_str(upload_mime)
+                    .map_err(|err| {
+                        transport_error(format!("Failed to prepare audio upload: {err}"))
+                    })?;
+                self.client.post(&url).multipart(build_transcription_form(
+                    &profile,
+                    file_part,
+                    form_params,
+                ))
+            };
+            let builder = apply_auth(request.timeout(DEFAULT_TIMEOUT), profile.auth, api_key);
 
             let response = builder.send().await.map_err(|err| {
                 transport_error(format!("Failed to reach remote speech endpoint: {err}"))
@@ -259,6 +281,7 @@ impl RemoteEngine {
         let url = format!("{}/models{}", api_base(endpoint), profile.models_query);
         let builder = apply_auth(
             self.client.get(url).timeout(MODELS_TIMEOUT),
+            profile.auth,
             self.config.api_key.trim(),
         );
 
@@ -313,6 +336,7 @@ async fn transcribe_base64(
 
     let builder = apply_auth(
         client.post(url).json(&request).timeout(DEFAULT_TIMEOUT),
+        profile.auth,
         api_key,
     );
     let response = builder
@@ -354,12 +378,16 @@ struct TranscriptionBody {
     segments: Option<Vec<UpstreamSegment>>,
     #[serde(default)]
     words: Option<Vec<UpstreamSegment>>,
-    #[serde(default)]
+    #[serde(default, alias = "language_code")]
     language: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "audio_duration_secs")]
     duration: Option<f32>,
     #[serde(default)]
     usage: Option<UsageBody>,
+    #[serde(default)]
+    metadata: Option<DeepgramMetadata>,
+    #[serde(default)]
+    results: Option<DeepgramResults>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -369,20 +397,76 @@ struct UsageBody {
 }
 
 #[derive(Debug, Deserialize)]
+struct DeepgramMetadata {
+    #[serde(default)]
+    duration: Option<f32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeepgramResults {
+    #[serde(default)]
+    channels: Vec<DeepgramChannel>,
+    #[serde(default)]
+    utterances: Option<Vec<UpstreamSegment>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeepgramChannel {
+    #[serde(default)]
+    alternatives: Vec<DeepgramAlternative>,
+    #[serde(default)]
+    detected_language: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeepgramAlternative {
+    #[serde(default)]
+    transcript: String,
+    #[serde(default)]
+    words: Vec<UpstreamSegment>,
+}
+
+impl TranscriptionBody {
+    // Deepgram nests the transcript under results.channels[0].alternatives[0].
+    fn flatten_results(&mut self) {
+        let Some(results) = self.results.take() else {
+            return;
+        };
+        if let Some(channel) = results.channels.into_iter().next() {
+            if let Some(alternative) = channel.alternatives.into_iter().next() {
+                self.text = alternative.transcript;
+                self.words = Some(alternative.words);
+            }
+            self.language = self.language.take().or(channel.detected_language);
+        }
+        self.segments = self.segments.take().or(results.utterances);
+        if let Some(metadata) = self.metadata.take() {
+            self.duration = self.duration.or(metadata.duration);
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
 struct UpstreamSegment {
     #[serde(default)]
     start: f32,
     #[serde(default)]
     end: f32,
-    #[serde(default)]
+    #[serde(default, alias = "punctuated_word", alias = "transcript")]
     text: String,
     #[serde(default)]
     word: String,
     #[serde(default, alias = "speaker_id")]
     speaker: Option<SpeakerLabel>,
+    /// ElevenLabs: "word", "spacing", or "audio_event".
+    #[serde(default, rename = "type")]
+    kind: Option<String>,
+    /// Follows the previous word with no space, as in unspaced scripts.
+    #[serde(skip)]
+    attached: bool,
 }
 
-// xAI numbers speakers, the others name them.
+// xAI and Deepgram number speakers, the others name them.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum SpeakerLabel {
@@ -403,16 +487,27 @@ impl SpeakerLabel {
 #[serde(untagged)]
 enum ModelsResponse {
     Wrapped { data: Vec<ModelEntry> },
+    Deepgram { stt: Vec<DeepgramModel> },
     List(Vec<ModelEntry>),
 }
 
 impl ModelsResponse {
     fn into_ids(self) -> Vec<String> {
-        let entries = match self {
-            ModelsResponse::Wrapped { data } => data,
-            ModelsResponse::List(list) => list,
-        };
-        entries.into_iter().map(|entry| entry.id).collect()
+        match self {
+            ModelsResponse::Wrapped { data } | ModelsResponse::List(data) => {
+                data.into_iter().map(|entry| entry.id).collect()
+            }
+            // One entry per model and language.
+            ModelsResponse::Deepgram { stt } => {
+                let mut ids: Vec<String> = Vec::new();
+                for model in stt.into_iter().filter(|model| model.batch) {
+                    if !ids.contains(&model.canonical_name) {
+                        ids.push(model.canonical_name);
+                    }
+                }
+                ids
+            }
+        }
     }
 }
 
@@ -421,21 +516,34 @@ struct ModelEntry {
     id: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct DeepgramModel {
+    canonical_name: String,
+    #[serde(default = "default_true")]
+    batch: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 fn parse_transcription_body(
     body: &str,
     model: &str,
     profile: &EndpointProfile,
     include_speakers: bool,
 ) -> Result<DiarizedTranscription, RemoteError> {
-    let parsed = serde_json::from_str::<TranscriptionBody>(body).map_err(|err| RemoteError {
-        kind: RemoteErrorKind::Other,
-        status: 200,
-        message: format!("Failed to parse remote speech response: {err}"),
-        error_type: None,
-        code: None,
-        param: None,
-        retry_after: None,
-    })?;
+    let mut parsed =
+        serde_json::from_str::<TranscriptionBody>(body).map_err(|err| RemoteError {
+            kind: RemoteErrorKind::Other,
+            status: 200,
+            message: format!("Failed to parse remote speech response: {err}"),
+            error_type: None,
+            code: None,
+            param: None,
+            retry_after: None,
+        })?;
+    parsed.flatten_results();
     let duration_seconds = match profile.duration_source {
         DurationSource::TopLevel => parsed.duration,
         DurationSource::UsagePromptAudioSeconds => parsed
@@ -443,14 +551,21 @@ fn parse_transcription_body(
             .as_ref()
             .and_then(|usage| usage.prompt_audio_seconds),
     };
+    let words = parsed.words.map(spoken_words);
     let diarized_segments = match profile.diarization {
         _ if !include_speakers => None,
-        Diarization::WordSpeakers => parsed.words.as_deref().and_then(group_speaker_words),
+        Diarization::WordSpeakers => words.as_deref().and_then(group_speaker_words),
         _ => parsed.segments.as_deref().map(map_diarized_text),
     };
-    let segments = map_timed_text(parsed.segments);
+    let segments = match parsed.segments.filter(|segments| !segments.is_empty()) {
+        Some(segments) => Some(map_timed_text(&segments)),
+        None => words
+            .as_deref()
+            .filter(|words| !words.is_empty())
+            .map(sentence_segments),
+    };
     let words = if profile.supports_word_timestamps {
-        map_timed_text(parsed.words)
+        words.as_deref().map(map_timed_text)
     } else {
         None
     };
@@ -467,17 +582,33 @@ fn parse_transcription_body(
     })
 }
 
-fn map_timed_text(items: Option<Vec<UpstreamSegment>>) -> Option<Vec<crate::TranscriptionSegment>> {
-    items.map(|items| {
-        items
-            .into_iter()
-            .map(|item| crate::TranscriptionSegment {
-                start: item.start,
-                end: item.end,
-                text: upstream_segment_text(&item),
-            })
-            .collect()
-    })
+// Drops spacing and audio event entries, remembering where no space separated two words.
+fn spoken_words(entries: Vec<UpstreamSegment>) -> Vec<UpstreamSegment> {
+    let mut words = Vec::with_capacity(entries.len());
+    let mut spaced = true;
+    for mut entry in entries {
+        match entry.kind.as_deref() {
+            None => words.push(entry),
+            Some("word") => {
+                entry.attached = !spaced;
+                spaced = false;
+                words.push(entry);
+            }
+            _ => spaced = true,
+        }
+    }
+    words
+}
+
+fn map_timed_text(items: &[UpstreamSegment]) -> Vec<crate::TranscriptionSegment> {
+    items
+        .iter()
+        .map(|item| crate::TranscriptionSegment {
+            start: item.start,
+            end: item.end,
+            text: upstream_segment_text(item),
+        })
+        .collect()
 }
 
 fn map_diarized_text(items: &[UpstreamSegment]) -> Vec<DiarizedSegment> {
@@ -497,6 +628,32 @@ fn group_speaker_words(words: &[UpstreamSegment]) -> Option<Vec<DiarizedSegment>
     if words.iter().all(|word| word.speaker.is_none()) {
         return None;
     }
+    Some(join_words(words, |last, _, speaker| {
+        last.speaker != *speaker
+    }))
+}
+
+const SEGMENT_PAUSE_SECONDS: f32 = 1.0;
+
+// Timed segments for responses that only carry words: one per sentence or pause.
+fn sentence_segments(words: &[UpstreamSegment]) -> Vec<crate::TranscriptionSegment> {
+    join_words(words, |last, word, _| {
+        last.text.ends_with(['.', '?', '!', '。', '？', '！'])
+            || word.start - last.end >= SEGMENT_PAUSE_SECONDS
+    })
+    .into_iter()
+    .map(|segment| crate::TranscriptionSegment {
+        start: segment.start,
+        end: segment.end,
+        text: segment.text,
+    })
+    .collect()
+}
+
+fn join_words(
+    words: &[UpstreamSegment],
+    starts_segment: impl Fn(&DiarizedSegment, &UpstreamSegment, &Option<String>) -> bool,
+) -> Vec<DiarizedSegment> {
     let mut segments: Vec<DiarizedSegment> = Vec::new();
     for word in words {
         let text = upstream_segment_text(word);
@@ -506,9 +663,11 @@ fn group_speaker_words(words: &[UpstreamSegment]) -> Option<Vec<DiarizedSegment>
         }
         let speaker = word.speaker.as_ref().map(SpeakerLabel::to_id);
         match segments.last_mut() {
-            Some(last) if last.speaker == speaker => {
+            Some(last) if !starts_segment(last, word, &speaker) => {
                 last.end = word.end;
-                last.text.push(' ');
+                if !word.attached {
+                    last.text.push(' ');
+                }
                 last.text.push_str(text);
             }
             _ => segments.push(DiarizedSegment {
@@ -519,7 +678,7 @@ fn group_speaker_words(words: &[UpstreamSegment]) -> Option<Vec<DiarizedSegment>
             }),
         }
     }
-    Some(segments)
+    segments
 }
 
 fn upstream_segment_text(item: &UpstreamSegment) -> String {
@@ -689,6 +848,10 @@ fn api_base(endpoint: &str) -> String {
         "/audio/transcriptions",
         "/v1/stt",
         "/stt",
+        "/v1/speech-to-text",
+        "/speech-to-text",
+        "/v1/listen",
+        "/listen",
     ] {
         if base.ends_with(suffix) {
             base.truncate(base.len() - suffix.len());

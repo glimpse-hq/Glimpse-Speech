@@ -91,7 +91,7 @@ struct ServeArgs {
     engine: ModelEngine,
     #[arg(long)]
     api_key: Option<String>,
-    /// Upstream OpenAI-compatible speech endpoint. When set, transcriptions proxy remotely.
+    /// Upstream speech endpoint (OpenAI-compatible, ElevenLabs, or Deepgram). When set, transcriptions proxy remotely.
     #[arg(long)]
     remote_endpoint: Option<String>,
     #[arg(long)]
