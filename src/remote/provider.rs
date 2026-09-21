@@ -16,6 +16,9 @@ pub struct EndpointProfile {
     pub audio_request: AudioRequest,
     pub models_query: &'static str,
     pub supports_diarization: bool,
+    pub transcriptions_path: &'static str,
+    /// Sends `format=true` for written-form numbers. Needs a language.
+    pub sends_itn_format: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +38,7 @@ pub enum TimestampMode {
 pub enum DictionaryMode {
     Prompt,
     ContextBias,
+    KeyTerm,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +68,8 @@ impl Compatibility {
                 audio_request: AudioRequest::Multipart,
                 models_query: "",
                 supports_diarization: false,
+                transcriptions_path: OPENAI_TRANSCRIPTIONS_PATH,
+                sends_itn_format: false,
             },
             Self::SelfHosted => EndpointProfile {
                 timestamp_mode: TimestampMode::OpenAiVerboseJson,
@@ -77,10 +83,14 @@ impl Compatibility {
                 audio_request: AudioRequest::Multipart,
                 models_query: "",
                 supports_diarization: false,
+                transcriptions_path: OPENAI_TRANSCRIPTIONS_PATH,
+                sends_itn_format: false,
             },
         }
     }
 }
+
+const OPENAI_TRANSCRIPTIONS_PATH: &str = "/audio/transcriptions";
 
 struct HostProfile {
     host_suffixes: &'static [&'static str],
@@ -99,6 +109,8 @@ const MISTRAL: EndpointProfile = EndpointProfile {
     audio_request: AudioRequest::Multipart,
     models_query: "",
     supports_diarization: true,
+    transcriptions_path: OPENAI_TRANSCRIPTIONS_PATH,
+    sends_itn_format: false,
 };
 
 const OPENROUTER: EndpointProfile = EndpointProfile {
@@ -113,7 +125,29 @@ const OPENROUTER: EndpointProfile = EndpointProfile {
     audio_request: AudioRequest::Base64Json,
     models_query: "?output_modalities=transcription",
     supports_diarization: false,
+    transcriptions_path: OPENAI_TRANSCRIPTIONS_PATH,
+    sends_itn_format: false,
 };
+
+// Words always come back, so there is nothing to request. Diarization is
+// per word, not per segment, so it stays off.
+const XAI: EndpointProfile = EndpointProfile {
+    timestamp_mode: TimestampMode::None,
+    dictionary_mode: DictionaryMode::KeyTerm,
+    sends_response_format: false,
+    sends_temperature: false,
+    duration_source: DurationSource::TopLevel,
+    supports_word_timestamps: true,
+    keep_timestamps_on_format_fallback: false,
+    uploads_flac: true,
+    audio_request: AudioRequest::Multipart,
+    models_query: "",
+    supports_diarization: false,
+    transcriptions_path: "/stt",
+    sends_itn_format: true,
+};
+
+const XAI_MAX_KEYTERM_CHARS: usize = 50;
 
 const HOST_PROFILES: &[HostProfile] = &[
     HostProfile {
@@ -123,6 +157,10 @@ const HOST_PROFILES: &[HostProfile] = &[
     HostProfile {
         host_suffixes: &["openrouter.ai"],
         profile: OPENROUTER,
+    },
+    HostProfile {
+        host_suffixes: &["x.ai"],
+        profile: XAI,
     },
 ];
 
@@ -244,9 +282,8 @@ pub fn build_transcription_form(
     file_part: Part,
     params: TranscriptionFormParams<'_>,
 ) -> Form {
-    let mut form = Form::new()
-        .part("file", file_part)
-        .text("model", params.model.to_string());
+    // `file` goes last: xAI ignores fields sent after it.
+    let mut form = Form::new().text("model", params.model.to_string());
 
     let wants_timestamps =
         !params.timestamp_granularities.is_empty() && profile.timestamp_mode != TimestampMode::None;
@@ -283,6 +320,9 @@ pub fn build_transcription_form(
 
     if let Some(language) = params.language {
         form = form.text("language", language.to_string());
+        if profile.sends_itn_format {
+            form = form.text("format", "true");
+        }
     }
 
     if profile.supports_diarization && params.diarize {
@@ -295,6 +335,7 @@ pub fn build_transcription_form(
         params.dictionary,
         params.prompt,
     )
+    .part("file", file_part)
 }
 
 fn append_timestamps(mut form: Form, mode: TimestampMode, granularities: &[&str]) -> Form {
@@ -330,6 +371,14 @@ fn apply_dictionary_and_prompt(
             if let Some(prompt) = compose_openai_prompt(trimmed_prompt, dictionary_terms.as_deref())
             {
                 form = form.text("prompt", prompt);
+            }
+        }
+        DictionaryMode::KeyTerm => {
+            for term in crate::dictionary::sanitize_dictionary_entries(dictionary)
+                .into_iter()
+                .filter(|term| term.chars().count() <= XAI_MAX_KEYTERM_CHARS)
+            {
+                form = form.text("keyterm", term);
             }
         }
         DictionaryMode::ContextBias => {

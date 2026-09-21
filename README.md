@@ -25,7 +25,7 @@ NVIDIA engines are unavailable on Intel macOS (`x86_64-apple-darwin`) because ON
 
 ```toml
 [dependencies]
-glimpse-speech = { git = "https://github.com/glimpse-hq/Glimpse-Speech.git", tag = "1.6.4", features = ["whisper", "nvidia"] }
+glimpse-speech = { git = "https://github.com/glimpse-hq/Glimpse-Speech.git", tag = "1.6.5", features = ["whisper", "nvidia"] }
 ```
 
 The transcribe.cpp dependency is pinned to an exact Git revision, including its
@@ -110,7 +110,7 @@ Auth and networking:
 - Keys are accepted as `Authorization: Bearer <key>` or `x-api-key: <key>`
 - `--cors` enables permissive CORS for browser clients
 
-With `--remote-endpoint` set, transcription requests proxy to the remote service. Endpoint quirks (Mistral, self-hosted servers) are detected automatically, WAV uploads are converted to FLAC to cut upload size, and transient remote failures fall back to the local engine when a local model is installed.
+With `--remote-endpoint` set, transcription requests proxy to the remote service. Endpoint quirks (Mistral, OpenRouter, xAI, self-hosted servers) are detected automatically, WAV uploads are converted to FLAC to cut upload size, and transient remote failures fall back to the local engine when a local model is installed.
 
 ## Library
 

@@ -108,7 +108,7 @@ impl RemoteEngine {
                 "Remote speech endpoint does not support speaker diarization",
             ));
         }
-        let url = format!("{}/audio/transcriptions", api_base(endpoint));
+        let url = format!("{}{}", api_base(endpoint), profile.transcriptions_path);
         let api_key = self.config.api_key.trim();
         let language = params
             .language
@@ -622,7 +622,12 @@ fn api_base(endpoint: &str) -> String {
     let mut base = ensure_scheme(endpoint.trim())
         .trim_end_matches('/')
         .to_string();
-    for suffix in ["/v1/audio/transcriptions", "/audio/transcriptions"] {
+    for suffix in [
+        "/v1/audio/transcriptions",
+        "/audio/transcriptions",
+        "/v1/stt",
+        "/stt",
+    ] {
         if base.ends_with(suffix) {
             base.truncate(base.len() - suffix.len());
             break;
