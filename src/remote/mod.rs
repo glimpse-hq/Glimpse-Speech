@@ -11,9 +11,9 @@ pub use engine::{
     DiarizedSegment, DiarizedTranscription, RemoteConfig, RemoteEngine, RemoteRequestParams,
 };
 
-/// Reports whether an endpoint accepts speaker-diarized transcription requests.
-pub fn supports_diarization(endpoint: &str) -> bool {
-    provider::resolve_profile(endpoint).supports_diarization
+/// Reports whether an endpoint and model return speaker-diarized transcriptions.
+pub fn supports_diarization(endpoint: &str, model: &str) -> bool {
+    provider::resolve_profile(endpoint).supports_diarization(model.trim())
 }
 
 use reqwest::StatusCode;

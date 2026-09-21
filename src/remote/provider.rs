@@ -15,7 +15,31 @@ pub struct EndpointProfile {
     pub uploads_flac: bool,
     pub audio_request: AudioRequest,
     pub models_query: &'static str,
-    pub supports_diarization: bool,
+    pub diarization: Diarization,
+    pub transcriptions_path: &'static str,
+    /// Sends `format=true` for written-form numbers. Needs a language.
+    pub sends_itn_format: bool,
+}
+
+impl EndpointProfile {
+    pub fn supports_diarization(&self, model: &str) -> bool {
+        match self.diarization {
+            Diarization::None => false,
+            Diarization::SegmentSpeakers | Diarization::WordSpeakers => true,
+            Diarization::DiarizedJson => model.to_ascii_lowercase().contains("diarize"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Diarization {
+    None,
+    /// `diarize=true`, speakers come back on segments.
+    SegmentSpeakers,
+    /// `diarize=true`, speakers come back on words only.
+    WordSpeakers,
+    /// OpenAI: only `*-diarize` models, via `response_format=diarized_json`.
+    DiarizedJson,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +59,7 @@ pub enum TimestampMode {
 pub enum DictionaryMode {
     Prompt,
     ContextBias,
+    KeyTerm,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,7 +88,9 @@ impl Compatibility {
                 uploads_flac: true,
                 audio_request: AudioRequest::Multipart,
                 models_query: "",
-                supports_diarization: false,
+                diarization: Diarization::None,
+                transcriptions_path: OPENAI_TRANSCRIPTIONS_PATH,
+                sends_itn_format: false,
             },
             Self::SelfHosted => EndpointProfile {
                 timestamp_mode: TimestampMode::OpenAiVerboseJson,
@@ -76,11 +103,15 @@ impl Compatibility {
                 uploads_flac: false,
                 audio_request: AudioRequest::Multipart,
                 models_query: "",
-                supports_diarization: false,
+                diarization: Diarization::None,
+                transcriptions_path: OPENAI_TRANSCRIPTIONS_PATH,
+                sends_itn_format: false,
             },
         }
     }
 }
+
+const OPENAI_TRANSCRIPTIONS_PATH: &str = "/audio/transcriptions";
 
 struct HostProfile {
     host_suffixes: &'static [&'static str],
@@ -98,7 +129,9 @@ const MISTRAL: EndpointProfile = EndpointProfile {
     uploads_flac: true,
     audio_request: AudioRequest::Multipart,
     models_query: "",
-    supports_diarization: true,
+    diarization: Diarization::SegmentSpeakers,
+    transcriptions_path: OPENAI_TRANSCRIPTIONS_PATH,
+    sends_itn_format: false,
 };
 
 const OPENROUTER: EndpointProfile = EndpointProfile {
@@ -112,8 +145,40 @@ const OPENROUTER: EndpointProfile = EndpointProfile {
     uploads_flac: false,
     audio_request: AudioRequest::Base64Json,
     models_query: "?output_modalities=transcription",
-    supports_diarization: false,
+    diarization: Diarization::None,
+    transcriptions_path: OPENAI_TRANSCRIPTIONS_PATH,
+    sends_itn_format: false,
 };
+
+// Words always come back, so there is nothing to request.
+const XAI: EndpointProfile = EndpointProfile {
+    timestamp_mode: TimestampMode::None,
+    dictionary_mode: DictionaryMode::KeyTerm,
+    sends_response_format: false,
+    sends_temperature: false,
+    duration_source: DurationSource::TopLevel,
+    supports_word_timestamps: true,
+    keep_timestamps_on_format_fallback: false,
+    uploads_flac: true,
+    audio_request: AudioRequest::Multipart,
+    models_query: "",
+    diarization: Diarization::WordSpeakers,
+    transcriptions_path: "/stt",
+    sends_itn_format: true,
+};
+
+const OPENAI: EndpointProfile = EndpointProfile {
+    diarization: Diarization::DiarizedJson,
+    ..Compatibility::DirectOpenAi.base_profile()
+};
+
+// Diarization needs verbose_json with word timestamps, and speakers land on words.
+const FIREWORKS: EndpointProfile = EndpointProfile {
+    diarization: Diarization::WordSpeakers,
+    ..Compatibility::DirectOpenAi.base_profile()
+};
+
+const XAI_MAX_KEYTERM_CHARS: usize = 50;
 
 const HOST_PROFILES: &[HostProfile] = &[
     HostProfile {
@@ -123,6 +188,18 @@ const HOST_PROFILES: &[HostProfile] = &[
     HostProfile {
         host_suffixes: &["openrouter.ai"],
         profile: OPENROUTER,
+    },
+    HostProfile {
+        host_suffixes: &["x.ai"],
+        profile: XAI,
+    },
+    HostProfile {
+        host_suffixes: &["openai.com"],
+        profile: OPENAI,
+    },
+    HostProfile {
+        host_suffixes: &["fireworks.ai"],
+        profile: FIREWORKS,
     },
 ];
 
@@ -197,7 +274,17 @@ pub fn plan_request(
     profile: &EndpointProfile,
     wants_timestamps: bool,
     granularity: Option<TimestampGranularity>,
+    diarize: bool,
 ) -> RequestPlan {
+    let (wants_timestamps, granularity) = match (diarize, profile.diarization) {
+        (false, _) | (true, Diarization::None) => (wants_timestamps, granularity),
+        (true, Diarization::SegmentSpeakers) => {
+            (true, granularity.or(Some(TimestampGranularity::Segment)))
+        }
+        (true, Diarization::WordSpeakers) => (true, Some(TimestampGranularity::Word)),
+        // diarized_json rejects timestamp_granularities; its segments carry times.
+        (true, Diarization::DiarizedJson) => (false, None),
+    };
     let caps = effective_capabilities(profile);
     if !wants_timestamps || !caps.supports_timestamps {
         return RequestPlan {
@@ -244,17 +331,22 @@ pub fn build_transcription_form(
     file_part: Part,
     params: TranscriptionFormParams<'_>,
 ) -> Form {
-    let mut form = Form::new()
-        .part("file", file_part)
-        .text("model", params.model.to_string());
+    // `file` goes last: xAI ignores fields sent after it.
+    let mut form = Form::new().text("model", params.model.to_string());
 
+    let diarized_json = params.diarize && profile.diarization == Diarization::DiarizedJson;
     let wants_timestamps =
         !params.timestamp_granularities.is_empty() && profile.timestamp_mode != TimestampMode::None;
     let use_verbose_json = profile.sends_response_format
         && params.response_format == ResponseFormat::VerboseJson
         && profile.timestamp_mode == TimestampMode::OpenAiVerboseJson;
 
-    if profile.sends_response_format {
+    if diarized_json {
+        // Required for inputs over 30 seconds.
+        form = form
+            .text("response_format", "diarized_json")
+            .text("chunking_strategy", "auto");
+    } else if profile.sends_response_format {
         form = form.text(
             "response_format",
             if use_verbose_json {
@@ -283,18 +375,30 @@ pub fn build_transcription_form(
 
     if let Some(language) = params.language {
         form = form.text("language", language.to_string());
+        if profile.sends_itn_format {
+            form = form.text("format", "true");
+        }
     }
 
-    if profile.supports_diarization && params.diarize {
+    if params.diarize
+        && matches!(
+            profile.diarization,
+            Diarization::SegmentSpeakers | Diarization::WordSpeakers
+        )
+    {
         form = form.text("diarize", "true");
     }
 
-    apply_dictionary_and_prompt(
-        form,
-        profile.dictionary_mode,
-        params.dictionary,
-        params.prompt,
-    )
+    // Diarize models reject prompts, which is where the dictionary goes.
+    if !diarized_json {
+        form = apply_dictionary_and_prompt(
+            form,
+            profile.dictionary_mode,
+            params.dictionary,
+            params.prompt,
+        );
+    }
+    form.part("file", file_part)
 }
 
 fn append_timestamps(mut form: Form, mode: TimestampMode, granularities: &[&str]) -> Form {
@@ -330,6 +434,14 @@ fn apply_dictionary_and_prompt(
             if let Some(prompt) = compose_openai_prompt(trimmed_prompt, dictionary_terms.as_deref())
             {
                 form = form.text("prompt", prompt);
+            }
+        }
+        DictionaryMode::KeyTerm => {
+            for term in crate::dictionary::sanitize_dictionary_entries(dictionary)
+                .into_iter()
+                .filter(|term| term.chars().count() <= XAI_MAX_KEYTERM_CHARS)
+            {
+                form = form.text("keyterm", term);
             }
         }
         DictionaryMode::ContextBias => {
@@ -417,7 +529,7 @@ mod tests {
     #[test]
     fn does_not_request_timestamps_when_caller_opts_out() {
         let profile = resolve_profile("https://api.openai.com/v1");
-        let plan = plan_request(&profile, false, None);
+        let plan = plan_request(&profile, false, None, false);
         assert_eq!(plan.response_format, ResponseFormat::Json);
         assert!(plan.timestamp_granularities.is_empty());
     }
@@ -425,7 +537,7 @@ mod tests {
     #[test]
     fn requests_verbose_json_with_word_timestamps() {
         let profile = resolve_profile("https://api.openai.com/v1");
-        let plan = plan_request(&profile, true, Some(TimestampGranularity::Word));
+        let plan = plan_request(&profile, true, Some(TimestampGranularity::Word), false);
         assert_eq!(plan.response_format, ResponseFormat::VerboseJson);
         assert_eq!(plan.timestamp_granularities, vec!["segment", "word"]);
     }
