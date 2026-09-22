@@ -85,6 +85,9 @@ fn read_pcm16_wav(path: &Path) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
     if spec.channels == 0 {
         return Err("WAV has no channels".into());
     }
+    if spec.sample_rate == 0 {
+        return Err("WAV has a zero sample rate".into());
+    }
 
     let samples = reader
         .into_samples::<i16>()
@@ -164,37 +167,116 @@ fn io_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
     io::Error::other(message.into()).into()
 }
 
-/// Converts PCM16 to normalized f32 and linearly resamples to `to_rate` in a
-/// single pass. Equal or zero rates only scale.
+/// Converts PCM16 to normalized f32 and resamples to `to_rate`, low-pass
+/// filtering when downsampling so content above the new Nyquist frequency
+/// cannot alias. Equal or zero rates only scale.
 pub(crate) fn resample_i16_to_f32(samples: &[i16], from_rate: u32, to_rate: u32) -> Vec<f32> {
     const SCALE: f32 = 1.0 / PCM16_SCALE;
 
-    let scaled = |sample: i16| f32::from(sample) * SCALE;
-
-    if samples.is_empty() {
-        return Vec::new();
-    }
-    if from_rate == 0 || to_rate == 0 || from_rate == to_rate {
-        return samples.iter().copied().map(scaled).collect();
+    let scaled: Vec<f32> = samples
+        .iter()
+        .map(|&sample| f32::from(sample) * SCALE)
+        .collect();
+    if scaled.is_empty() || from_rate == 0 || to_rate == 0 || from_rate == to_rate {
+        return scaled;
     }
 
     let step = f64::from(from_rate) / f64::from(to_rate);
-    let target_len = (samples.len() as f64 / step).ceil().max(1.0) as usize;
-    let last_index = samples.len() - 1;
+    let target_len = (scaled.len() as f64 / step).ceil().max(1.0) as usize;
+    if from_rate > to_rate {
+        let filter = PolyphaseFilter::new(f64::from(to_rate) / f64::from(from_rate));
+        return (0..target_len)
+            .map(|idx| filter.sample(&scaled, idx as f64 * step))
+            .collect();
+    }
 
+    let last_index = scaled.len() - 1;
     (0..target_len)
         .map(|idx| {
             let src_pos = idx as f64 * step;
             let base = src_pos as usize;
             if base >= last_index {
-                return scaled(samples[last_index]);
+                return scaled[last_index];
             }
             let frac = (src_pos - base as f64) as f32;
-            let current = scaled(samples[base]);
-            let next = scaled(samples[base + 1]);
-            current + (next - current) * frac
+            scaled[base] + (scaled[base + 1] - scaled[base]) * frac
         })
         .collect()
+}
+
+struct PolyphaseFilter {
+    half: usize,
+    width: usize,
+    phases: Vec<f32>,
+}
+
+impl PolyphaseFilter {
+    const PHASES: usize = 128;
+    const ZERO_CROSSINGS: f64 = 12.0;
+    const ROLLOFF: f64 = 0.9;
+
+    fn new(bandwidth: f64) -> Self {
+        let cutoff = bandwidth * Self::ROLLOFF;
+        let half = (Self::ZERO_CROSSINGS / cutoff).ceil() as usize;
+        let width = (2 * half + 1).next_multiple_of(8);
+        let mut phases = vec![0.0f32; Self::PHASES * width];
+        for (phase, row) in phases.chunks_exact_mut(width).enumerate() {
+            let frac = phase as f64 / Self::PHASES as f64;
+            let taps: Vec<f64> = (0..=2 * half)
+                .map(|k| {
+                    let x = k as f64 - half as f64 - frac;
+                    if x.abs() >= half as f64 {
+                        return 0.0;
+                    }
+                    let arg = std::f64::consts::PI * cutoff * x;
+                    let sinc = if arg == 0.0 { 1.0 } else { arg.sin() / arg };
+                    let angle = std::f64::consts::PI * x / half as f64;
+                    let window = 0.42 + 0.5 * angle.cos() + 0.08 * (2.0 * angle).cos();
+                    sinc * window
+                })
+                .collect();
+            let sum: f64 = taps.iter().sum();
+            for (slot, tap) in row.iter_mut().zip(taps) {
+                *slot = (tap / sum) as f32;
+            }
+        }
+        Self {
+            half,
+            width,
+            phases,
+        }
+    }
+
+    fn sample(&self, samples: &[f32], position: f64) -> f32 {
+        let base = position as usize;
+        let phase =
+            (((position - base as f64) * Self::PHASES as f64) as usize).min(Self::PHASES - 1);
+        let taps = &self.phases[phase * self.width..(phase + 1) * self.width];
+        if base >= self.half && base - self.half + self.width <= samples.len() {
+            return dot(
+                &samples[base - self.half..base - self.half + self.width],
+                taps,
+            );
+        }
+        let last = samples.len() as isize - 1;
+        taps.iter()
+            .enumerate()
+            .map(|(offset, tap)| {
+                let index = (base as isize + offset as isize - self.half as isize).clamp(0, last);
+                samples[index as usize] * tap
+            })
+            .sum()
+    }
+}
+
+fn dot(samples: &[f32], taps: &[f32]) -> f32 {
+    let mut lanes = [0.0f32; 8];
+    for (chunk, tap_chunk) in samples.chunks_exact(8).zip(taps.chunks_exact(8)) {
+        for lane in 0..8 {
+            lanes[lane] += chunk[lane] * tap_chunk[lane];
+        }
+    }
+    lanes.iter().sum()
 }
 
 #[cfg(test)]
@@ -241,5 +323,37 @@ mod resample_tests {
             vec![200, -32_768, 7]
         );
         assert_eq!(downmix(vec![1, 2, 3], 1), vec![1, 2, 3]);
+    }
+
+    fn rms(samples: &[f32]) -> f32 {
+        (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt()
+    }
+
+    fn tone(frequency: f32, rate: u32, seconds: f32) -> Vec<i16> {
+        (0..(rate as f32 * seconds) as usize)
+            .map(|n| {
+                let t = n as f32 / rate as f32;
+                (16_000.0 * (2.0 * std::f32::consts::PI * frequency * t).sin()) as i16
+            })
+            .collect()
+    }
+
+    #[test]
+    fn downsampling_rejects_content_above_the_new_nyquist() {
+        let out = resample_i16_to_f32(&tone(12_000.0, 48_000, 1.0), 48_000, 16_000);
+        let steady = &out[1_000..out.len() - 1_000];
+        assert!(rms(steady) < 0.002, "aliased energy {}", rms(steady));
+    }
+
+    #[test]
+    fn downsampling_keeps_speech_band_content() {
+        let out = resample_i16_to_f32(&tone(1_000.0, 44_100, 1.0), 44_100, 16_000);
+        let steady = &out[1_000..out.len() - 1_000];
+        let expected = 16_000.0 * SCALE / std::f32::consts::SQRT_2;
+        assert!(
+            (rms(steady) / expected - 1.0).abs() < 0.02,
+            "rms {}",
+            rms(steady)
+        );
     }
 }
