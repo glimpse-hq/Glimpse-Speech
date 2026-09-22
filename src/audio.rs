@@ -42,14 +42,14 @@ pub fn read_wav_samples(wav_path: &Path) -> Result<Vec<f32>, Box<dyn std::error:
 }
 
 pub fn read_audio_samples(path: &Path) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
-    let wav_error = match read_wav_samples(path) {
+    let wav_error = match read_pcm16_wav(path) {
         Ok(samples) => return Ok(samples),
         Err(error) => error,
     };
 
     let ffmpeg = find_ffmpeg().ok_or_else(|| {
         io_error(format!(
-            "Audio must be a 16 kHz mono PCM WAV, or ffmpeg must be installed to decode {}: {wav_error}",
+            "Audio must be a PCM int16 WAV, or ffmpeg must be installed to decode {}: {wav_error}",
             path.display()
         ))
     })?;
@@ -70,6 +70,37 @@ pub fn read_audio_samples(path: &Path) -> Result<Vec<f32>, Box<dyn std::error::E
     }
 
     read_wav_samples(&converted.path)
+}
+
+fn read_pcm16_wav(path: &Path) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    let reader = hound::WavReader::open(path)?;
+    let spec = reader.spec();
+    if spec.bits_per_sample != 16 || spec.sample_format != hound::SampleFormat::Int {
+        return Err(format!(
+            "Expected PCM int16 samples, found {} bit {:?}",
+            spec.bits_per_sample, spec.sample_format
+        )
+        .into());
+    }
+    if spec.channels == 0 {
+        return Err("WAV has no channels".into());
+    }
+
+    let samples = reader
+        .into_samples::<i16>()
+        .collect::<Result<Vec<_>, _>>()?;
+    let mono = downmix(samples, usize::from(spec.channels));
+    Ok(resample_i16_to_f32(&mono, spec.sample_rate, 16_000))
+}
+
+fn downmix(samples: Vec<i16>, channels: usize) -> Vec<i16> {
+    if channels == 1 {
+        return samples;
+    }
+    samples
+        .chunks_exact(channels)
+        .map(|frame| (frame.iter().map(|&s| i32::from(s)).sum::<i32>() / channels as i32) as i16)
+        .collect()
 }
 
 fn find_ffmpeg() -> Option<PathBuf> {
@@ -135,7 +166,6 @@ fn io_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
 
 /// Converts PCM16 to normalized f32 and linearly resamples to `to_rate` in a
 /// single pass. Equal or zero rates only scale.
-#[cfg(local_engines)]
 pub(crate) fn resample_i16_to_f32(samples: &[i16], from_rate: u32, to_rate: u32) -> Vec<f32> {
     const SCALE: f32 = 1.0 / PCM16_SCALE;
 
@@ -167,9 +197,9 @@ pub(crate) fn resample_i16_to_f32(samples: &[i16], from_rate: u32, to_rate: u32)
         .collect()
 }
 
-#[cfg(all(test, local_engines))]
+#[cfg(test)]
 mod resample_tests {
-    use super::resample_i16_to_f32;
+    use super::{downmix, resample_i16_to_f32};
 
     const SCALE: f32 = 1.0 / super::PCM16_SCALE;
 
@@ -202,5 +232,14 @@ mod resample_tests {
         assert!((out[1] - 500.0 * SCALE).abs() < 1e-6);
         assert!((out[2] - 1000.0 * SCALE).abs() < 1e-6);
         assert!((out[3] - 1000.0 * SCALE).abs() < 1e-6);
+    }
+
+    #[test]
+    fn downmix_averages_interleaved_frames() {
+        assert_eq!(
+            downmix(vec![100, 300, -32_768, -32_768, 7, 8], 2),
+            vec![200, -32_768, 7]
+        );
+        assert_eq!(downmix(vec![1, 2, 3], 1), vec![1, 2, 3]);
     }
 }
