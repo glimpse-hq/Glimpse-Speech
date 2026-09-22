@@ -7,7 +7,7 @@ use std::{
 };
 
 const PCM16_SCALE: f32 = 32_768.0;
-const MAX_WAV_SAMPLE_RATE: u32 = 384_000;
+pub(crate) const MAX_SAMPLE_RATE: u32 = 384_000;
 
 /// Requirements: 16 kHz, mono, PCM int16 WAV file.
 pub fn read_wav_samples(wav_path: &Path) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
@@ -86,7 +86,7 @@ fn read_pcm16_wav(path: &Path) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
     if spec.channels == 0 {
         return Err("WAV has no channels".into());
     }
-    if spec.sample_rate == 0 || spec.sample_rate > MAX_WAV_SAMPLE_RATE {
+    if spec.sample_rate == 0 || spec.sample_rate > MAX_SAMPLE_RATE {
         return Err(format!("Unsupported WAV sample rate {} Hz", spec.sample_rate).into());
     }
 
@@ -215,11 +215,11 @@ impl PolyphaseFilter {
     const PHASES: usize = 128;
     const ZERO_CROSSINGS: f64 = 12.0;
     const ROLLOFF: f64 = 0.9;
-    const MIN_BANDWIDTH: f64 = 1.0 / 24.0;
+    const MAX_HALF_WIDTH: usize = 320;
 
     fn new(bandwidth: f64) -> Self {
-        let cutoff = bandwidth.max(Self::MIN_BANDWIDTH) * Self::ROLLOFF;
-        let half = (Self::ZERO_CROSSINGS / cutoff).ceil() as usize;
+        let cutoff = bandwidth * Self::ROLLOFF;
+        let half = ((Self::ZERO_CROSSINGS / cutoff).ceil() as usize).min(Self::MAX_HALF_WIDTH);
         let width = (2 * half + 1).next_multiple_of(8);
         let mut phases = vec![0.0f32; Self::PHASES * width];
         for (phase, row) in phases.chunks_exact_mut(width).enumerate() {

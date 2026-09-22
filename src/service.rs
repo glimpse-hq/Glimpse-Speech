@@ -709,6 +709,9 @@ fn prepare_audio(audio: AudioInput) -> Result<PreparedAudio> {
             samples,
             sample_rate,
         } => {
+            if sample_rate > crate::audio::MAX_SAMPLE_RATE {
+                return Err(anyhow!("Unsupported sample rate {sample_rate} Hz"));
+            }
             let sample_count = samples.len();
             // Normalizes and resamples in one pass; at 16 kHz it only scales.
             let normalized = crate::audio::resample_i16_to_f32(&samples, sample_rate, 16_000);
@@ -746,6 +749,15 @@ mod prepare_tests {
 
         assert_eq!(prepared.samples.len(), 20_000);
         assert_eq!(prepared.duration_ms, 0);
+    }
+
+    #[test]
+    fn pcm_above_the_supported_rate_is_rejected() {
+        let result = prepare_audio(AudioInput::PcmI16 {
+            samples: vec![0i16; 1_024],
+            sample_rate: crate::audio::MAX_SAMPLE_RATE + 1,
+        });
+        assert!(result.is_err());
     }
 
     #[test]

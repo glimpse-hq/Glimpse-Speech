@@ -40,6 +40,9 @@ pub fn diarize(
     if sample_rate == 0 {
         return Err(error("sample rate must be greater than zero"));
     }
+    if sample_rate > crate::audio::MAX_SAMPLE_RATE {
+        return Err(error(format!("unsupported sample rate {sample_rate} Hz")));
+    }
     if samples.len() as u64 / u64::from(sample_rate) > MAX_AUDIO_SECONDS {
         return Err(error(format!(
             "audio is too long to diarize: the limit is {} hours",

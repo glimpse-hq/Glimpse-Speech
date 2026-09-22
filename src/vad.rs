@@ -114,6 +114,9 @@ mod silero {
     /// Returns `None` if the model is unavailable so callers can fall back
     /// without dropping transcript text. Empty `Vec` means no speech.
     pub fn speech_regions(samples: &[i16], sample_rate: u32) -> Option<Vec<(f32, f32)>> {
+        if sample_rate > crate::audio::MAX_SAMPLE_RATE {
+            return None;
+        }
         let audio = crate::audio::resample_i16_to_f32(samples, sample_rate, 16_000);
         if audio.len() < WINDOW {
             return Some(Vec::new());
