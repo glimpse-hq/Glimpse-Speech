@@ -1,6 +1,6 @@
 [package]
 name = "glimpse-speech"
-version = "1.6.5"
+version = "1.6.6"
 edition = "2024"
 resolver = "3"
 rust-version = "1.88"

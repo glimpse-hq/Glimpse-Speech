@@ -8,7 +8,10 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use reqwest::{Client, StatusCode, header::RANGE};
+use reqwest::{
+    Client, StatusCode,
+    header::{CONTENT_TYPE, RANGE},
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
@@ -436,6 +439,24 @@ impl ModelInstallManager {
                 return Err(anyhow!(
                     "Download failed with status {} while fetching {}",
                     response.status(),
+                    file.path
+                ));
+            }
+
+            // Model hosts never serve HTML; a page here is usually a network filter's block page.
+            let is_html = response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| {
+                    value
+                        .trim_start()
+                        .to_ascii_lowercase()
+                        .starts_with("text/html")
+                });
+            if is_html {
+                return Err(anyhow!(
+                    "Received a web page instead of {}; the network may be blocking the download",
                     file.path
                 ));
             }
