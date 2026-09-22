@@ -202,8 +202,9 @@ Clean up raw speech-to-text output.
     }
 
     fn take_prewarmed(instructions: &str) -> Option<(SystemLanguageModel, Session)> {
-        let prewarmed = PREWARMED.lock().ok()?.take()?;
-        (prewarmed.instructions == instructions).then_some((prewarmed.model, prewarmed.session))
+        let mut slot = PREWARMED.lock().ok()?;
+        let prewarmed = slot.take_if(|prewarmed| prewarmed.instructions == instructions)?;
+        Some((prewarmed.model, prewarmed.session))
     }
 
     pub fn prewarm(instructions: &str) -> anyhow::Result<()> {
