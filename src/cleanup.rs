@@ -61,6 +61,18 @@ impl CleanupProvider {
         }
     }
 
+    pub fn prewarm(&self) {
+        match self.backend {
+            Backend::Off => {}
+            #[cfg(apple_cleanup)]
+            Backend::Apple => {
+                if let Err(err) = apple::prewarm(apple::INSTRUCTIONS) {
+                    tracing::debug!("cleanup prewarm failed: {err}");
+                }
+            }
+        }
+    }
+
     pub async fn apply(&self, transcription: Transcription) -> Transcription {
         match self.backend {
             Backend::Off => transcription,
@@ -103,12 +115,14 @@ fn accept(original: &str, cleaned: &str) -> bool {
 
 #[cfg(apple_cleanup)]
 mod apple {
+    use std::sync::Mutex;
+
     use anyhow::{Context, anyhow};
     use fm_rs::{GenerationOptions, ModelAvailability, Session, SystemLanguageModel};
 
     use super::AppleAvailability;
 
-    const INSTRUCTIONS: &str = "\
+    pub(super) const INSTRUCTIONS: &str = "\
 <task>
 Clean up raw speech-to-text output.
 </task>
@@ -155,12 +169,10 @@ Clean up raw speech-to-text output.
         if !os_supports_foundation_models() {
             return Err(anyhow!("on-device model requires macOS 26 or later"));
         }
-        let model = SystemLanguageModel::new().context("load system language model")?;
-        model
-            .ensure_available()
-            .map_err(|err| anyhow!("model unavailable: {err}"))?;
-        let session = Session::with_instructions(&model, instructions)
-            .map_err(|err| anyhow!("create session: {err}"))?;
+        let (_model, session) = match take_prewarmed(instructions) {
+            Some(prewarmed) => prewarmed,
+            None => open_session(instructions)?,
+        };
         let mut options = GenerationOptions::builder().temperature(f64::from(temperature));
         if let Some(max_tokens) = max_response_tokens {
             options = options.max_response_tokens(max_tokens);
@@ -169,6 +181,62 @@ Clean up raw speech-to-text output.
             .respond(prompt, &options.build())
             .map_err(|err| anyhow!("generation failed: {err}"))?;
         Ok(response.content().trim().to_string())
+    }
+
+    struct Prewarmed {
+        instructions: String,
+        model: SystemLanguageModel,
+        session: Session,
+    }
+
+    static PREWARMED: Mutex<Option<Prewarmed>> = Mutex::new(None);
+
+    fn open_session(instructions: &str) -> anyhow::Result<(SystemLanguageModel, Session)> {
+        let model = SystemLanguageModel::new().context("load system language model")?;
+        model
+            .ensure_available()
+            .map_err(|err| anyhow!("model unavailable: {err}"))?;
+        let session = Session::with_instructions(&model, instructions)
+            .map_err(|err| anyhow!("create session: {err}"))?;
+        Ok((model, session))
+    }
+
+    fn take_prewarmed(instructions: &str) -> Option<(SystemLanguageModel, Session)> {
+        let mut slot = PREWARMED.lock().ok()?;
+        let prewarmed = slot.take_if(|prewarmed| prewarmed.instructions == instructions)?;
+        Some((prewarmed.model, prewarmed.session))
+    }
+
+    pub fn prewarm(instructions: &str) -> anyhow::Result<()> {
+        if !os_supports_foundation_models() {
+            return Err(anyhow!("on-device model requires macOS 26 or later"));
+        }
+        let (model, session) = open_session(instructions)?;
+        session
+            .prewarm(None)
+            .map_err(|err| anyhow!("prewarm: {err}"))?;
+        if let Ok(mut slot) = PREWARMED.lock() {
+            *slot = Some(Prewarmed {
+                instructions: instructions.to_string(),
+                model,
+                session,
+            });
+        }
+        Ok(())
+    }
+}
+
+#[allow(unused_variables)]
+pub fn apple_prewarm(instructions: &str) -> anyhow::Result<()> {
+    #[cfg(apple_cleanup)]
+    {
+        apple::prewarm(instructions)
+    }
+    #[cfg(not(apple_cleanup))]
+    {
+        Err(anyhow::anyhow!(
+            "on-device model is not supported in this build"
+        ))
     }
 }
 
