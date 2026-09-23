@@ -1,6 +1,6 @@
 [package]
 name = "glimpse-speech"
-version = "1.6.6"
+version = "1.6.7"
 edition = "2024"
 resolver = "3"
 rust-version = "1.88"
@@ -74,7 +74,7 @@ transcribe-cpp = { git = "https://github.com/LegendarySpy/transcribe.cpp.git", r
 # Intel Mac excluded: ort has no prebuilt onnxruntime there (Silero VAD falls
 # back to keeping all speech, see vad.rs) and parakeet models don't run on it.
 [target.'cfg(not(all(target_os = "macos", target_arch = "x86_64")))'.dependencies]
-parakeet-rs = { version = "0.3.7", optional = true }
+parakeet-rs = { version = "0.3.8", optional = true }
 ort = { version = "=2.0.0-rc.13", optional = true }
 
 [[example]]
