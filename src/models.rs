@@ -613,7 +613,11 @@ pub fn infer_engine(reference: &str) -> Option<ModelEngine> {
         ModelEngine::Transcribe,
     ];
 
-    let lower = reference.to_ascii_lowercase();
+    let name = Path::new(reference)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(reference);
+    let lower = name.to_ascii_lowercase();
     if lower.ends_with(".gguf") {
         return Some(ModelEngine::Transcribe);
     }
@@ -1199,6 +1203,11 @@ mod tests {
         );
         assert_eq!(infer_engine("apple"), Some(ModelEngine::Apple));
         assert_eq!(infer_engine("ggml-turbo.bin"), None);
+        assert_eq!(infer_engine("/models/parakeet/ggml-small.bin"), None);
+        assert_eq!(
+            infer_engine("/models/whisper/parakeet-tdt-int8"),
+            Some(ModelEngine::Parakeet)
+        );
     }
 
     #[test]

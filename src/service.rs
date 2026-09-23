@@ -224,6 +224,9 @@ impl SpeechService {
     }
 
     pub fn delete(&self, model_id: &str) -> Result<ModelStatus> {
+        if self.loaded_model_id().as_deref() == Some(model_id) {
+            self.unload();
+        }
         self.model_manager.delete(model_id)
     }
 
@@ -231,21 +234,18 @@ impl SpeechService {
         let total_started = Instant::now();
         let requested_language = request.language.clone();
         let requested_model = request.model_id.clone();
-        let resolved_id = self.ensure_loaded(&requested_model)?;
-        let lock_started = Instant::now();
-        let mut guard = self.lock_loaded()?;
-        let lock_wait = lock_started.elapsed();
+        let mut guard = self.ensure_loaded(&requested_model)?;
         let loaded = loaded_engine(&mut guard)?;
+        let resolved_id = loaded.model_id.clone();
         let transcribe_started = Instant::now();
         let transcription = transcribe_with_engine(&mut loaded.engine, request)?;
         let transcribe_elapsed = transcribe_started.elapsed();
         loaded.warmed = true;
         tracing::info!(
-            "[SpeechService] transcribe model={} resolved={} total={:.2}s lock_wait={:.2}s engine={:.2}s",
+            "[SpeechService] transcribe model={} resolved={} total={:.2}s engine={:.2}s",
             requested_model,
             resolved_id,
             total_started.elapsed().as_secs_f32(),
-            lock_wait.as_secs_f32(),
             transcribe_elapsed.as_secs_f32()
         );
 
@@ -267,17 +267,13 @@ impl SpeechService {
 
     pub fn preload_and_warm(&self, model_id: &str) -> Result<()> {
         let total_started = Instant::now();
-        self.ensure_loaded(model_id)?;
-        let lock_started = Instant::now();
-        let mut guard = self.lock_loaded()?;
-        let lock_wait = lock_started.elapsed();
+        let mut guard = self.ensure_loaded(model_id)?;
         let loaded = loaded_engine(&mut guard)?;
         if loaded.warmed {
             tracing::info!(
-                "[SpeechService] warm model={} skipped already_warmed total={:.2}s lock_wait={:.2}s",
+                "[SpeechService] warm model={} skipped already_warmed total={:.2}s",
                 model_id,
-                total_started.elapsed().as_secs_f32(),
-                lock_wait.as_secs_f32()
+                total_started.elapsed().as_secs_f32()
             );
             return Ok(());
         }
@@ -298,10 +294,9 @@ impl SpeechService {
         )?;
         loaded.warmed = true;
         tracing::info!(
-            "[SpeechService] warm model={} total={:.2}s lock_wait={:.2}s silence_transcribe={:.2}s",
+            "[SpeechService] warm model={} total={:.2}s silence_transcribe={:.2}s",
             model_id,
             total_started.elapsed().as_secs_f32(),
-            lock_wait.as_secs_f32(),
             warm_started.elapsed().as_secs_f32()
         );
         Ok(())
@@ -327,8 +322,7 @@ impl SpeechService {
 
     #[cfg(streaming_engines)]
     pub fn streaming_transcribe_chunk(&self, model_id: &str, chunk: &[f32]) -> Result<String> {
-        self.ensure_loaded(model_id)?;
-        let mut guard = self.lock_loaded()?;
+        let mut guard = self.ensure_loaded(model_id)?;
         loaded_engine(&mut guard)?
             .engine
             .streaming_transcribe_chunk(chunk)
@@ -352,10 +346,7 @@ impl SpeechService {
         language: Option<String>,
         dictionary: Vec<String>,
     ) {
-        if self.ensure_loaded(model_id).is_err() {
-            return;
-        }
-        if let Ok(mut guard) = self.loaded.lock()
+        if let Ok(mut guard) = self.ensure_loaded(model_id)
             && let Some(loaded) = guard.as_mut()
         {
             loaded.engine.streaming_configure(language, dictionary);
@@ -387,7 +378,7 @@ impl SpeechService {
             .unwrap_or_default()
     }
 
-    fn ensure_loaded(&self, model_id: &str) -> Result<String> {
+    fn ensure_loaded(&self, model_id: &str) -> Result<MutexGuard<'_, Option<LoadedEngine>>> {
         let total_started = Instant::now();
         let resolve_started = Instant::now();
         let resolved = self.resolve(model_id)?;
@@ -411,6 +402,7 @@ impl SpeechService {
                 resolved.path.display(),
                 bytes
             );
+            *guard = None;
             let engine = load_engine(&resolved)?;
             let load_elapsed = load_started.elapsed();
             *guard = Some(LoadedEngine {
@@ -437,7 +429,7 @@ impl SpeechService {
             );
         }
 
-        Ok(resolved.id)
+        Ok(guard)
     }
 
     fn lock_loaded(&self) -> Result<MutexGuard<'_, Option<LoadedEngine>>> {
