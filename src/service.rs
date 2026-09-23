@@ -582,11 +582,6 @@ fn transcribe_with_engine(
         EngineInstance::Whisper(engine) => {
             let wants_timestamps = request.timestamps || request.timestamp_granularity.is_some();
             let params = crate::engines::whisper::WhisperInferenceParams {
-                dictionary: if request.prompt.is_some() {
-                    Vec::new()
-                } else {
-                    request.dictionary.clone()
-                },
                 language: request.language,
                 initial_prompt: combined_prompt(request.prompt, &request.dictionary),
                 print_timestamps: wants_timestamps,

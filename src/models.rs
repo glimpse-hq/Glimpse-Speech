@@ -689,6 +689,16 @@ fn artifact_path(dir: &Path, storage: &ModelStorage) -> PathBuf {
 
 /// The single `.gguf` in a directory, when exactly one exists.
 fn gguf_in_dir(dir: &Path) -> Option<PathBuf> {
+    only_file_in_dir(dir, |name| name.to_ascii_lowercase().ends_with(".gguf"))
+}
+
+fn single_file_in_dir(dir: &Path) -> Option<PathBuf> {
+    only_file_in_dir(dir, |name| {
+        !name.starts_with('.') && !name.ends_with(".part") && !name.ends_with(".zip")
+    })
+}
+
+fn only_file_in_dir(dir: &Path, keep: impl Fn(&str) -> bool) -> Option<PathBuf> {
     let mut files = fs::read_dir(dir)
         .ok()?
         .flatten()
@@ -696,25 +706,9 @@ fn gguf_in_dir(dir: &Path) -> Option<PathBuf> {
         .filter(|path| {
             path.is_file()
                 && path
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
-        });
-    let first = files.next()?;
-    files.next().is_none().then_some(first)
-}
-
-fn single_file_in_dir(dir: &Path) -> Option<PathBuf> {
-    let mut files = fs::read_dir(dir)
-        .ok()?
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.is_file()
-                && !path
                     .file_name()
                     .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.starts_with('.'))
+                    .is_some_and(&keep)
         });
     let first = files.next()?;
     files.next().is_none().then_some(first)

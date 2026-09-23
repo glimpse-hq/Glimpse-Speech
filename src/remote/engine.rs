@@ -70,10 +70,6 @@ impl RemoteEngine {
         Self { client, config }
     }
 
-    pub fn config(&self) -> &RemoteConfig {
-        &self.config
-    }
-
     pub async fn transcribe_file(
         &self,
         audio_path: &Path,
