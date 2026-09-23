@@ -222,7 +222,9 @@ async fn serve(args: ServeArgs, cache_dir: PathBuf) -> anyhow::Result<()> {
     let transcription_provider = match remote_endpoint {
         #[cfg(feature = "remote")]
         Some(endpoint) => Some(Arc::new(crate::provider::build_remote_provider(
-            reqwest::Client::new(),
+            reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .build()?,
             crate::remote::RemoteConfig {
                 endpoint,
                 api_key: remote_api_key.unwrap_or_default(),
