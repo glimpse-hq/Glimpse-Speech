@@ -13,7 +13,7 @@ Local speech-to-text for Rust. One crate, four engines, an OpenAI-compatible HTT
 | --- | --- |
 | `whisper` | `engines::whisper::WhisperEngine` |
 | `nvidia` | `engines::parakeet::ParakeetEngine` and `engines::nemotron::NemotronEngine` |
-| `transcribe` | `engines::transcribe::TranscribeEngine` and `diarization::diarize` (Sortformer speaker diarization) (builds transcribe.cpp from source: CMake and a C++ toolchain, plus the Vulkan SDK on Windows and Linux) |
+| `transcribe` | `engines::transcribe::TranscribeEngine` and `diarization::diarize` (speaker diarization with [Nemotron-3 Diarization](https://huggingface.co/Glimpse-Dictation/Nemotron-3-Diarization-gguf), up to 8 speakers) (builds transcribe.cpp from source: CMake and a C++ toolchain, plus the Vulkan SDK on Windows and Linux) |
 | `api` | The OpenAI-compatible HTTP server (`api::serve`) |
 | `remote` | Proxying to a remote OpenAI-compatible endpoint, with local fallback |
 | `cli` | The `glimpse-speech` binary (implies `api`) |
@@ -189,7 +189,7 @@ For Core ML acceleration on Apple Silicon, place the matching `ggml-<name>-encod
 cargo run --example whisper --features whisper -- <model.bin> <audio.wav>
 cargo run --example nvidia --features nvidia -- parakeet <model-dir> <audio.wav>
 cargo run --example nvidia --features nvidia -- nemotron <model-dir> <audio.wav>
-cargo run --example diarize --features transcribe -- <sortformer.gguf> <audio.wav>
+cargo run --example diarize --features transcribe -- <nemotron-3-diarization-Q8_0.gguf> <audio.wav>
 ```
 
 ## Acknowledgments

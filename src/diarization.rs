@@ -1,5 +1,6 @@
-//! Speaker diarization with NVIDIA Streaming Sortformer (4 speakers) through
-//! transcribe.cpp. Produces who-spoke-when turns, no text.
+//! Speaker diarization through transcribe.cpp with NVIDIA Streaming Sortformer:
+//! Nemotron-3 Diarization (up to 8 speakers) or Sortformer v2.1 (up to 4).
+//! Produces who-spoke-when turns, no text.
 
 use std::path::Path;
 
@@ -20,11 +21,11 @@ const MAX_AUDIO_SECONDS: u64 = 3 * 60 * 60;
 pub struct SpeakerTurn {
     pub start_ms: u64,
     pub end_ms: u64,
-    /// 1-based, in order of first appearance, at most 4.
+    /// 1-based, in order of first appearance, at most 8 (4 for Sortformer v2.1).
     pub speaker: u32,
 }
 
-/// Runs Sortformer over a whole clip of mono samples at any rate, resampled to 16 kHz internally.
+/// Runs the diarizer over a whole clip of mono samples at any rate, resampled to 16 kHz internally.
 pub fn diarize(
     model_path: &Path,
     samples: &[i16],
@@ -63,7 +64,7 @@ pub fn diarize(
         },
     )
     .map_err(transcribe_error)?;
-    if model.arch() != "sortformer" {
+    if !matches!(model.arch().as_str(), "sortformer" | "nemotron3_diar") {
         return Err(error(format!(
             "{} is not a Sortformer diarization model",
             model_path.display()
