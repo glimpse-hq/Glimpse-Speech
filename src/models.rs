@@ -489,7 +489,11 @@ impl ModelInstallManager {
 
                 match response.chunk().await {
                     Ok(Some(chunk)) => {
-                        retries = 0;
+                        // Progress only earns fresh retries when a retry can
+                        // resume from it; a restart from zero must stay bounded.
+                        if resume_supported {
+                            retries = 0;
+                        }
                         output.write_all(&chunk).await?;
                         if let Some(hasher) = hasher.as_mut() {
                             hasher.update(&chunk);
@@ -1179,6 +1183,43 @@ mod tests {
             }
         });
         (url, offsets)
+    }
+
+    #[tokio::test]
+    async fn non_resumable_server_that_keeps_dropping_gives_up() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/ggml-test.bin", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(0usize));
+        let seen = Arc::clone(&requests);
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = socket.read(&mut buf).await;
+                *seen.lock().unwrap() += 1;
+                let head = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 100000\r\nConnection: close\r\n\r\n";
+                let _ = socket.write_all(head.as_bytes()).await;
+                let _ = socket.write_all(&[1u8; 40_000]).await;
+            }
+        });
+
+        let root =
+            std::env::temp_dir().join(format!("glimpse-speech-no-range-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let manager = ModelInstallManager::new(&root);
+        let mut spec = whisper_spec("whisper_no_range", "ggml-test.bin", Some(100_000));
+        spec.files[0].url = url;
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(60),
+            manager.install(&spec, Default::default()),
+        )
+        .await;
+
+        assert!(result.expect("install must not retry forever").is_err());
+        assert!(*requests.lock().unwrap() <= MAX_STREAM_RETRIES + 2);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[tokio::test]
