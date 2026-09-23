@@ -19,7 +19,7 @@ transcribe = ["dep:transcribe-cpp"]
 parakeet = ["nvidia"]
 all = ["whisper", "nvidia", "transcribe"]
 api = ["dep:axum", "dep:tower-http"]
-remote = ["reqwest/multipart", "dep:flacenc", "dep:base64"]
+remote = ["reqwest/multipart", "dep:flacenc", "dep:base64", "dep:httpdate"]
 cleanup-apple = ["dep:fm-rs"]
 apple-speech = []
 cli = ["api", "dep:clap", "dep:directories"]
@@ -32,12 +32,12 @@ clap = { version = "4.6", features = ["derive", "env"], optional = true }
 directories = { version = "6", optional = true }
 flacenc = { version = "0.5", default-features = false, features = ["par"], optional = true }
 hound = "3.5.1"
-httpdate = "1"
+httpdate = { version = "1", optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
-tokio = { version = "1", features = ["fs", "io-util", "net", "rt-multi-thread", "signal", "time"] }
+tokio = { version = "1", features = ["fs", "io-util", "net", "rt-multi-thread", "time"] }
 tokio-util = "0.7"
 tower-http = { version = "0.7", features = ["cors"], optional = true }
 tracing = "0.1"
