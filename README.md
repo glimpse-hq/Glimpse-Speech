@@ -61,7 +61,7 @@ tracks model id and path, not changes to companion files.
 ## CLI
 
 ```bash
-# Transcribe a file (any format ffmpeg can decode, or 16 kHz mono PCM16 WAV directly)
+# Transcribe a file (WAV is decoded in-process; other formats need ffmpeg)
 glimpse-speech transcribe audio.wav --model ggml-large-v3-turbo-q8_0.bin
 glimpse-speech transcribe audio.m4a --model parakeet-tdt-int8 --engine parakeet
 glimpse-speech transcribe audio.wav --model <model> --response-format srt --timestamps
