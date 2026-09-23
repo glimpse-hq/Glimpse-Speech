@@ -1,7 +1,8 @@
-//! Diarize a mono PCM16 WAV with a Sortformer GGUF model.
+//! Diarize a mono PCM16 WAV with the Nemotron-3 Diarization GGUF
+//! (https://huggingface.co/Glimpse-Dictation/Nemotron-3-Diarization-gguf).
 //!
 //!     cargo run --example diarize --features transcribe -- \
-//!         models/diar_streaming_sortformer_4spk-v2.1-Q8_0.gguf samples/meeting.wav [cpu]
+//!         models/nemotron-3-diarization-Q8_0.gguf samples/meeting.wav [cpu]
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use std::{path::PathBuf, time::Instant};
@@ -9,10 +10,10 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use glimpse_speech::diarization::diarize;
 
     let args: Vec<String> = std::env::args().collect();
-    let model = PathBuf::from(args.get(1).map_or(
-        "models/diar_streaming_sortformer_4spk-v2.1-Q8_0.gguf",
-        String::as_str,
-    ));
+    let model = PathBuf::from(
+        args.get(1)
+            .map_or("models/nemotron-3-diarization-Q8_0.gguf", String::as_str),
+    );
     let wav = PathBuf::from(args.get(2).map_or("samples/meeting.wav", String::as_str));
     let use_gpu = args.get(3).is_none_or(|arg| arg != "cpu");
 

@@ -185,11 +185,21 @@ impl RemoteUpstream {
                 ..response
             }),
             (Err(err), Some(fallback)) if err.should_fallback() => {
-                eprintln!(
-                    "Remote speech temporarily unavailable, falling back to local: {}",
-                    err.user_message()
-                );
-                transcribe_via_fallback(fallback, request).await
+                match local_fallback_request(fallback, request) {
+                    Some(request) => {
+                        tracing::warn!(
+                            "Remote speech temporarily unavailable, falling back to local: {}",
+                            err.user_message()
+                        );
+                        Box::pin(fallback.transcribe(request))
+                            .await
+                            .map_err(|local| {
+                                tracing::warn!("Local fallback failed: {local:?}");
+                                TranscribeError::Remote(err)
+                            })
+                    }
+                    None => Err(TranscribeError::Remote(err)),
+                }
             }
             (Err(err), _) => Err(TranscribeError::Remote(err)),
         }

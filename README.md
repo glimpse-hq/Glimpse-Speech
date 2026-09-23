@@ -13,7 +13,7 @@ Local speech-to-text for Rust. One crate, four engines, an OpenAI-compatible HTT
 | --- | --- |
 | `whisper` | `engines::whisper::WhisperEngine` |
 | `nvidia` | `engines::parakeet::ParakeetEngine` and `engines::nemotron::NemotronEngine` |
-| `transcribe` | `engines::transcribe::TranscribeEngine` and `diarization::diarize` (Sortformer speaker diarization) (builds transcribe.cpp from source: CMake and a C++ toolchain, plus the Vulkan SDK on Windows and Linux) |
+| `transcribe` | `engines::transcribe::TranscribeEngine` and `diarization::diarize` (speaker diarization with [Nemotron-3 Diarization](https://huggingface.co/Glimpse-Dictation/Nemotron-3-Diarization-gguf), up to 8 speakers) (builds transcribe.cpp from source: CMake and a C++ toolchain, plus the Vulkan SDK on Windows and Linux) |
 | `api` | The OpenAI-compatible HTTP server (`api::serve`) |
 | `remote` | Proxying to a remote OpenAI-compatible endpoint, with local fallback |
 | `cli` | The `glimpse-speech` binary (implies `api`) |
@@ -25,7 +25,7 @@ NVIDIA engines are unavailable on Intel macOS (`x86_64-apple-darwin`) because ON
 
 ```toml
 [dependencies]
-glimpse-speech = { git = "https://github.com/glimpse-hq/Glimpse-Speech.git", tag = "1.6.6", features = ["whisper", "nvidia"] }
+glimpse-speech = { git = "https://github.com/glimpse-hq/Glimpse-Speech.git", tag = "1.6.7", features = ["whisper", "nvidia"] }
 ```
 
 The transcribe.cpp dependency is pinned to an exact Git revision, including its
@@ -61,7 +61,7 @@ tracks model id and path, not changes to companion files.
 ## CLI
 
 ```bash
-# Transcribe a file (any format ffmpeg can decode, or 16 kHz mono PCM16 WAV directly)
+# Transcribe a file (WAV is decoded in-process; other formats need ffmpeg)
 glimpse-speech transcribe audio.wav --model ggml-large-v3-turbo-q8_0.bin
 glimpse-speech transcribe audio.m4a --model parakeet-tdt-int8 --engine parakeet
 glimpse-speech transcribe audio.wav --model <model> --response-format srt --timestamps
@@ -79,7 +79,7 @@ glimpse-speech serve --port 11435 --remote-endpoint https://api.openai.com/v1 --
 Useful flags:
 
 - `--engine whisper|parakeet|nemotron|transcribe` (default `whisper`; a `.gguf` model path selects `transcribe` automatically)
-- `--response-format text|json|verbose_json|srt|vtt` (default `text`)
+- `--response-format text|json|verbose_json|srt|vtt` (default `text`; `verbose_json`, `srt` and `vtt` turn on segment timestamps)
 - `--language`, `--prompt`, `--dictionary <term>` (repeatable), `--timestamps`
 - `--cache-dir <path>` or `GLIMPSE_SPEECH_CACHE_DIR` to override the model cache
 - `--json` for machine-readable output
@@ -94,6 +94,7 @@ On macOS the default model cache is `~/Library/Application Support/com.glimpse.d
 | --- | --- |
 | `POST /v1/audio/transcriptions` | Multipart transcription, OpenAI-compatible |
 | `GET /v1/models` | Available models |
+| `GET /health` | Liveness check, no auth |
 
 Multipart fields: `file` (required), `model` (required), `language`, `prompt`, `response_format` (`json`, `text`, `verbose_json`, `srt`, `vtt`), `timestamp_granularities[]` (`segment`, `word`, requires `verbose_json`), `dictionary` (comma separated terms biased into recognition).
 
@@ -108,6 +109,7 @@ Auth and networking:
 
 - Loopback by default; binding to LAN requires `--api-key`
 - Keys are accepted as `Authorization: Bearer <key>` or `x-api-key: <key>`
+- `GLIMPSE_SPEECH_API_KEY` and `GLIMPSE_SPEECH_REMOTE_API_KEY` stand in for `--api-key` and `--remote-api-key`, keeping keys out of the process list
 - `--cors` enables permissive CORS for browser clients
 
 With `--remote-endpoint` set, transcription requests proxy to the remote service. Endpoint quirks (Mistral, OpenRouter, xAI, ElevenLabs, Deepgram, self-hosted servers) are detected automatically, WAV uploads are converted to FLAC to cut upload size, and transient remote failures fall back to the local engine when a local model is installed. Speaker diarization is requested from endpoints that support it (Mistral, xAI, ElevenLabs, Deepgram, Fireworks, and OpenAI's diarize model).
@@ -187,7 +189,7 @@ For Core ML acceleration on Apple Silicon, place the matching `ggml-<name>-encod
 cargo run --example whisper --features whisper -- <model.bin> <audio.wav>
 cargo run --example nvidia --features nvidia -- parakeet <model-dir> <audio.wav>
 cargo run --example nvidia --features nvidia -- nemotron <model-dir> <audio.wav>
-cargo run --example diarize --features transcribe -- <sortformer.gguf> <audio.wav>
+cargo run --example diarize --features transcribe -- <nemotron-3-diarization-Q8_0.gguf> <audio.wav>
 ```
 
 ## Acknowledgments

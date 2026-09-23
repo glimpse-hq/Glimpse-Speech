@@ -70,10 +70,6 @@ impl RemoteEngine {
         Self { client, config }
     }
 
-    pub fn config(&self) -> &RemoteConfig {
-        &self.config
-    }
-
     pub async fn transcribe_file(
         &self,
         audio_path: &Path,
@@ -297,10 +293,14 @@ impl RemoteEngine {
             return Err(parse_upstream_error(status, retry_after, &body));
         }
 
-        let parsed: ModelsResponse = response.json().await.map_err(|err| {
-            transport_error(format!(
-                "Failed to parse remote speech models response: {err}"
-            ))
+        let parsed: ModelsResponse = response.json().await.map_err(|err| RemoteError {
+            kind: RemoteErrorKind::Other,
+            status: status.as_u16(),
+            message: format!("Failed to parse remote speech models response: {err}"),
+            error_type: None,
+            code: None,
+            param: None,
+            retry_after: None,
         })?;
         Ok(parsed.into_ids())
     }

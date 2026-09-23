@@ -43,14 +43,14 @@ pub fn read_wav_samples(wav_path: &Path) -> Result<Vec<f32>, Box<dyn std::error:
 }
 
 pub fn read_audio_samples(path: &Path) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
-    let wav_error = match read_pcm16_wav(path) {
+    let wav_error = match read_wav(path) {
         Ok(samples) => return Ok(samples),
         Err(error) => error,
     };
 
     let ffmpeg = find_ffmpeg().ok_or_else(|| {
         io_error(format!(
-            "Audio must be a PCM int16 WAV, or ffmpeg must be installed to decode {}: {wav_error}",
+            "Audio must be a PCM or float WAV, or ffmpeg must be installed to decode {}: {wav_error}",
             path.display()
         ))
     })?;
@@ -73,16 +73,9 @@ pub fn read_audio_samples(path: &Path) -> Result<Vec<f32>, Box<dyn std::error::E
     read_wav_samples(&converted.path)
 }
 
-fn read_pcm16_wav(path: &Path) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+fn read_wav(path: &Path) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
     let reader = hound::WavReader::open(path)?;
     let spec = reader.spec();
-    if spec.bits_per_sample != 16 || spec.sample_format != hound::SampleFormat::Int {
-        return Err(format!(
-            "Expected PCM int16 samples, found {} bit {:?}",
-            spec.bits_per_sample, spec.sample_format
-        )
-        .into());
-    }
     if spec.channels == 0 {
         return Err("WAV has no channels".into());
     }
@@ -90,20 +83,32 @@ fn read_pcm16_wav(path: &Path) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
         return Err(format!("Unsupported WAV sample rate {} Hz", spec.sample_rate).into());
     }
 
-    let samples = reader
-        .into_samples::<i16>()
-        .collect::<Result<Vec<_>, _>>()?;
+    let samples: Vec<f32> = match (spec.sample_format, spec.bits_per_sample) {
+        (hound::SampleFormat::Float, 32) => {
+            reader.into_samples::<f32>().collect::<Result<_, _>>()?
+        }
+        (hound::SampleFormat::Int, bits @ 1..=32) => {
+            let scale = 1.0 / (1u64 << (bits - 1)) as f32;
+            reader
+                .into_samples::<i32>()
+                .map(|sample| sample.map(|sample| sample as f32 * scale))
+                .collect::<Result<_, _>>()?
+        }
+        (format, bits) => {
+            return Err(format!("Unsupported WAV encoding: {bits} bit {format:?}").into());
+        }
+    };
     let mono = downmix(samples, usize::from(spec.channels));
-    Ok(resample_i16_to_f32(&mono, spec.sample_rate, 16_000))
+    Ok(resample(mono, spec.sample_rate, 16_000))
 }
 
-fn downmix(samples: Vec<i16>, channels: usize) -> Vec<i16> {
+fn downmix(samples: Vec<f32>, channels: usize) -> Vec<f32> {
     if channels == 1 {
         return samples;
     }
     samples
         .chunks_exact(channels)
-        .map(|frame| (frame.iter().map(|&s| i32::from(s)).sum::<i32>() / channels as i32) as i16)
+        .map(|frame| frame.iter().sum::<f32>() / channels as f32)
         .collect()
 }
 
@@ -168,39 +173,45 @@ fn io_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
     io::Error::other(message.into()).into()
 }
 
-/// Converts PCM16 to normalized f32 and resamples to `to_rate`, low-pass
-/// filtering when downsampling so content above the new Nyquist frequency
-/// cannot alias. Equal or zero rates only scale.
+/// Converts PCM16 to normalized f32 and resamples to `to_rate`.
+#[cfg_attr(not(local_engines), allow(dead_code))]
 pub(crate) fn resample_i16_to_f32(samples: &[i16], from_rate: u32, to_rate: u32) -> Vec<f32> {
     const SCALE: f32 = 1.0 / PCM16_SCALE;
 
-    let scaled: Vec<f32> = samples
+    let scaled = samples
         .iter()
         .map(|&sample| f32::from(sample) * SCALE)
         .collect();
-    if scaled.is_empty() || from_rate == 0 || to_rate == 0 || from_rate == to_rate {
-        return scaled;
+    resample(scaled, from_rate, to_rate)
+}
+
+/// Resamples to `to_rate`, low-pass filtering when downsampling so content
+/// above the new Nyquist frequency cannot alias. Equal or zero rates pass
+/// through.
+fn resample(samples: Vec<f32>, from_rate: u32, to_rate: u32) -> Vec<f32> {
+    if samples.is_empty() || from_rate == 0 || to_rate == 0 || from_rate == to_rate {
+        return samples;
     }
 
     let step = f64::from(from_rate) / f64::from(to_rate);
-    let target_len = (scaled.len() as f64 / step).ceil().max(1.0) as usize;
+    let target_len = (samples.len() as f64 / step).ceil().max(1.0) as usize;
     if from_rate > to_rate {
         let filter = PolyphaseFilter::new(f64::from(to_rate) / f64::from(from_rate));
         return (0..target_len)
-            .map(|idx| filter.sample(&scaled, idx as f64 * step))
+            .map(|idx| filter.sample(&samples, idx as f64 * step))
             .collect();
     }
 
-    let last_index = scaled.len() - 1;
+    let last_index = samples.len() - 1;
     (0..target_len)
         .map(|idx| {
             let src_pos = idx as f64 * step;
             let base = src_pos as usize;
             if base >= last_index {
-                return scaled[last_index];
+                return samples[last_index];
             }
             let frac = (src_pos - base as f64) as f32;
-            scaled[base] + (scaled[base + 1] - scaled[base]) * frac
+            samples[base] + (samples[base + 1] - samples[base]) * frac
         })
         .collect()
 }
@@ -283,7 +294,7 @@ fn dot(samples: &[f32], taps: &[f32]) -> f32 {
 
 #[cfg(test)]
 mod resample_tests {
-    use super::{downmix, resample_i16_to_f32};
+    use super::{downmix, read_wav, resample_i16_to_f32};
 
     const SCALE: f32 = 1.0 / super::PCM16_SCALE;
 
@@ -321,10 +332,61 @@ mod resample_tests {
     #[test]
     fn downmix_averages_interleaved_frames() {
         assert_eq!(
-            downmix(vec![100, 300, -32_768, -32_768, 7, 8], 2),
-            vec![200, -32_768, 7]
+            downmix(vec![0.25, 0.75, -1.0, -1.0, 7.0, 8.0], 2),
+            vec![0.5, -1.0, 7.5]
         );
-        assert_eq!(downmix(vec![1, 2, 3], 1), vec![1, 2, 3]);
+        assert_eq!(downmix(vec![1.0, 2.0, 3.0], 1), vec![1.0, 2.0, 3.0]);
+    }
+
+    fn write_wav(
+        name: &str,
+        spec: hound::WavSpec,
+        write: impl FnOnce(&mut hound::WavWriter<std::io::BufWriter<std::fs::File>>),
+    ) -> std::path::PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("glimpse-speech-{name}-{}.wav", std::process::id()));
+        let mut writer = hound::WavWriter::create(&path, spec).unwrap();
+        write(&mut writer);
+        writer.finalize().unwrap();
+        path
+    }
+
+    #[test]
+    fn decodes_float_wav_in_process() {
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: 16_000,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let path = write_wav("float", spec, |writer| {
+            for _ in 0..100 {
+                writer.write_sample(0.5f32).unwrap();
+                writer.write_sample(-0.25f32).unwrap();
+            }
+        });
+        let samples = read_wav(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(samples, vec![0.125; 100]);
+    }
+
+    #[test]
+    fn decodes_24_bit_wav_in_process() {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 48_000,
+            bits_per_sample: 24,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let path = write_wav("int24", spec, |writer| {
+            for _ in 0..4_800 {
+                writer.write_sample(1i32 << 22).unwrap();
+            }
+        });
+        let samples = read_wav(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(samples.len(), 1_600);
+        assert!((samples[800] - 0.5).abs() < 1e-3, "sample {}", samples[800]);
     }
 
     fn rms(samples: &[f32]) -> f32 {

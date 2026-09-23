@@ -128,10 +128,22 @@ struct UpstreamErrorBody {
     message: String,
     #[serde(default, rename = "type")]
     error_type: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_or_number")]
     code: Option<String>,
     #[serde(default)]
     param: Option<String>,
+}
+
+fn string_or_number<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    Ok(
+        match Option::<serde_json::Value>::deserialize(deserializer)? {
+            Some(serde_json::Value::String(code)) => Some(code),
+            Some(serde_json::Value::Number(code)) => Some(code.to_string()),
+            _ => None,
+        },
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -316,6 +328,9 @@ fn classify_upstream_error(
     ) {
         return RemoteErrorKind::Unauthorized;
     }
+    if matches_code(code, &["model_not_found"]) {
+        return RemoteErrorKind::NotFound;
+    }
 
     if let Some(error_type) = error_type {
         let normalized = error_type.to_ascii_lowercase();
@@ -376,6 +391,22 @@ mod tests {
         assert_eq!(err.kind, RemoteErrorKind::RateLimited);
         assert_eq!(err.code.as_deref(), Some("rate_limit_exceeded"));
         assert_eq!(err.retry_after, Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn openai_missing_model_is_not_found() {
+        let body = r#"{"error":{"message":"The model `x` does not exist","type":"invalid_request_error","code":"model_not_found"}}"#;
+        let err = parse_upstream_error(StatusCode::NOT_FOUND, None, body);
+        assert_eq!(err.kind, RemoteErrorKind::NotFound);
+    }
+
+    #[test]
+    fn numeric_error_codes_keep_the_message() {
+        let body = r#"{"error":{"code":401,"message":"No auth credentials found"}}"#;
+        let err = parse_upstream_error(StatusCode::UNAUTHORIZED, None, body);
+        assert_eq!(err.kind, RemoteErrorKind::Unauthorized);
+        assert_eq!(err.code.as_deref(), Some("401"));
+        assert_eq!(err.message, "No auth credentials found");
     }
 
     #[test]

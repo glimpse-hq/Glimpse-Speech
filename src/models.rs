@@ -363,22 +363,17 @@ impl ModelInstallManager {
             return Ok(false);
         }
 
-        let replace_existing = !file.extract && target_path.exists();
-        let download_path = if file.extract {
-            target_dir.join(format!("{}.zip", file.path))
-        } else if replace_existing {
-            replacement_download_path(&target_path)
-        } else {
-            target_path.clone()
-        };
-        let mut downloaded = if replace_existing {
-            0
-        } else {
-            fs::metadata(&download_path).map_or(0, |m| m.len())
-        };
+        // Bytes land beside the target and move into place only once complete,
+        // so an interrupted download resumes instead of passing as installed.
+        let download_path = target_dir.join(format!(
+            "{}.{}",
+            file.path,
+            if file.extract { "zip" } else { "part" }
+        ));
+        let mut downloaded = fs::metadata(&download_path).map_or(0, |m| m.len());
         let mut total_size: u64 = file.size_bytes.unwrap_or(0);
         let mut retries = 0usize;
-        let mut resume_supported = !replace_existing;
+        let mut resume_supported = true;
 
         loop {
             if is_cancelled(options) {
@@ -397,31 +392,28 @@ impl ModelInstallManager {
                 request = request.header(RANGE, format!("bytes={downloaded}-"));
             }
 
-            let mut response = request
-                .send()
-                .await
-                .with_context(|| format!("download {}", file.path))?;
+            let mut response = match request.send().await {
+                Ok(response) => response,
+                Err(err) if can_retry(&mut retries) => {
+                    tracing::warn!("[models] retrying {} after {err}", file.path);
+                    wait_before_retry(retries).await;
+                    continue;
+                }
+                Err(err) => return Err(anyhow!(err).context(format!("download {}", file.path))),
+            };
 
-            if resume_supported && downloaded > 0 && response.status() == StatusCode::OK {
-                downloaded = 0;
-                total_size = file.size_bytes.unwrap_or(0);
-                let _ = fs::remove_file(&download_path);
+            if resume_supported
+                && downloaded > 0
+                && matches!(
+                    response.status(),
+                    StatusCode::OK | StatusCode::RANGE_NOT_SATISFIABLE
+                )
+            {
                 resume_supported = false;
                 continue;
             }
 
             if !response.status().is_success() {
-                if resume_supported
-                    && downloaded > 0
-                    && response.status() == StatusCode::RANGE_NOT_SATISFIABLE
-                {
-                    downloaded = 0;
-                    total_size = file.size_bytes.unwrap_or(0);
-                    let _ = fs::remove_file(&download_path);
-                    resume_supported = false;
-                    continue;
-                }
-
                 if response.status().is_server_error()
                     || response.status() == StatusCode::TOO_MANY_REQUESTS
                 {
@@ -497,6 +489,11 @@ impl ModelInstallManager {
 
                 match response.chunk().await {
                     Ok(Some(chunk)) => {
+                        // Progress only earns fresh retries when a retry can
+                        // resume from it; a restart from zero must stay bounded.
+                        if resume_supported {
+                            retries = 0;
+                        }
                         output.write_all(&chunk).await?;
                         if let Some(hasher) = hasher.as_mut() {
                             hasher.update(&chunk);
@@ -512,7 +509,7 @@ impl ModelInstallManager {
                     Ok(None) => {
                         if total_size > 0 && downloaded < total_size {
                             if !can_retry(&mut retries) {
-                                let _ = fs::remove_file(&download_path);
+                                let _ = output.flush().await;
                                 return Err(anyhow!(
                                     "Connection closed early while downloading {}",
                                     file.path
@@ -547,7 +544,7 @@ impl ModelInstallManager {
                         if file.extract {
                             extract_archive(&download_path, &target_path, file, sha_verified)
                                 .with_context(|| format!("extract {}", file.path))?;
-                        } else if replace_existing {
+                        } else {
                             replace_existing_path(&download_path, &target_path).with_context(
                                 || format!("replace model file {}", target_path.display()),
                             )?;
@@ -556,7 +553,7 @@ impl ModelInstallManager {
                     }
                     Err(err) => {
                         if !can_retry(&mut retries) {
-                            let _ = fs::remove_file(&download_path);
+                            let _ = output.flush().await;
                             return Err(anyhow!(
                                 "Network interrupted while downloading {}",
                                 file.path
@@ -613,7 +610,11 @@ pub fn infer_engine(reference: &str) -> Option<ModelEngine> {
         ModelEngine::Transcribe,
     ];
 
-    let lower = reference.to_ascii_lowercase();
+    let name = Path::new(reference)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(reference);
+    let lower = name.to_ascii_lowercase();
     if lower.ends_with(".gguf") {
         return Some(ModelEngine::Transcribe);
     }
@@ -692,6 +693,16 @@ fn artifact_path(dir: &Path, storage: &ModelStorage) -> PathBuf {
 
 /// The single `.gguf` in a directory, when exactly one exists.
 fn gguf_in_dir(dir: &Path) -> Option<PathBuf> {
+    only_file_in_dir(dir, |name| name.to_ascii_lowercase().ends_with(".gguf"))
+}
+
+fn single_file_in_dir(dir: &Path) -> Option<PathBuf> {
+    only_file_in_dir(dir, |name| {
+        !name.starts_with('.') && !name.ends_with(".part") && !name.ends_with(".zip")
+    })
+}
+
+fn only_file_in_dir(dir: &Path, keep: impl Fn(&str) -> bool) -> Option<PathBuf> {
     let mut files = fs::read_dir(dir)
         .ok()?
         .flatten()
@@ -699,25 +710,9 @@ fn gguf_in_dir(dir: &Path) -> Option<PathBuf> {
         .filter(|path| {
             path.is_file()
                 && path
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
-        });
-    let first = files.next()?;
-    files.next().is_none().then_some(first)
-}
-
-fn single_file_in_dir(dir: &Path) -> Option<PathBuf> {
-    let mut files = fs::read_dir(dir)
-        .ok()?
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.is_file()
-                && !path
                     .file_name()
                     .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.starts_with('.'))
+                    .is_some_and(&keep)
         });
     let first = files.next()?;
     files.next().is_none().then_some(first)
@@ -768,14 +763,6 @@ fn file_ready(dir: &Path, file: &RemoteFile) -> bool {
     }
 
     true
-}
-
-fn replacement_download_path(path: &Path) -> PathBuf {
-    sibling_temp_path(path, "download")
-}
-
-fn replacement_backup_path(path: &Path) -> PathBuf {
-    sibling_temp_path(path, "backup")
 }
 
 fn sibling_temp_path(path: &Path, purpose: &str) -> PathBuf {
@@ -1002,7 +989,7 @@ fn replace_existing_path(source: &Path, target: &Path) -> io::Result<()> {
         return fs::rename(source, target);
     }
 
-    let backup = replacement_backup_path(target);
+    let backup = sibling_temp_path(target, "backup");
     fs::rename(target, &backup)?;
     match fs::rename(source, target) {
         Ok(()) => {
@@ -1131,6 +1118,7 @@ fn emit_verifying_progress(model: &str, options: &InstallOptions<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     fn whisper_spec(id: &str, artifact: &str, size: Option<u64>) -> InstallSpec {
         InstallSpec {
@@ -1149,6 +1137,139 @@ mod tests {
             }],
             variant: None,
         }
+    }
+
+    async fn serve_with_ranges(body: Vec<u8>) -> (String, Arc<Mutex<Vec<u64>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/ggml-test.bin", listener.local_addr().unwrap());
+        let offsets = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&offsets);
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut request = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let n = socket.read(&mut buf).await.unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buf[..n]);
+                }
+                let request = String::from_utf8_lossy(&request).to_ascii_lowercase();
+                let start = request
+                    .lines()
+                    .find_map(|line| line.strip_prefix("range: bytes="))
+                    .and_then(|range| range.trim_end_matches('-').parse::<u64>().ok())
+                    .unwrap_or(0);
+                seen.lock().unwrap().push(start);
+                let slice = &body[start as usize..];
+                let status = if start > 0 {
+                    format!(
+                        "206 Partial Content\r\nContent-Range: bytes {start}-{}/{}",
+                        body.len() - 1,
+                        body.len()
+                    )
+                } else {
+                    "200 OK".to_string()
+                };
+                let head = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    slice.len()
+                );
+                let _ = socket.write_all(head.as_bytes()).await;
+                let _ = socket.write_all(slice).await;
+            }
+        });
+        (url, offsets)
+    }
+
+    #[tokio::test]
+    async fn non_resumable_server_that_keeps_dropping_gives_up() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/ggml-test.bin", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(0usize));
+        let seen = Arc::clone(&requests);
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = socket.read(&mut buf).await;
+                *seen.lock().unwrap() += 1;
+                let head = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 100000\r\nConnection: close\r\n\r\n";
+                let _ = socket.write_all(head.as_bytes()).await;
+                let _ = socket.write_all(&[1u8; 40_000]).await;
+            }
+        });
+
+        let root =
+            std::env::temp_dir().join(format!("glimpse-speech-no-range-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let manager = ModelInstallManager::new(&root);
+        let mut spec = whisper_spec("whisper_no_range", "ggml-test.bin", Some(100_000));
+        spec.files[0].url = url;
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(60),
+            manager.install(&spec, Default::default()),
+        )
+        .await;
+
+        assert!(result.expect("install must not retry forever").is_err());
+        assert!(*requests.lock().unwrap() <= MAX_STREAM_RETRIES + 2);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn interrupted_download_resumes_from_part_file() {
+        let root =
+            std::env::temp_dir().join(format!("glimpse-speech-resume-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let body: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+        let (url, offsets) = serve_with_ranges(body.clone()).await;
+        let manager = ModelInstallManager::new(&root);
+        let mut spec = whisper_spec("whisper_resume", "ggml-test.bin", Some(body.len() as u64));
+        spec.files[0].url = url;
+        spec.files[0].sha256 = Some(hex_encode(&Sha256::digest(&body)));
+
+        let dir = manager.model_dir(&spec.id);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("ggml-test.bin.part"), &body[..80_000]).unwrap();
+        assert!(!manager.status(&spec).unwrap().installed);
+
+        let status = manager.install(&spec, Default::default()).await.unwrap();
+
+        assert!(status.installed);
+        assert_eq!(*offsets.lock().unwrap(), vec![80_000]);
+        assert_eq!(fs::read(dir.join("ggml-test.bin")).unwrap(), body);
+        assert!(!dir.join("ggml-test.bin.part").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn redownload_replaces_a_truncated_file_only_when_complete() {
+        let root =
+            std::env::temp_dir().join(format!("glimpse-speech-replace-dl-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let body = vec![7u8; 50_000];
+        let (url, offsets) = serve_with_ranges(body.clone()).await;
+        let manager = ModelInstallManager::new(&root);
+        let mut spec = whisper_spec("whisper_replace", "ggml-test.bin", Some(body.len() as u64));
+        spec.files[0].url = url;
+
+        let dir = manager.model_dir(&spec.id);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("ggml-test.bin"), b"truncated").unwrap();
+
+        let status = manager.install(&spec, Default::default()).await.unwrap();
+
+        assert!(status.installed);
+        assert_eq!(*offsets.lock().unwrap(), vec![0]);
+        assert_eq!(fs::read(dir.join("ggml-test.bin")).unwrap(), body);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -1199,6 +1320,11 @@ mod tests {
         );
         assert_eq!(infer_engine("apple"), Some(ModelEngine::Apple));
         assert_eq!(infer_engine("ggml-turbo.bin"), None);
+        assert_eq!(infer_engine("/models/parakeet/ggml-small.bin"), None);
+        assert_eq!(
+            infer_engine("/models/whisper/parakeet-tdt-int8"),
+            Some(ModelEngine::Parakeet)
+        );
     }
 
     #[test]

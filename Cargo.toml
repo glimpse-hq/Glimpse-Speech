@@ -1,6 +1,6 @@
 [package]
 name = "glimpse-speech"
-version = "1.6.6"
+version = "1.6.7"
 edition = "2024"
 resolver = "3"
 rust-version = "1.88"
@@ -19,7 +19,7 @@ transcribe = ["dep:transcribe-cpp"]
 parakeet = ["nvidia"]
 all = ["whisper", "nvidia", "transcribe"]
 api = ["dep:axum", "dep:tower-http"]
-remote = ["reqwest/multipart", "dep:flacenc", "dep:base64"]
+remote = ["reqwest/multipart", "dep:flacenc", "dep:base64", "dep:httpdate"]
 cleanup-apple = ["dep:fm-rs"]
 apple-speech = []
 cli = ["api", "dep:clap", "dep:directories"]
@@ -28,16 +28,16 @@ cli = ["api", "dep:clap", "dep:directories"]
 anyhow = "1"
 axum = { version = "0.8", features = ["multipart"], optional = true }
 base64 = { version = "0.23", optional = true }
-clap = { version = "4.6", features = ["derive"], optional = true }
+clap = { version = "4.6", features = ["derive", "env"], optional = true }
 directories = { version = "6", optional = true }
 flacenc = { version = "0.5", default-features = false, features = ["par"], optional = true }
 hound = "3.5.1"
-httpdate = "1"
+httpdate = { version = "1", optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
-tokio = { version = "1", features = ["fs", "io-util", "net", "rt-multi-thread", "signal", "time"] }
+tokio = { version = "1", features = ["fs", "io-util", "net", "rt-multi-thread", "time"] }
 tokio-util = "0.7"
 tower-http = { version = "0.7", features = ["cors"], optional = true }
 tracing = "0.1"
@@ -57,24 +57,24 @@ libc = "0.2"
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
 whisper-rs = { version = "0.16.0", features = ["metal", "coreml", "raw-api"], optional = true }
 fm-rs = { version = "0.3.0", optional = true }
-transcribe-cpp = { git = "https://github.com/LegendarySpy/transcribe.cpp.git", rev = "2be9c5078633be1a56bead5752d5d042ff1ca91b", default-features = false, features = ["metal", "coreml"], optional = true }
+transcribe-cpp = { git = "https://github.com/LegendarySpy/transcribe.cpp.git", rev = "b893ed29480ea6392fb9859e64aaefaaa475230b", default-features = false, features = ["metal", "coreml"], optional = true }
 
 [target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
 whisper-rs = { version = "0.16.0", features = ["metal", "raw-api"], optional = true }
-transcribe-cpp = { git = "https://github.com/LegendarySpy/transcribe.cpp.git", rev = "2be9c5078633be1a56bead5752d5d042ff1ca91b", default-features = false, features = ["metal"], optional = true }
+transcribe-cpp = { git = "https://github.com/LegendarySpy/transcribe.cpp.git", rev = "b893ed29480ea6392fb9859e64aaefaaa475230b", default-features = false, features = ["metal"], optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 whisper-rs = { version = "0.16.0", features = ["vulkan", "raw-api"], optional = true }
-transcribe-cpp = { git = "https://github.com/LegendarySpy/transcribe.cpp.git", rev = "2be9c5078633be1a56bead5752d5d042ff1ca91b", default-features = false, features = ["vulkan"], optional = true }
+transcribe-cpp = { git = "https://github.com/LegendarySpy/transcribe.cpp.git", rev = "b893ed29480ea6392fb9859e64aaefaaa475230b", default-features = false, features = ["vulkan"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 whisper-rs = { version = "0.16.0", features = ["vulkan", "raw-api"], optional = true }
-transcribe-cpp = { git = "https://github.com/LegendarySpy/transcribe.cpp.git", rev = "2be9c5078633be1a56bead5752d5d042ff1ca91b", default-features = false, features = ["vulkan"], optional = true }
+transcribe-cpp = { git = "https://github.com/LegendarySpy/transcribe.cpp.git", rev = "b893ed29480ea6392fb9859e64aaefaaa475230b", default-features = false, features = ["vulkan"], optional = true }
 
 # Intel Mac excluded: ort has no prebuilt onnxruntime there (Silero VAD falls
 # back to keeping all speech, see vad.rs) and parakeet models don't run on it.
 [target.'cfg(not(all(target_os = "macos", target_arch = "x86_64")))'.dependencies]
-parakeet-rs = { version = "0.3.7", optional = true }
+parakeet-rs = { version = "0.3.8", optional = true }
 ort = { version = "=2.0.0-rc.13", optional = true }
 
 [[example]]
