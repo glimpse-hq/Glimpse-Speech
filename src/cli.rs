@@ -3,13 +3,17 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::{Context, anyhow, bail};
+use anyhow::{Context, anyhow};
+use clap::builder::TypedValueParser;
 use clap::{Parser, Subcommand};
 use directories::ProjectDirs;
 
 use crate::{
     TimestampGranularity, Transcription,
-    api::{ApiConfig, ApiEventSink, ResponseFormat, format_srt, format_vtt, verbose_response},
+    api::{
+        ApiConfig, ApiEventSink, ApiModelInfo, ResponseFormat, format_srt, format_vtt,
+        verbose_response,
+    },
     models::{
         InstallSpec, ModelEngine, ModelInstallManager, ModelStatus, ModelStorage, RemoteFile,
     },
@@ -69,8 +73,13 @@ enum Command {
         language: Option<String>,
         #[arg(long)]
         prompt: Option<String>,
-        #[arg(long, default_value = "text")]
-        response_format: String,
+        #[arg(
+            long,
+            default_value = "text",
+            value_parser = clap::builder::PossibleValuesParser::new(["text", "json", "verbose_json", "srt", "vtt"])
+                .try_map(|value| value.parse::<ResponseFormat>()),
+        )]
+        response_format: ResponseFormat,
         #[arg(long)]
         timestamps: bool,
         #[arg(long = "dictionary")]
@@ -89,20 +98,19 @@ struct ServeArgs {
     model: Option<String>,
     #[arg(long, value_enum, default_value_t = ModelEngine::Whisper)]
     engine: ModelEngine,
-    #[arg(long)]
+    #[arg(long, env = "GLIMPSE_SPEECH_API_KEY", hide_env_values = true)]
     api_key: Option<String>,
     /// Upstream speech endpoint (OpenAI-compatible, ElevenLabs, or Deepgram). When set, transcriptions proxy remotely.
     #[arg(long)]
     remote_endpoint: Option<String>,
-    #[arg(long)]
+    #[arg(long, env = "GLIMPSE_SPEECH_REMOTE_API_KEY", hide_env_values = true)]
     remote_api_key: Option<String>,
     #[arg(long)]
     remote_model: Option<String>,
     /// Enable permissive CORS headers for browser clients.
     #[arg(long)]
     cors: bool,
-    /// Deprecated compatibility flag. CORS is disabled by default.
-    #[arg(long = "no-cors")]
+    #[arg(long = "no-cors", hide = true)]
     no_cors: bool,
 }
 
@@ -148,6 +156,11 @@ pub async fn run() -> anyhow::Result<()> {
             timestamps,
             dictionary,
         } => {
+            let format = match response_format {
+                ResponseFormat::Text if cli.json => ResponseFormat::Json,
+                format => format,
+            };
+            let timestamps = timestamps || format.needs_timestamps();
             let service = SpeechService::new_loose_with_engine(cache_dir, engine);
             let response = service.transcribe(TranscribeRequest {
                 audio: AudioInput::WavPath(audio),
@@ -158,7 +171,7 @@ pub async fn run() -> anyhow::Result<()> {
                 timestamps,
                 timestamp_granularity: timestamps.then_some(TimestampGranularity::Segment),
             })?;
-            print_transcription_response(response, &response_format, cli.json)
+            print_transcription_response(response, format)
         }
         Command::Serve(args) => serve(args, cache_dir).await,
     }
@@ -194,6 +207,7 @@ async fn serve(args: ServeArgs, cache_dir: PathBuf) -> anyhow::Result<()> {
         api_key_required,
         cors_enabled,
     });
+    let installed_models_dir = cache_dir.clone();
     let service = Arc::new(SpeechService::new_loose_with_engine(cache_dir, engine));
 
     if !remote_enabled && let Some(model_id) = model.clone() {
@@ -221,7 +235,7 @@ async fn serve(args: ServeArgs, cache_dir: PathBuf) -> anyhow::Result<()> {
         #[cfg(not(feature = "remote"))]
         Some(_) => {
             let _ = (remote_api_key, remote_model);
-            bail!("Remote speech requires the `remote` feature");
+            anyhow::bail!("Remote speech requires the `remote` feature");
         }
         None => None,
     };
@@ -235,7 +249,20 @@ async fn serve(args: ServeArgs, cache_dir: PathBuf) -> anyhow::Result<()> {
         cors: cors_enabled,
         transcription_provider,
         local_models: Vec::new(),
-        local_model_source: None,
+        local_model_source: Some(Arc::new(move || {
+            installed_model_ids(&installed_models_dir)
+                .into_iter()
+                .map(|id| {
+                    ApiModelInfo::new(
+                        id.clone(),
+                        id,
+                        "Installed in the local model cache.".to_string(),
+                        vec!["Local".to_string()],
+                        Vec::new(),
+                    )
+                })
+                .collect()
+        })),
     })
     .await
 }
@@ -281,6 +308,7 @@ impl ServeBanner {
              Serving:\n\
              - Models: GET {base_url}/v1/models\n\
              - Transcriptions: POST {base_url}/v1/audio/transcriptions\n\
+             - Health: GET {base_url}/health\n\
              Model cache: {}\n\
              Backend: {backend}\n\
              Engine: {}\n\
@@ -393,30 +421,19 @@ fn print_status(status: &ModelStatus, json: bool) -> anyhow::Result<()> {
 
 fn print_transcription_response(
     response: Transcription,
-    response_format: &str,
-    json: bool,
+    format: ResponseFormat,
 ) -> anyhow::Result<()> {
-    let format = match response_format.parse::<ResponseFormat>() {
-        Ok(ResponseFormat::Text) if json => ResponseFormat::Json,
-        Ok(format) => format,
-        Err(value) => bail!("Unsupported response_format {value}"),
-    };
-
     match format {
         ResponseFormat::Json => println!("{}", serde_json::json!({ "text": response.text })),
-        ResponseFormat::VerboseJson => println!("{}", verbose_json(response)?),
+        ResponseFormat::VerboseJson => println!(
+            "{}",
+            serde_json::to_string_pretty(&verbose_response(response, &[]))?
+        ),
         ResponseFormat::Text => println!("{}", response.text),
         ResponseFormat::Srt => print!("{}", format_srt(&response)),
         ResponseFormat::Vtt => print!("{}", format_vtt(&response)),
     }
     Ok(())
-}
-
-fn verbose_json(response: Transcription) -> anyhow::Result<String> {
-    Ok(serde_json::to_string_pretty(&verbose_response(
-        response,
-        &[],
-    ))?)
 }
 
 #[cfg(test)]
@@ -434,8 +451,7 @@ mod tests {
             duration_ms: 1_500,
         };
 
-        let json: serde_json::Value =
-            serde_json::from_str(&verbose_json(response).unwrap()).unwrap();
+        let json = serde_json::to_value(verbose_response(response, &[])).unwrap();
         assert_eq!(json["text"], "hello world");
         assert_eq!(json["segments"][0]["text"], "hello world");
         assert_eq!(json["segments"][0]["start"], 0.0);

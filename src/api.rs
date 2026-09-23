@@ -16,7 +16,9 @@ use anyhow::{Context, Result, anyhow};
 use axum::{
     Json, Router,
     body::Body,
-    extract::{DefaultBodyLimit, FromRequest, Multipart, Path, Request, State},
+    extract::{
+        DefaultBodyLimit, FromRequest, Multipart, Path, Request, State, multipart::MultipartError,
+    },
     http::{
         HeaderMap, StatusCode,
         header::{CONTENT_TYPE, HOST, ORIGIN},
@@ -125,16 +127,6 @@ struct InstallResponse {
 }
 
 #[derive(Debug, Serialize)]
-struct RemoteModel {
-    id: String,
-    object: &'static str,
-    label: String,
-    description: String,
-    tags: &'static [&'static str],
-    capabilities: &'static [&'static str],
-}
-
-#[derive(Debug, Serialize)]
 struct ListResponse<T> {
     object: &'static str,
     data: Vec<T>,
@@ -153,8 +145,6 @@ struct ParsedTranscriptionRequest {
     request: TranscribeRequest,
     response_format: ResponseFormat,
     timestamp_granularities: Vec<TimestampGranularity>,
-
-    uploaded_file: Option<TempUpload>,
 }
 
 struct TranscriptionRequestParts {
@@ -190,7 +180,7 @@ pub(crate) enum ResponseFormat {
 
 impl ResponseFormat {
     /// Formats that carry timestamps and therefore need segment output.
-    fn needs_timestamps(self) -> bool {
+    pub(crate) fn needs_timestamps(self) -> bool {
         matches!(self, Self::VerboseJson | Self::Srt | Self::Vtt)
     }
 }
@@ -255,7 +245,7 @@ pub async fn serve_with_shutdown(
     config: ApiConfig,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
-    let addr: SocketAddr = format!("{}:{}", config.host, config.port).parse()?;
+    let addr = SocketAddr::new(parse_host(&config.host)?, config.port);
     let api_key = config.api_key.filter(|key| !key.trim().is_empty());
     if !addr.ip().is_loopback() && api_key.is_none() {
         return Err(anyhow!("an API key is required when listening on LAN"));
@@ -282,6 +272,7 @@ pub async fn serve_with_shutdown(
         !state.local_models.is_empty() || state.local_model_source.is_some();
 
     let mut app = Router::new()
+        .route("/health", get(health))
         .route("/v1/models", get(list_models))
         .route("/v1/audio/transcriptions", post(transcribe))
         .layer(DefaultBodyLimit::max(1024 * 1024 * 1024));
@@ -304,6 +295,19 @@ pub async fn serve_with_shutdown(
     Ok(())
 }
 
+fn parse_host(host: &str) -> Result<IpAddr> {
+    let host = host.trim().trim_start_matches('[').trim_end_matches(']');
+    if host.eq_ignore_ascii_case("localhost") {
+        return Ok(IpAddr::from([127, 0, 0, 1]));
+    }
+    host.parse()
+        .with_context(|| format!("`{host}` is not an IP address or `localhost`"))
+}
+
+async fn health() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "status": "ok" }))
+}
+
 async fn list_models(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -323,16 +327,14 @@ async fn list_models(
     Ok(Json(ListResponse::new(models)).into_response())
 }
 
-fn remote_model(id: String) -> RemoteModel {
-    let label = id.clone();
-    RemoteModel {
+fn remote_model(id: String) -> ApiModelInfo {
+    ApiModelInfo::new(
+        id.clone(),
         id,
-        object: "model",
-        label,
-        description: "Remote transcription model configured for this server.".to_string(),
-        tags: &["Remote"],
-        capabilities: &["dictionary_prompt", "timestamps"],
-    }
+        "Remote transcription model configured for this server.".to_string(),
+        vec!["Remote".to_string()],
+        vec!["dictionary_prompt".to_string(), "timestamps".to_string()],
+    )
 }
 
 async fn install_model(
@@ -397,14 +399,16 @@ async fn transcribe(
         )));
     }
 
-    let ParsedTranscriptionRequest {
-        request,
-        response_format,
-        timestamp_granularities,
-        uploaded_file,
-    } = transcribe_request_from_multipart(request, &state).await?;
+    let (
+        ParsedTranscriptionRequest {
+            request,
+            response_format,
+            timestamp_granularities,
+        },
+        _upload,
+    ) = transcribe_request_from_multipart(request, &state).await?;
 
-    let result = state
+    state
         .provider
         .transcribe(request)
         .await
@@ -417,10 +421,7 @@ async fn transcribe(
             );
             format_transcription_response(response, response_format, &timestamp_granularities)
         })
-        .map_err(map_transcribe_error);
-
-    drop(uploaded_file);
-    result
+        .map_err(map_transcribe_error)
 }
 
 impl ApiState {
@@ -460,14 +461,19 @@ fn authorize(state: &ApiState, headers: &HeaderMap) -> Result<(), ApiError> {
     let bearer = headers
         .get("authorization")
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .map(str::trim);
+        .and_then(|value| value.split_once(' '))
+        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
+        .map(|(_, token)| token.trim());
     let api_key = headers
         .get("x-api-key")
         .and_then(|value| value.to_str().ok())
         .map(str::trim);
 
-    if bearer == Some(expected.as_ref()) || api_key == Some(expected.as_ref()) {
+    if [bearer, api_key]
+        .into_iter()
+        .flatten()
+        .any(|candidate| constant_time_eq(candidate.as_bytes(), expected.as_bytes()))
+    {
         Ok(())
     } else {
         Err((
@@ -475,6 +481,15 @@ fn authorize(state: &ApiState, headers: &HeaderMap) -> Result<(), ApiError> {
             Json(error_body("Missing or invalid API key")),
         ))
     }
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .fold(0u8, |diff, (a, b)| diff | (a ^ b))
+            == 0
 }
 
 fn is_loopback_host(headers: &HeaderMap) -> bool {
@@ -548,7 +563,6 @@ fn build_transcription_request(
         },
         response_format,
         timestamp_granularities,
-        uploaded_file: None,
     })
 }
 
@@ -589,7 +603,9 @@ fn format_transcription_response(
             Json(verbose_response(response, timestamp_granularities)).into_response()
         }
         ResponseFormat::Text => text_response(response.text, "text/plain; charset=utf-8"),
-        ResponseFormat::Srt => text_response(format_srt(&response), "application/x-subrip"),
+        ResponseFormat::Srt => {
+            text_response(format_srt(&response), "application/x-subrip; charset=utf-8")
+        }
         ResponseFormat::Vtt => text_response(format_vtt(&response), "text/vtt; charset=utf-8"),
     }
 }
@@ -602,9 +618,10 @@ pub(crate) fn verbose_response(
     let words = timestamp_granularities
         .contains(&TimestampGranularity::Word)
         .then(|| verbose_words(&response));
-    let duration = segments
-        .last()
-        .map_or(response.duration_ms as f32 / 1000.0, |segment| segment.end);
+    let duration = match response.duration_ms {
+        0 => segments.last().map_or(0.0, |segment| segment.end),
+        duration_ms => duration_ms as f32 / 1000.0,
+    };
 
     VerboseTranscriptionResponse {
         task: "transcribe",
@@ -719,7 +736,13 @@ pub(crate) fn format_vtt(response: &Transcription) -> String {
 }
 
 pub(crate) fn caption_segments(response: &Transcription) -> Vec<crate::TranscriptionSegment> {
-    let mut segments = response.segments.clone().unwrap_or_default();
+    let mut segments: Vec<_> = response
+        .segments
+        .iter()
+        .flatten()
+        .filter(|segment| !segment.text.trim().is_empty())
+        .cloned()
+        .collect();
     if segments.is_empty() && !response.text.is_empty() {
         segments.push(crate::TranscriptionSegment {
             start: 0.0,
@@ -742,10 +765,10 @@ fn format_timestamp(seconds: f32, decimal_separator: char) -> String {
 async fn transcribe_request_from_multipart(
     request: Request<Body>,
     state: &ApiState,
-) -> Result<ParsedTranscriptionRequest, ApiError> {
+) -> Result<(ParsedTranscriptionRequest, TempUpload), ApiError> {
     let mut multipart = Multipart::from_request(request, state)
         .await
-        .map_err(|err| map_error(anyhow!(err.to_string())))?;
+        .map_err(|err| (err.status(), Json(error_body(err.body_text()))))?;
     let mut model = None;
     let mut language = None;
     let mut prompt = None;
@@ -756,11 +779,7 @@ async fn transcribe_request_from_multipart(
     let mut stream = false;
     let mut uploaded_file: Option<TempUpload> = None;
 
-    while let Some(mut field) = multipart
-        .next_field()
-        .await
-        .map_err(|err| map_error(anyhow!(err.to_string())))?
-    {
+    while let Some(mut field) = multipart.next_field().await.map_err(map_multipart_error)? {
         let Some(name) = field.name().map(str::to_string) else {
             continue;
         };
@@ -796,9 +815,6 @@ async fn transcribe_request_from_multipart(
             }
             "timestamps" => timestamps = parse_bool(&field_text(field).await?),
             "stream" => stream = parse_bool(&field_text(field).await?),
-            "temperature" => {
-                let _ = field_text(field).await?;
-            }
             _ => {}
         }
     }
@@ -808,7 +824,7 @@ async fn transcribe_request_from_multipart(
     let audio_path = upload.0.clone();
     let model = model.ok_or_else(|| map_error(anyhow!("Missing multipart field `model`")))?;
 
-    let mut parsed = build_transcription_request(TranscriptionRequestParts {
+    let parsed = build_transcription_request(TranscriptionRequestParts {
         model,
         audio: AudioInput::WavPath(audio_path),
         language,
@@ -819,15 +835,15 @@ async fn transcribe_request_from_multipart(
         timestamps,
         stream,
     })?;
-    parsed.uploaded_file = Some(upload);
-    Ok(parsed)
+    Ok((parsed, upload))
 }
 
 async fn field_text(field: axum::extract::multipart::Field<'_>) -> Result<String, ApiError> {
-    field
-        .text()
-        .await
-        .map_err(|err| map_error(anyhow!(err.to_string())))
+    field.text().await.map_err(map_multipart_error)
+}
+
+fn map_multipart_error(error: MultipartError) -> ApiError {
+    (error.status(), Json(error_body(error.body_text())))
 }
 
 fn split_field_values(value: &str) -> Vec<String> {
@@ -941,11 +957,7 @@ async fn write_temp_audio(
 
         let upload = TempUpload(path);
         let mut writer = tokio::io::BufWriter::new(file);
-        while let Some(chunk) = field
-            .chunk()
-            .await
-            .map_err(|err| map_error(anyhow!(err.to_string())))?
-        {
+        while let Some(chunk) = field.chunk().await.map_err(map_multipart_error)? {
             writer
                 .write_all(&chunk)
                 .await
@@ -1055,6 +1067,75 @@ mod tests {
             parsed.request.timestamp_granularity,
             Some(TimestampGranularity::Segment)
         );
+    }
+
+    #[test]
+    fn parses_hosts_and_localhost() {
+        assert_eq!(
+            parse_host("localhost").unwrap(),
+            IpAddr::from([127, 0, 0, 1])
+        );
+        assert!(parse_host("::1").unwrap().is_loopback());
+        assert!(parse_host("[::1]").unwrap().is_loopback());
+        assert!(!parse_host("0.0.0.0").unwrap().is_loopback());
+        assert!(parse_host("example.com").is_err());
+    }
+
+    #[test]
+    fn accepts_either_key_header_with_any_bearer_case() {
+        let state = ApiState {
+            service: Arc::new(SpeechService::new_loose_with_engine(
+                std::env::temp_dir(),
+                crate::models::ModelEngine::Whisper,
+            )),
+            provider: Arc::new(SpeechProvider::Local(Arc::new(
+                SpeechService::new_loose_with_engine(
+                    std::env::temp_dir(),
+                    crate::models::ModelEngine::Whisper,
+                ),
+            ))),
+            api_key: Some(Arc::from("secret")),
+            loopback: false,
+            cors: false,
+            event_sink: None,
+            local_models: Arc::new(Vec::new()),
+            local_model_source: None,
+        };
+        let headers = |name: &'static str, value: &'static str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(name, value.parse().unwrap());
+            headers
+        };
+        assert!(authorize(&state, &headers("authorization", "Bearer secret")).is_ok());
+        assert!(authorize(&state, &headers("authorization", "bearer secret")).is_ok());
+        assert!(authorize(&state, &headers("x-api-key", "secret")).is_ok());
+        assert!(authorize(&state, &headers("authorization", "Bearer secre")).is_err());
+        assert!(authorize(&state, &headers("authorization", "Basic secret")).is_err());
+        assert!(authorize(&state, &HeaderMap::new()).is_err());
+    }
+
+    #[test]
+    fn verbose_duration_uses_audio_length() {
+        let json = verbose_response(sample_response(), &[]);
+        assert_eq!(json.duration, 1.25);
+        let mut remote = sample_response();
+        remote.duration_ms = 0;
+        assert_eq!(verbose_response(remote, &[]).duration, 2.5);
+    }
+
+    #[test]
+    fn captions_skip_empty_segments() {
+        let mut response = sample_response();
+        response
+            .segments
+            .as_mut()
+            .unwrap()
+            .push(crate::TranscriptionSegment {
+                start: 2.5,
+                end: 3.0,
+                text: "  ".to_string(),
+            });
+        assert_eq!(caption_segments(&response).len(), 1);
     }
 
     #[test]

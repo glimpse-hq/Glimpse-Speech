@@ -79,7 +79,7 @@ glimpse-speech serve --port 11435 --remote-endpoint https://api.openai.com/v1 --
 Useful flags:
 
 - `--engine whisper|parakeet|nemotron|transcribe` (default `whisper`; a `.gguf` model path selects `transcribe` automatically)
-- `--response-format text|json|verbose_json|srt|vtt` (default `text`)
+- `--response-format text|json|verbose_json|srt|vtt` (default `text`; `verbose_json`, `srt` and `vtt` turn on segment timestamps)
 - `--language`, `--prompt`, `--dictionary <term>` (repeatable), `--timestamps`
 - `--cache-dir <path>` or `GLIMPSE_SPEECH_CACHE_DIR` to override the model cache
 - `--json` for machine-readable output
@@ -94,6 +94,7 @@ On macOS the default model cache is `~/Library/Application Support/com.glimpse.d
 | --- | --- |
 | `POST /v1/audio/transcriptions` | Multipart transcription, OpenAI-compatible |
 | `GET /v1/models` | Available models |
+| `GET /health` | Liveness check, no auth |
 
 Multipart fields: `file` (required), `model` (required), `language`, `prompt`, `response_format` (`json`, `text`, `verbose_json`, `srt`, `vtt`), `timestamp_granularities[]` (`segment`, `word`, requires `verbose_json`), `dictionary` (comma separated terms biased into recognition).
 
@@ -108,6 +109,7 @@ Auth and networking:
 
 - Loopback by default; binding to LAN requires `--api-key`
 - Keys are accepted as `Authorization: Bearer <key>` or `x-api-key: <key>`
+- `GLIMPSE_SPEECH_API_KEY` and `GLIMPSE_SPEECH_REMOTE_API_KEY` stand in for `--api-key` and `--remote-api-key`, keeping keys out of the process list
 - `--cors` enables permissive CORS for browser clients
 
 With `--remote-endpoint` set, transcription requests proxy to the remote service. Endpoint quirks (Mistral, OpenRouter, xAI, ElevenLabs, Deepgram, self-hosted servers) are detected automatically, WAV uploads are converted to FLAC to cut upload size, and transient remote failures fall back to the local engine when a local model is installed. Speaker diarization is requested from endpoints that support it (Mistral, xAI, ElevenLabs, Deepgram, Fireworks, and OpenAI's diarize model).

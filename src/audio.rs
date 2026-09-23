@@ -174,6 +174,7 @@ fn io_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
 }
 
 /// Converts PCM16 to normalized f32 and resamples to `to_rate`.
+#[cfg_attr(not(local_engines), allow(dead_code))]
 pub(crate) fn resample_i16_to_f32(samples: &[i16], from_rate: u32, to_rate: u32) -> Vec<f32> {
     const SCALE: f32 = 1.0 / PCM16_SCALE;
 
