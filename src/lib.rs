@@ -13,7 +13,7 @@ pub mod provider;
 #[cfg(feature = "remote")]
 pub mod remote;
 pub mod service;
-#[cfg(feature = "whisper")]
+#[cfg(transcribe_engine)]
 pub mod vad;
 
 use std::path::Path;

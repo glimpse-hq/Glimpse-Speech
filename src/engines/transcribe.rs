@@ -9,6 +9,7 @@
 //! `whisper-<family>-encoder.mlmodelc` for a Whisper GGUF or
 //! `ggml-<family>[-qX_Y].bin`.
 
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use transcribe_cpp::{
@@ -67,6 +68,9 @@ pub struct TranscribeEngine {
     languages: Vec<String>,
     chunk_samples: Option<usize>,
     family: Family,
+    // Parakeet TDT can return no words for whole spans of speech after long
+    // pauses, so its decodes are checked against Silero.
+    checks_dropped_speech: bool,
 }
 
 impl TranscribeEngine {
@@ -264,6 +268,7 @@ impl TranscriptionEngine for TranscribeEngine {
         } else {
             Vec::new()
         };
+        self.checks_dropped_speech = arch == "parakeet" && model.variant().starts_with("tdt-");
         // Streaming geometry matching the previous ONNX runtime: 560 ms chunks.
         let accepts = |kind| model.accepts_ext(ExtSlot::Stream, kind);
         self.stream_options =
@@ -295,6 +300,7 @@ impl TranscriptionEngine for TranscribeEngine {
         self.languages.clear();
         self.chunk_samples = None;
         self.family = Family::Other;
+        self.checks_dropped_speech = false;
     }
 
     fn transcribe_samples(
@@ -351,7 +357,12 @@ impl TranscriptionEngine for TranscribeEngine {
         let options = RunOptions {
             family,
             language: language.clone(),
-            timestamps,
+            // The dropped-speech check needs words; Parakeet times come with its tokens.
+            timestamps: if self.checks_dropped_speech {
+                TimestampKind::Auto
+            } else {
+                timestamps
+            },
             ..Default::default()
         };
         if let Family::Whisper {
@@ -361,60 +372,264 @@ impl TranscriptionEngine for TranscribeEngine {
         {
             language = Some("en".to_string());
         }
-        let chunks = decode_chunks(&samples, self.chunk_samples, |chunk| {
-            session.run(chunk, &options)
-        })
-        .map_err(transcribe_error)?;
-        let mut text = String::new();
-        let mut segments = Vec::new();
-        let mut words = Vec::new();
-        let mut chunks = chunks.into_iter().peekable();
-        while let Some((offset, transcript)) = chunks.next() {
-            let chunk_end = chunks.peek().map_or(samples.len(), |(next, _)| *next);
-            let chunk_seconds = (chunk_end - offset) as f32 / SAMPLE_RATE as f32;
-            let chunk_text = transcript.text.trim();
-            if !chunk_text.is_empty() {
-                if !text.is_empty() {
-                    text.push(' ');
+        let (chunks, speech) = std::thread::scope(|scope| {
+            // Silero runs while the model decodes.
+            let vad = self
+                .checks_dropped_speech
+                .then(|| {
+                    std::thread::Builder::new().spawn_scoped(scope, || speech_ranges(&samples))
+                })
+                .and_then(Result::ok);
+            let chunks = decode_chunks(&samples, self.chunk_samples, |chunk| {
+                session.run(chunk, &options)
+            });
+            (chunks, vad.and_then(|vad| vad.join().ok().flatten()))
+        });
+        let mut result = assemble(chunks.map_err(transcribe_error)?, samples.len());
+        let holes = speech.as_deref().map_or_else(Vec::new, |speech| {
+            dropped_speech(result.words.as_deref().unwrap_or_default(), speech)
+        });
+        if let Some(speech) = speech
+            && !holes.is_empty()
+        {
+            // Decoding the piece between long pauses on its own recovers it.
+            let retries: Result<Vec<_>, Error> = speech_between_long_pauses(&speech, samples.len())
+                .into_iter()
+                .filter(|span| {
+                    *span != (0..samples.len()) && holes.iter().any(|hole| span.contains(hole))
+                })
+                .map(|span| {
+                    let chunks =
+                        decode_chunks(&samples[span.clone()], self.chunk_samples, |chunk| {
+                            session.run(chunk, &options)
+                        })?;
+                    let chunks = chunks
+                        .into_iter()
+                        .map(|(offset, transcript)| (span.start + offset, transcript))
+                        .collect();
+                    Ok((assemble(chunks, span.end), span))
+                })
+                .collect();
+            match retries {
+                Ok(retries) => result = splice(result, retries),
+                Err(error) => {
+                    tracing::warn!("[transcribe.cpp] dropped-speech retry failed: {error}")
                 }
-                text.push_str(chunk_text);
             }
-            if language.is_none() {
-                language = transcript.language;
-            }
-            let to_segment = |t0_ms: i64, t1_ms: i64, text: &str| TranscriptionSegment {
-                // TDT duration predictions can extend beyond the final audio frame.
-                start: offset as f32 / SAMPLE_RATE as f32
-                    + (t0_ms as f32 / 1000.0).clamp(0.0, chunk_seconds),
-                end: offset as f32 / SAMPLE_RATE as f32
-                    + (t1_ms.max(t0_ms) as f32 / 1000.0).clamp(0.0, chunk_seconds),
-                text: text.trim().to_string(),
-            };
-            segments.extend(
-                transcript
-                    .segments
-                    .iter()
-                    .map(|s| to_segment(s.t0_ms, s.t1_ms, &s.text))
-                    .filter(|s| !s.text.is_empty()),
-            );
-            words.extend(
-                transcript
-                    .words
-                    .iter()
-                    .map(|w| to_segment(w.t0_ms, w.t1_ms, &w.text))
-                    .filter(|w| !w.text.is_empty()),
-            );
         }
+        let non_empty = |items: Option<Vec<TranscriptionSegment>>| {
+            items.filter(|items| wants_timestamps && !items.is_empty())
+        };
         Ok(TranscriptionResult {
-            text,
-            segments: (wants_timestamps && !segments.is_empty()).then_some(segments),
-            words: (wants_timestamps && !words.is_empty()).then_some(words),
-            language,
+            text: result.text,
+            segments: non_empty(result.segments),
+            words: non_empty(result.words),
+            language: language.or(result.language),
         })
     }
 }
 
 const SAMPLE_RATE: usize = 16_000;
+// A stretch of detected speech at least this long without a word counts as dropped.
+const DROPPED_SPEECH: usize = 3 * SAMPLE_RATE / 2;
+// Gaps at least this long between padded speech regions (about a second of
+// silence) split the retry.
+const LONG_PAUSE: usize = SAMPLE_RATE / 2;
+
+// Chunk transcripts keyed by input sample offset, in order, ending at `end`.
+fn assemble(chunks: Vec<(usize, Transcript)>, end: usize) -> TranscriptionResult {
+    let mut text = String::new();
+    let mut segments = Vec::new();
+    let mut words = Vec::new();
+    let mut language = None;
+    let mut chunks = chunks.into_iter().peekable();
+    while let Some((offset, transcript)) = chunks.next() {
+        let chunk_end = chunks.peek().map_or(end, |(next, _)| *next);
+        let chunk_text = transcript.text.trim();
+        if !chunk_text.is_empty() {
+            if !text.is_empty() {
+                text.push(' ');
+            }
+            text.push_str(chunk_text);
+        }
+        language = language.or(transcript.language);
+        let chunk_seconds = (chunk_end - offset) as f32 / SAMPLE_RATE as f32;
+        let to_segment = |t0_ms: i64, t1_ms: i64, text: &str| TranscriptionSegment {
+            // TDT duration predictions can extend beyond the final audio frame.
+            start: offset as f32 / SAMPLE_RATE as f32
+                + (t0_ms as f32 / 1000.0).clamp(0.0, chunk_seconds),
+            end: offset as f32 / SAMPLE_RATE as f32
+                + (t1_ms.max(t0_ms) as f32 / 1000.0).clamp(0.0, chunk_seconds),
+            text: text.trim().to_string(),
+        };
+        segments.extend(
+            transcript
+                .segments
+                .iter()
+                .map(|s| to_segment(s.t0_ms, s.t1_ms, &s.text))
+                .filter(|s| !s.text.is_empty()),
+        );
+        words.extend(
+            transcript
+                .words
+                .iter()
+                .map(|w| to_segment(w.t0_ms, w.t1_ms, &w.text))
+                .filter(|w| !w.text.is_empty()),
+        );
+    }
+    TranscriptionResult {
+        text,
+        segments: Some(segments),
+        words: Some(words),
+        language,
+    }
+}
+
+// Silero's padded speech regions as merged sample ranges. The audio goes in by
+// the minute so a long recording never needs a second full copy.
+fn speech_ranges(samples: &[f32]) -> Option<Vec<Range<usize>>> {
+    const PIECE: usize = 60 * SAMPLE_RATE;
+    let mut ranges: Vec<Range<usize>> = Vec::new();
+    for (index, piece) in samples.chunks(PIECE).enumerate() {
+        let pcm: Vec<i16> = piece.iter().map(|&s| (s * 32_768.0) as i16).collect();
+        let offset = index * PIECE;
+        for (start, end) in crate::vad::speech_regions(&pcm, SAMPLE_RATE as u32)? {
+            let sample = |seconds: f32| {
+                (offset + (seconds * SAMPLE_RATE as f32) as usize).min(offset + piece.len())
+            };
+            let (start, end) = (sample(start), sample(end));
+            match ranges.last_mut() {
+                Some(last) if start <= last.end => last.end = last.end.max(end),
+                _ if start < end => ranges.push(start..end),
+                _ => {}
+            }
+        }
+    }
+    Some(ranges)
+}
+
+// Sample offsets inside speech regions where at least `DROPPED_SPEECH` of
+// speech has no word.
+fn dropped_speech(words: &[TranscriptionSegment], speech: &[Range<usize>]) -> Vec<usize> {
+    let sample = |seconds: f32| (seconds * SAMPLE_RATE as f32) as usize;
+    let mut holes = Vec::new();
+    for range in speech {
+        let mut covered = range.start;
+        for word in words {
+            let (start, end) = (sample(word.start), sample(word.end));
+            if end <= range.start || start >= range.end {
+                continue;
+            }
+            if start.saturating_sub(covered) >= DROPPED_SPEECH {
+                holes.push(covered);
+            }
+            covered = covered.max(end);
+        }
+        if range.end.saturating_sub(covered) >= DROPPED_SPEECH {
+            holes.push(covered);
+        }
+    }
+    holes
+}
+
+// Speech split at long pauses; the first piece starts at 0 and the last ends
+// at `len`.
+fn speech_between_long_pauses(speech: &[Range<usize>], len: usize) -> Vec<Range<usize>> {
+    let mut spans: Vec<Range<usize>> = Vec::new();
+    for range in speech {
+        match spans.last_mut() {
+            Some(last) if range.start - last.end < LONG_PAUSE => last.end = range.end,
+            _ => spans.push(range.clone()),
+        }
+    }
+    if let Some(first) = spans.first_mut() {
+        first.start = 0;
+    }
+    if let Some(last) = spans.last_mut() {
+        last.end = len;
+    }
+    spans
+}
+
+// Each retry replaces the words of `first` in its span. Words outside the
+// spans stay, split out of any segment that reaches into one.
+fn splice(
+    first: TranscriptionResult,
+    retries: Vec<(TranscriptionResult, Range<usize>)>,
+) -> TranscriptionResult {
+    let spans: Vec<Range<f32>> = retries
+        .iter()
+        .map(|(_, span)| {
+            span.start as f32 / SAMPLE_RATE as f32..span.end as f32 / SAMPLE_RATE as f32
+        })
+        .collect();
+    let middle = |item: &TranscriptionSegment| (item.start + item.end) / 2.0;
+    // The retry decoded every word that touches its span.
+    let retried = |item: &TranscriptionSegment| {
+        spans
+            .iter()
+            .any(|span| item.start < span.end && item.end > span.start)
+    };
+    // Words separated by a span land in different segments.
+    let region = |item: &TranscriptionSegment| {
+        spans
+            .iter()
+            .filter(|span| span.start <= middle(item))
+            .count()
+    };
+    let first_words = first.words.unwrap_or_default();
+    let mut segments = Vec::new();
+    for segment in first.segments.unwrap_or_default() {
+        let words: Vec<_> = first_words
+            .iter()
+            .filter(|word| word.start >= segment.start && word.end <= segment.end)
+            .collect();
+        let kept: Vec<_> = words
+            .iter()
+            .copied()
+            .filter(|word| !retried(word))
+            .collect();
+        let runs: Vec<_> = kept.chunk_by(|a, b| region(a) == region(b)).collect();
+        if kept.len() == words.len() && runs.len() <= 1 {
+            segments.push(segment);
+            continue;
+        }
+        for run in runs {
+            if let (Some(head), Some(tail)) = (run.first(), run.last()) {
+                segments.push(TranscriptionSegment {
+                    start: head.start,
+                    end: tail.end,
+                    text: run
+                        .iter()
+                        .map(|word| word.text.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                });
+            }
+        }
+    }
+    let mut words: Vec<_> = first_words
+        .iter()
+        .filter(|word| !retried(word))
+        .cloned()
+        .collect();
+    for (retry, _) in retries {
+        segments.extend(retry.segments.unwrap_or_default());
+        words.extend(retry.words.unwrap_or_default());
+    }
+    segments.sort_by(|a, b| a.start.total_cmp(&b.start));
+    words.sort_by(|a, b| a.start.total_cmp(&b.start));
+    TranscriptionResult {
+        text: segments
+            .iter()
+            .map(|segment| segment.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" "),
+        segments: Some(segments),
+        words: Some(words),
+        language: first.language,
+    }
+}
 
 fn auto_timestamps(wanted: bool) -> TimestampKind {
     if wanted {
