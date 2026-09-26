@@ -292,8 +292,13 @@ impl ModelInstallManager {
             match self.download_file(&spec.id, file, &dir, &options).await {
                 Ok(verified) => stream_verified.push(verified),
                 Err(err) => {
+                    // Only this install's files go; the directory can hold
+                    // files from an older version of the model.
                     if err.downcast_ref::<DownloadCancelled>().is_some() && fresh_install {
-                        let _ = fs::remove_dir_all(&dir);
+                        for file in &spec.files {
+                            remove_file_artifacts(&dir, file);
+                        }
+                        let _ = fs::remove_dir(&dir);
                     }
                     return Err(err);
                 }
