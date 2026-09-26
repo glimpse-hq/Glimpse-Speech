@@ -124,13 +124,16 @@ impl EngineInstance {
         }
     }
 
-    #[cfg_attr(not(apple_speech_engine), allow(unused_variables))]
+    #[cfg_attr(
+        not(any(apple_speech_engine, transcribe_engine)),
+        allow(unused_variables)
+    )]
     fn streaming_configure(&mut self, language: Option<String>, dictionary: Vec<String>) {
         match self {
             #[cfg(apple_speech_engine)]
             Self::Apple(engine) => engine.configure_stream(language, dictionary),
             #[cfg(transcribe_engine)]
-            Self::Transcribe(engine) => engine.configure_stream(language),
+            Self::Transcribe(engine) => engine.configure_stream(language, dictionary),
             #[allow(unreachable_patterns)]
             _ => {}
         }

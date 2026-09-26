@@ -14,13 +14,15 @@ use std::path::{Path, PathBuf};
 
 use transcribe_cpp::{
     Backend, Error, ExtSlot, Model, ModelOptions, OwnedStream, ParakeetBufferedStreamOptions,
-    ParakeetStreamOptions, Qwen3AsrRunOptions, RunExtension, RunOptions, Session, SessionOptions,
-    StreamExtension, StreamOptions, TimestampKind, Transcript, WhisperRunOptions,
+    ParakeetRunOptions, ParakeetStreamOptions, Qwen3AsrRunOptions, RunExtension, RunOptions,
+    Session, SessionOptions, StreamExtension, StreamOptions, TimestampKind, Transcript,
+    WhisperRunOptions,
 };
 
 use crate::{
     TranscriptionEngine, TranscriptionResult, TranscriptionSegment,
-    dictionary::build_dictionary_prompt, engines::io_error,
+    dictionary::{build_dictionary_prompt, sanitize_dictionary_entries},
+    engines::io_error,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -35,7 +37,8 @@ pub struct TranscribeModelParams {
 #[derive(Debug, Clone, Default)]
 pub struct TranscribeInferenceParams {
     pub language: Option<String>,
-    /// Vocabulary hints for Qwen3-ASR and Whisper. Other families ignore these entries.
+    /// Vocabulary hints for Qwen3-ASR and Whisper, boosted phrases for Parakeet
+    /// and Nemotron. Other families ignore these entries.
     pub dictionary: Vec<String>,
     /// Whisper decoder prompt, placed before the dictionary hints.
     pub prompt: Option<String>,
@@ -49,6 +52,8 @@ pub struct TranscribeInferenceParams {
 enum Family {
     #[default]
     Other,
+    /// Parakeet-family transducer that accepts phrase boosting.
+    Parakeet,
     Qwen3Asr,
     Whisper {
         words: bool,
@@ -63,6 +68,7 @@ pub struct TranscribeEngine {
     stream: Option<OwnedStream>,
     stream_options: Option<StreamExtension>,
     stream_language: Option<String>,
+    stream_dictionary: Vec<String>,
     stream_text: String,
     // Language tags a Parakeet-family model accepts; empty for other families.
     languages: Vec<String>,
@@ -115,7 +121,11 @@ impl TranscribeEngine {
                 .stream_options
                 .clone()
                 .ok_or_else(|| io_error("This model does not support streaming"))?;
-            let run = RunOptions {
+            let mut run = RunOptions {
+                family: match self.family {
+                    Family::Parakeet => parakeet_boost(&self.stream_dictionary),
+                    _ => None,
+                },
                 language: self.language_hint(self.stream_language.as_deref()),
                 timestamps: TimestampKind::None,
                 ..Default::default()
@@ -128,7 +138,21 @@ impl TranscribeEngine {
                 family: Some(options),
                 ..Default::default()
             };
-            match session.into_stream(&run, &options) {
+            let mut begun = session.into_stream(&run, &options);
+            // A rejected boost list must never fail dictation: stream unboosted.
+            if let Err((Error::InvalidArgument(error), _)) = &begun
+                && run.family.is_some()
+            {
+                tracing::warn!(
+                    "[transcribe.cpp] phrase boosting rejected, streaming without it: {error}"
+                );
+                run.family = None;
+                begun = match begun {
+                    Err((_, session)) => session.into_stream(&run, &options),
+                    ok => ok,
+                };
+            }
+            match begun {
                 Ok(stream) => self.stream = Some(stream),
                 Err((error, session)) => {
                     self.session = Some(session);
@@ -156,9 +180,10 @@ impl TranscribeEngine {
         self.stream_text.clone()
     }
 
-    /// Language for the next stream.
-    pub fn configure_stream(&mut self, language: Option<String>) {
+    /// Language and dictionary for the next stream.
+    pub fn configure_stream(&mut self, language: Option<String>, dictionary: Vec<String>) {
         self.stream_language = language;
+        self.stream_dictionary = dictionary;
     }
 
     /// Ends any stream and clears its transcript.
@@ -250,6 +275,14 @@ impl TranscriptionEngine for TranscribeEngine {
         self.chunk_samples = (arch == "qwen3_asr" || (arch == "parakeet" && uses_coreml))
             .then_some(15 * SAMPLE_RATE);
         self.family = match arch.as_str() {
+            "parakeet"
+                if model.accepts_ext(
+                    ExtSlot::Run,
+                    transcribe_cpp::sys::TRANSCRIBE_EXT_KIND_PARAKEET_RUN,
+                ) =>
+            {
+                Family::Parakeet
+            }
             "qwen3_asr" => Family::Qwen3Asr,
             "whisper" => {
                 let capabilities = model.capabilities();
@@ -352,9 +385,13 @@ impl TranscriptionEngine for TranscribeEngine {
                 };
                 (Some(RunExtension::Whisper(options)), timestamps)
             }
+            Family::Parakeet => (
+                parakeet_boost(&params.dictionary),
+                auto_timestamps(wants_timestamps),
+            ),
             Family::Other => (None, auto_timestamps(wants_timestamps)),
         };
-        let options = RunOptions {
+        let mut options = RunOptions {
             family,
             language: language.clone(),
             // The dropped-speech check needs words; Parakeet times come with its tokens.
@@ -380,9 +417,21 @@ impl TranscriptionEngine for TranscribeEngine {
                     std::thread::Builder::new().spawn_scoped(scope, || speech_ranges(&samples))
                 })
                 .and_then(Result::ok);
-            let chunks = decode_chunks(&samples, self.chunk_samples, |chunk| {
+            let mut chunks = decode_chunks(&samples, self.chunk_samples, |chunk| {
                 session.run(chunk, &options)
             });
+            // A rejected boost list must never fail dictation: decode unboosted.
+            if let (Err(Error::InvalidArgument(error)), Some(RunExtension::Parakeet(_))) =
+                (&chunks, &options.family)
+            {
+                tracing::warn!(
+                    "[transcribe.cpp] phrase boosting rejected, decoding without it: {error}"
+                );
+                options.family = None;
+                chunks = decode_chunks(&samples, self.chunk_samples, |chunk| {
+                    session.run(chunk, &options)
+                });
+            }
             (chunks, vad.and_then(|vad| vad.join().ok().flatten()))
         });
         let mut result = assemble(chunks.map_err(transcribe_error)?, samples.len());
@@ -637,6 +686,19 @@ fn auto_timestamps(wanted: bool) -> TimestampKind {
     } else {
         TimestampKind::None
     }
+}
+
+// No extension for an empty dictionary, so the decode stays unboosted.
+fn parakeet_boost(dictionary: &[String]) -> Option<RunExtension> {
+    // Past the entry cap, the newest entries are boosted.
+    let newest_first: Vec<String> = dictionary.iter().rev().cloned().collect();
+    let mut boost_phrases = sanitize_dictionary_entries(&newest_first);
+    // A NUL cannot cross the C API; drop such an entry rather than fail the run.
+    boost_phrases.retain(|phrase| !phrase.contains('\0'));
+    (!boost_phrases.is_empty()).then_some(RunExtension::Parakeet(ParakeetRunOptions {
+        boost_phrases,
+        boost_score: None,
+    }))
 }
 
 fn whisper_prompt(prompt: Option<String>, dictionary: &[String]) -> Option<String> {

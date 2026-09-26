@@ -3,7 +3,7 @@
 Local speech-to-text for Rust. One crate, several engines, an OpenAI-compatible HTTP API, and a CLI.
 
 - **Whisper** (GGUF or whisper.cpp GGML `.bin` files, run by transcribe.cpp): Metal and optional Core ML/ANE encoders on Apple Silicon, Vulkan on Windows and Linux
-- **transcribe.cpp** (GGUF via [transcribe-cpp](https://github.com/handy-computer/transcribe.cpp)): Qwen3-ASR, Parakeet TDT V3, Parakeet Unified, and Nemotron Streaming (English and 3.5 multilingual). Streaming for Nemotron and Parakeet Unified. Metal on macOS, optional Core ML/ANE encoders on Apple Silicon, and Vulkan on Windows and Linux
+- **transcribe.cpp** (GGUF via [transcribe-cpp](https://github.com/handy-computer/transcribe.cpp)): Qwen3-ASR, Parakeet TDT V3, Parakeet Unified, and Nemotron Streaming (English and 3.5 multilingual). Streaming for Nemotron and Parakeet Unified, phrase boosting for the Parakeet and Nemotron models. Metal on macOS, optional Core ML/ANE encoders on Apple Silicon, and Vulkan on Windows and Linux
 - **Parakeet TDT** (NVIDIA ONNX via [parakeet-rs](https://github.com/altunenes/parakeet-rs), `nvidia` feature): batch transcription, int8 and fp32
 - **Nemotron** (NVIDIA ONNX, `nvidia` feature): streaming transcription with incremental results
 
@@ -172,7 +172,7 @@ println!("{}", result.text);
 
 Nemotron additionally exposes streaming: `transcribe_chunk(&[f32])`, `get_transcript()`, and `reset()`. Chunks are 560 ms at 16 kHz (`STREAMING_CHUNK_SAMPLES`).
 
-`TranscribeEngine` streams the same way for Nemotron and Parakeet Unified GGUFs: `configure_stream(language)`, then `transcribe_chunk(&[f32])` for each chunk, `finalize()` for the final text, and `reset()`.
+`TranscribeEngine` streams the same way for Nemotron and Parakeet Unified GGUFs: `configure_stream(language, dictionary)`, then `transcribe_chunk(&[f32])` for each chunk, `finalize()` for the final text, and `reset()`.
 
 ### Expected model files
 
