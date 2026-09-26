@@ -24,7 +24,7 @@ fn main() {
         "local_engines",
         whisper || nvidia || apple_speech || transcribe,
     );
-    emit_cfg("streaming_engines", nvidia || apple_speech);
+    emit_cfg("streaming_engines", nvidia || apple_speech || transcribe);
 
     if apple_cleanup || apple_speech {
         println!("cargo::rustc-link-arg=-Wl,-rpath,/usr/lib/swift");

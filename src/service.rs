@@ -107,9 +107,7 @@ impl EngineInstance {
                 Ok(engine.get_transcript())
             }
             #[cfg(transcribe_engine)]
-            Self::Transcribe(_) => Err(anyhow!(
-                "Streaming is only supported with Apple, Nemotron, or unified Parakeet models"
-            )),
+            Self::Transcribe(engine) => engine.transcribe_chunk(chunk).map_err(boxed_error),
         }
     }
 
@@ -122,7 +120,7 @@ impl EngineInstance {
             #[cfg(apple_speech_engine)]
             Self::Apple(engine) => engine.reset(),
             #[cfg(transcribe_engine)]
-            Self::Transcribe(_) => {}
+            Self::Transcribe(engine) => engine.reset(),
         }
     }
 
@@ -131,6 +129,8 @@ impl EngineInstance {
         match self {
             #[cfg(apple_speech_engine)]
             Self::Apple(engine) => engine.configure_stream(language, dictionary),
+            #[cfg(transcribe_engine)]
+            Self::Transcribe(engine) => engine.configure_stream(language),
             #[allow(unreachable_patterns)]
             _ => {}
         }
@@ -140,6 +140,8 @@ impl EngineInstance {
         match self {
             #[cfg(apple_speech_engine)]
             Self::Apple(engine) => engine.finalize().map_err(boxed_error),
+            #[cfg(transcribe_engine)]
+            Self::Transcribe(engine) => engine.finalize().map_err(boxed_error),
             #[allow(unreachable_patterns)]
             _ => Ok(self.streaming_get_transcript().unwrap_or_default()),
         }
@@ -154,7 +156,7 @@ impl EngineInstance {
             #[cfg(apple_speech_engine)]
             Self::Apple(engine) => Some(engine.get_transcript()),
             #[cfg(transcribe_engine)]
-            Self::Transcribe(_) => None,
+            Self::Transcribe(engine) => Some(engine.get_transcript()),
         }
     }
 }
@@ -496,11 +498,12 @@ fn load_engine(resolved: &ResolvedModel) -> Result<EngineInstance> {
 
                 let mut engine = TranscribeEngine::new();
                 let coreml_encoder = TranscribeEngine::companion_for(&resolved.path);
-                let backend = if coreml_encoder.is_some()
-                    && resolved
-                        .variant
-                        .as_deref()
-                        .is_some_and(|v| v.starts_with("parakeet-"))
+                let variant = resolved.variant.as_deref().unwrap_or_default();
+                // Nemotron stays on the CPU like the ONNX runtime it replaces. On an
+                // M2 Pro its 560 ms stream chunks ran faster and steadier there than
+                // queued behind other GPU work.
+                let backend = if (coreml_encoder.is_some() && variant.starts_with("parakeet-"))
+                    || variant.starts_with("nemotron-")
                 {
                     transcribe_cpp::Backend::Cpu
                 } else {

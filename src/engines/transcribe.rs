@@ -12,8 +12,9 @@
 use std::path::{Path, PathBuf};
 
 use transcribe_cpp::{
-    Backend, Error, Model, ModelOptions, Qwen3AsrRunOptions, RunExtension, RunOptions, Session,
-    SessionOptions, TimestampKind, Transcript, WhisperRunOptions,
+    Backend, Error, ExtSlot, Model, ModelOptions, OwnedStream, ParakeetBufferedStreamOptions,
+    ParakeetStreamOptions, Qwen3AsrRunOptions, RunExtension, RunOptions, Session, SessionOptions,
+    StreamExtension, StreamOptions, TimestampKind, Transcript, WhisperRunOptions,
 };
 
 use crate::{
@@ -56,7 +57,14 @@ enum Family {
 
 #[derive(Default)]
 pub struct TranscribeEngine {
+    // Moves into `stream` while a stream is active.
     session: Option<Session>,
+    stream: Option<OwnedStream>,
+    stream_options: Option<StreamExtension>,
+    stream_language: Option<String>,
+    stream_text: String,
+    // Language tags a Parakeet-family model accepts; empty for other families.
+    languages: Vec<String>,
     chunk_samples: Option<usize>,
     family: Family,
 }
@@ -90,6 +98,93 @@ impl TranscribeEngine {
             .into_iter()
             .map(|stem| model_path.with_file_name(format!("{stem}-encoder.mlmodelc")))
             .find(|dir| dir.join("coremldata.bin").is_file())
+    }
+
+    /// Feeds 16 kHz audio to the stream, starting one if needed, and returns
+    /// the transcript so far. Only streaming models (Nemotron, Parakeet Unified).
+    pub fn transcribe_chunk(
+        &mut self,
+        samples: &[f32],
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        if self.stream.is_none() {
+            let options = self
+                .stream_options
+                .clone()
+                .ok_or_else(|| io_error("This model does not support streaming"))?;
+            let run = RunOptions {
+                language: self.language_hint(self.stream_language.as_deref()),
+                timestamps: TimestampKind::None,
+                ..Default::default()
+            };
+            let session = self
+                .session
+                .take()
+                .ok_or_else(|| io_error("Model not loaded. Call load_model() first."))?;
+            let options = StreamOptions {
+                family: Some(options),
+                ..Default::default()
+            };
+            match session.into_stream(&run, &options) {
+                Ok(stream) => self.stream = Some(stream),
+                Err((error, session)) => {
+                    self.session = Some(session);
+                    return Err(transcribe_error(error));
+                }
+            }
+        }
+        if let Some(stream) = self.stream.as_mut() {
+            stream.feed(samples).map_err(transcribe_error)?;
+            self.stream_text = stream.text().display().trim().to_string();
+        }
+        Ok(self.stream_text.clone())
+    }
+
+    /// Flushes the audio the stream still holds and returns the final transcript.
+    pub fn finalize(&mut self) -> Result<String, Box<dyn std::error::Error>> {
+        if let Some(stream) = self.stream.as_mut() {
+            stream.finalize().map_err(transcribe_error)?;
+            self.stream_text = stream.text().full.trim().to_string();
+        }
+        Ok(self.stream_text.clone())
+    }
+
+    pub fn get_transcript(&self) -> String {
+        self.stream_text.clone()
+    }
+
+    /// Language for the next stream.
+    pub fn configure_stream(&mut self, language: Option<String>) {
+        self.stream_language = language;
+    }
+
+    /// Ends any stream and clears its transcript.
+    pub fn reset(&mut self) {
+        if let Some(stream) = self.stream.take() {
+            self.session = Some(stream.into_session());
+        }
+        self.stream_text.clear();
+    }
+
+    // Parakeet-family models reject tags outside their list, so a bare
+    // language maps onto the first listed tag for it (pt-BR before pt-PT) and
+    // anything else to auto.
+    fn language_hint(&self, language: Option<&str>) -> Option<String> {
+        let language = language
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("auto"))?;
+        if self.languages.is_empty() {
+            return Some(language.to_string());
+        }
+        let primary = |tag: &str| tag.split(['-', '_']).next().unwrap_or(tag).to_string();
+        self.languages
+            .iter()
+            .find(|tag| tag.eq_ignore_ascii_case(language))
+            .or_else(|| {
+                self.languages
+                    .iter()
+                    .find(|tag| primary(tag).eq_ignore_ascii_case(&primary(language)))
+            })
+            .cloned()
     }
 }
 
@@ -164,12 +259,40 @@ impl TranscriptionEngine for TranscribeEngine {
             }
             _ => Family::Other,
         };
+        self.languages = if arch == "parakeet" {
+            model.capabilities().languages
+        } else {
+            Vec::new()
+        };
+        // Streaming geometry matching the previous ONNX runtime: 560 ms chunks.
+        let accepts = |kind| model.accepts_ext(ExtSlot::Stream, kind);
+        self.stream_options =
+            if accepts(transcribe_cpp::sys::TRANSCRIBE_EXT_KIND_PARAKEET_BUFFERED_STREAM) {
+                Some(StreamExtension::ParakeetBuffered(
+                    ParakeetBufferedStreamOptions {
+                        left_ms: Some(5600),
+                        chunk_ms: Some(560),
+                        right_ms: Some(560),
+                    },
+                ))
+            } else if accepts(transcribe_cpp::sys::TRANSCRIBE_EXT_KIND_PARAKEET_STREAM) {
+                Some(StreamExtension::ParakeetStream(ParakeetStreamOptions {
+                    att_context_right: Some(6),
+                }))
+            } else {
+                None
+            };
+        self.stream = None;
         self.session = Some(session);
         Ok(())
     }
 
     fn unload_model(&mut self) {
+        self.stream = None;
         self.session = None;
+        self.stream_options = None;
+        self.stream_text.clear();
+        self.languages.clear();
         self.chunk_samples = None;
         self.family = Family::Other;
     }
@@ -179,14 +302,10 @@ impl TranscriptionEngine for TranscribeEngine {
         samples: Vec<f32>,
         params: Option<Self::InferenceParams>,
     ) -> Result<TranscriptionResult, Box<dyn std::error::Error>> {
+        self.reset();
         let params = params.unwrap_or_default();
         let wants_timestamps = params.timestamps || params.word_timestamps;
-        let mut language = params
-            .language
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("auto"))
-            .map(str::to_string);
+        let mut language = self.language_hint(params.language.as_deref());
         let session = self
             .session
             .as_mut()
