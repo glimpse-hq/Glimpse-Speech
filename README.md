@@ -11,7 +11,7 @@ Local speech-to-text for Rust. One crate, four engines, an OpenAI-compatible HTT
 
 | Feature | Enables |
 | --- | --- |
-| `whisper` | `engines::whisper::WhisperEngine` |
+| `whisper` | `engines::whisper::WhisperEngine` and Silero VAD (`vad`, pure Rust, every target) |
 | `nvidia` | `engines::parakeet::ParakeetEngine` and `engines::nemotron::NemotronEngine` |
 | `transcribe` | `engines::transcribe::TranscribeEngine` and `diarization::diarize` (speaker diarization with [Nemotron-3 Diarization](https://huggingface.co/Glimpse-Dictation/Nemotron-3-Diarization-gguf), up to 8 speakers) (builds transcribe.cpp from source: CMake and a C++ toolchain, plus the Vulkan SDK on Windows and Linux) |
 | `api` | The OpenAI-compatible HTTP server (`api::serve`) |
@@ -196,3 +196,4 @@ cargo run --example diarize --features transcribe -- <nemotron-3-diarization-Q8_
 
 - [whisper-rs](https://github.com/tazz4843/whisper-rs) (Unlicense) for Whisper bindings
 - [parakeet-rs](https://github.com/altunenes/parakeet-rs) (MIT OR Apache-2.0) for NVIDIA ONNX speech model support
+- [Silero VAD](https://github.com/snakers4/silero-vad) (MIT) v6.2 model weights, bundled as `src/silero_vad_16k_op15.onnx` and run by the pure-Rust `vad` module

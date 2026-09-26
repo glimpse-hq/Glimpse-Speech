@@ -13,7 +13,7 @@ documentation = "https://docs.rs/glimpse-speech"
 
 [features]
 default = []
-whisper = ["dep:whisper-rs", "dep:ort"]
+whisper = ["dep:whisper-rs"]
 nvidia = ["dep:parakeet-rs"]
 transcribe = ["dep:transcribe-cpp"]
 parakeet = ["nvidia"]
@@ -71,11 +71,10 @@ transcribe-cpp = { git = "https://github.com/LegendarySpy/transcribe.cpp.git", r
 whisper-rs = { version = "0.16.0", features = ["vulkan", "raw-api"], optional = true }
 transcribe-cpp = { git = "https://github.com/LegendarySpy/transcribe.cpp.git", rev = "2877ec028ff483b46d946d2bb326aad61a464cf8", default-features = false, features = ["vulkan"], optional = true }
 
-# Intel Mac excluded: ort has no prebuilt onnxruntime there (Silero VAD falls
-# back to keeping all speech, see vad.rs) and parakeet models don't run on it.
+# Intel Mac excluded: parakeet-rs needs ONNX Runtime, which has no prebuilt
+# binary there.
 [target.'cfg(not(all(target_os = "macos", target_arch = "x86_64")))'.dependencies]
 parakeet-rs = { version = "0.3.8", optional = true }
-ort = { version = "=2.0.0-rc.13", optional = true }
 
 [[example]]
 name = "cleanup"

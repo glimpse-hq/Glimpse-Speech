@@ -1,156 +1,342 @@
-// Silero neural VAD. ort provides no prebuilt onnxruntime for Intel Mac, so the
-// implementation is gated off that target; there `speech_regions` returns None
-// and callers keep all detected speech.
+// Silero neural VAD: a std-only forward pass of the bundled ONNX model. Only
+// the model's weights are read from the file; the graph is reimplemented here
+// and matches onnxruntime to float rounding.
 
-#[cfg(onnx_runtime)]
-pub use silero::speech_regions;
+use std::sync::OnceLock;
 
-#[cfg(not(onnx_runtime))]
-pub fn speech_regions(_samples: &[i16], _sample_rate: u32) -> Option<Vec<(f32, f32)>> {
-    None
+// silero-vad v6.2, sha256 7ed98ddbad84ccac4cd0aeb3099049280713df825c610a8ed34543318f1b2c49.
+const MODEL: &[u8] = include_bytes!("silero_vad_16k_op15.onnx");
+const WINDOW: usize = 512;
+const CONTEXT: usize = 64;
+const N_FFT: usize = 256;
+const HOP: usize = 128;
+const BINS: usize = N_FFT / 2 + 1;
+const HIDDEN: usize = 128;
+const SPEECH_THRESHOLD: f32 = 0.5;
+const FRAME_S: f32 = WINDOW as f32 / 16_000.0; // 32 ms
+const BRIDGE_FRAMES: usize = 4; // merge speech across silence gaps up to ~128 ms
+const PAD_S: f32 = 0.25; // widen each region so words adjacent to speech survive
+
+// Conv1d with kernel 3, padding 1 and ReLU over time-major input [t][inputs].
+struct Conv {
+    weight: Vec<f32>, // [outputs][3][inputs]
+    bias: Vec<f32>,
+    inputs: usize,
+    stride: usize,
 }
 
-#[cfg(onnx_runtime)]
-mod silero {
-    use std::sync::Mutex;
-
-    use anyhow::{Context, Result};
-    use ort::session::Session;
-    use ort::value::Tensor;
-
-    const MODEL: &[u8] = include_bytes!("silero_vad_16k_op15.onnx");
-    const WINDOW: usize = 512;
-    const CONTEXT: usize = 64;
-    const STATE_LEN: usize = 2 * 128;
-    const SPEECH_THRESHOLD: f32 = 0.5;
-    const FRAME_S: f32 = WINDOW as f32 / 16_000.0; // 32 ms
-    const BRIDGE_FRAMES: usize = 4; // merge speech across silence gaps up to ~128 ms
-    const PAD_S: f32 = 0.25; // widen each region so words adjacent to speech survive
-
-    struct SileroVad {
-        session: Session,
-        state: Vec<f32>,
-        context: Vec<f32>,
-        input: Vec<f32>,
-    }
-
-    impl SileroVad {
-        fn new() -> Result<Self> {
-            // One thread beats the default pool here: the per-frame graph is so
-            // small that thread hand-off costs more than the work it splits.
-            let session = Session::builder()?
-                .with_intra_threads(1)
-                .unwrap_or_else(|error| error.recover())
-                .commit_from_memory(MODEL)
-                .context("load silero vad model")?;
-            Ok(Self {
-                session,
-                state: vec![0.0; STATE_LEN],
-                context: vec![0.0; CONTEXT],
-                input: vec![0.0; CONTEXT + WINDOW],
-            })
-        }
-
-        // Per-frame speech mask for 16 kHz mono audio in [-1, 1].
-        fn frame_mask(&mut self, samples: &[f32]) -> Result<Vec<bool>> {
-            self.state.fill(0.0);
-            self.context.fill(0.0);
-            let mut mask = Vec::with_capacity(samples.len() / WINDOW + 1);
-            for chunk in samples.chunks_exact(WINDOW) {
-                self.input[..CONTEXT].copy_from_slice(&self.context);
-                self.input[CONTEXT..].copy_from_slice(chunk);
-
-                let input = Tensor::from_array(([1usize, CONTEXT + WINDOW], self.input.clone()))?;
-                let state = Tensor::from_array(([2usize, 1, 128], self.state.clone()))?;
-                let sr = Tensor::from_array(((), vec![16000i64]))?;
-
-                let outputs = self
-                    .session
-                    .run(ort::inputs!["input" => input, "state" => state, "sr" => sr])?;
-                let (_, prob) = outputs["output"].try_extract_tensor::<f32>()?;
-                mask.push(prob[0] >= SPEECH_THRESHOLD);
-                let (_, new_state) = outputs["stateN"].try_extract_tensor::<f32>()?;
-                self.state.copy_from_slice(new_state);
-                self.context.copy_from_slice(&chunk[WINDOW - CONTEXT..]);
-            }
-            Ok(mask)
-        }
-    }
-
-    fn mask_to_regions(mask: &[bool]) -> Vec<(f32, f32)> {
-        let mut regions: Vec<(usize, usize)> = Vec::new();
-        let mut start: Option<usize> = None;
-        let mut gap = 0usize;
-        for (i, &speech) in mask.iter().enumerate() {
-            if speech {
-                start.get_or_insert(i);
-                gap = 0;
-            } else if let Some(s) = start {
-                gap += 1;
-                if gap > BRIDGE_FRAMES {
-                    regions.push((s, i - gap + 1));
-                    start = None;
-                    gap = 0;
+impl Conv {
+    fn new(weight: &[f32], bias: Vec<f32>, inputs: usize, stride: usize) -> Self {
+        let outputs = bias.len();
+        let mut transposed = vec![0.0; weight.len()];
+        for o in 0..outputs {
+            for i in 0..inputs {
+                for k in 0..3 {
+                    transposed[(o * 3 + k) * inputs + i] = weight[(o * inputs + i) * 3 + k];
                 }
             }
         }
-        if let Some(s) = start {
-            regions.push((s, mask.len() - gap));
+        Self {
+            weight: transposed,
+            bias,
+            inputs,
+            stride,
         }
-        regions
-            .into_iter()
-            .map(|(s, e)| {
-                (
-                    (s as f32 * FRAME_S - PAD_S).max(0.0),
-                    e as f32 * FRAME_S + PAD_S,
-                )
+    }
+
+    fn run(&self, input: &[f32], output: &mut Vec<f32>) {
+        let steps = input.len() / self.inputs;
+        output.clear();
+        for step in 0..(steps - 1) / self.stride + 1 {
+            for (o, bias) in self.bias.iter().enumerate() {
+                let mut acc = *bias;
+                for k in 0..3 {
+                    let Some(t) = (step * self.stride + k).checked_sub(1) else {
+                        continue;
+                    };
+                    if t >= steps {
+                        continue;
+                    }
+                    let row = (o * 3 + k) * self.inputs;
+                    acc += dot(
+                        &self.weight[row..row + self.inputs],
+                        &input[t * self.inputs..(t + 1) * self.inputs],
+                    );
+                }
+                output.push(acc.max(0.0));
+            }
+        }
+    }
+}
+
+struct Silero {
+    stft: Vec<f32>, // [2 * BINS][N_FFT]: real rows, then imaginary rows
+    encoder: [Conv; 4],
+    w_ih: Vec<f32>, // [4 * HIDDEN][HIDDEN], LSTM gates i, f, g, o
+    w_hh: Vec<f32>,
+    b_ih: Vec<f32>,
+    b_hh: Vec<f32>,
+    w_out: Vec<f32>,
+    b_out: f32,
+}
+
+impl Silero {
+    fn load() -> Option<Self> {
+        let tensors = initializers(MODEL)?;
+        let tensor = |name: &str, len: usize| -> Option<Vec<f32>> {
+            let raw = tensors
+                .iter()
+                .find(|(tensor, _)| *tensor == name.as_bytes())?
+                .1;
+            (raw.len() == len * 4).then(|| {
+                raw.chunks_exact(4)
+                    .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                    .collect()
             })
-            .collect()
-    }
-
-    static VAD: Mutex<Option<SileroVad>> = Mutex::new(None);
-
-    /// Speech regions in seconds (padded), detected by the Silero neural VAD.
-    /// Returns `None` if the model is unavailable so callers can fall back
-    /// without dropping transcript text. Empty `Vec` means no speech.
-    pub fn speech_regions(samples: &[i16], sample_rate: u32) -> Option<Vec<(f32, f32)>> {
-        if sample_rate > crate::audio::MAX_SAMPLE_RATE {
-            return None;
-        }
-        let audio = crate::audio::resample_i16_to_f32(samples, sample_rate, 16_000);
-        if audio.len() < WINDOW {
-            return Some(Vec::new());
-        }
-        let mut guard = VAD.lock().ok()?;
-        let vad = match guard.as_mut() {
-            Some(vad) => vad,
-            None => guard.insert(SileroVad::new().ok()?),
         };
-        let mask = vad.frame_mask(&audio).ok()?;
-        Some(mask_to_regions(&mask))
+        let conv = |layer: usize, inputs: usize, outputs: usize, stride: usize| {
+            let prefix = format!("model.encoder.{layer}.reparam_conv");
+            let weight = tensor(&format!("{prefix}.weight"), outputs * inputs * 3)?;
+            let bias = tensor(&format!("{prefix}.bias"), outputs)?;
+            Some(Conv::new(&weight, bias, inputs, stride))
+        };
+        Some(Self {
+            stft: tensor("model.stft.forward_basis_buffer", 2 * BINS * N_FFT)?,
+            encoder: [
+                conv(0, BINS, 128, 1)?,
+                conv(1, 128, 64, 2)?,
+                conv(2, 64, 64, 2)?,
+                conv(3, 64, HIDDEN, 1)?,
+            ],
+            w_ih: tensor("model.decoder.rnn.weight_ih", 4 * HIDDEN * HIDDEN)?,
+            w_hh: tensor("model.decoder.rnn.weight_hh", 4 * HIDDEN * HIDDEN)?,
+            b_ih: tensor("model.decoder.rnn.bias_ih", 4 * HIDDEN)?,
+            b_hh: tensor("model.decoder.rnn.bias_hh", 4 * HIDDEN)?,
+            w_out: tensor("model.decoder.decoder.2.weight", HIDDEN)?,
+            b_out: tensor("model.decoder.decoder.2.bias", 1)?[0],
+        })
     }
 
-    #[cfg(test)]
-    mod tests {
-        use super::{BRIDGE_FRAMES, FRAME_S, PAD_S, mask_to_regions};
+    // Speech probability per 512-sample frame of 16 kHz mono audio in [-1, 1].
+    // A trailing partial frame is dropped.
+    fn frame_probs(&self, samples: &[f32]) -> Vec<f32> {
+        let (mut h, mut c) = ([0.0f32; HIDDEN], [0.0f32; HIDDEN]);
+        // Previous frame's last 64 samples, the frame, then a 64-sample right
+        // reflection pad, as the ONNX graph builds its STFT input.
+        let mut x = [0.0f32; CONTEXT + WINDOW + CONTEXT];
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        let mut gates = [0.0f32; 4 * HIDDEN];
+        let mut probs = Vec::with_capacity(samples.len() / WINDOW);
+        for chunk in samples.chunks_exact(WINDOW) {
+            x.copy_within(WINDOW..WINDOW + CONTEXT, 0);
+            x[CONTEXT..CONTEXT + WINDOW].copy_from_slice(chunk);
+            let end = CONTEXT + WINDOW;
+            for i in 0..CONTEXT {
+                x[end + i] = x[end - 2 - i];
+            }
 
-        #[test]
-        fn bridges_short_gaps_and_pads_regions() {
-            let mut mask = vec![true; 10];
-            mask.extend(std::iter::repeat_n(false, BRIDGE_FRAMES));
-            mask.extend(std::iter::repeat_n(true, 5));
-            mask.extend(std::iter::repeat_n(false, BRIDGE_FRAMES + 2));
-            mask.extend(std::iter::repeat_n(true, 3));
+            a.clear();
+            for frame in x.windows(N_FFT).step_by(HOP) {
+                for k in 0..BINS {
+                    let re = dot(&self.stft[k * N_FFT..(k + 1) * N_FFT], frame);
+                    let im = dot(
+                        &self.stft[(k + BINS) * N_FFT..(k + BINS + 1) * N_FFT],
+                        frame,
+                    );
+                    a.push((re * re + im * im).sqrt());
+                }
+            }
+            for conv in &self.encoder {
+                conv.run(&a, &mut b);
+                std::mem::swap(&mut a, &mut b);
+            }
 
-            let regions = mask_to_regions(&mask);
-            assert_eq!(regions.len(), 2);
-            assert_eq!(regions[0].0, 0.0);
-            assert!((regions[0].1 - (19.0 * FRAME_S + PAD_S)).abs() < 1e-6);
+            for (r, gate) in gates.iter_mut().enumerate() {
+                let row = r * HIDDEN..(r + 1) * HIDDEN;
+                *gate = self.b_ih[r]
+                    + self.b_hh[r]
+                    + dot(&self.w_ih[row.clone()], &a)
+                    + dot(&self.w_hh[row], &h);
+            }
+            for j in 0..HIDDEN {
+                let input = sigmoid(gates[j]);
+                let forget = sigmoid(gates[HIDDEN + j]);
+                let cell = gates[2 * HIDDEN + j].tanh();
+                let output = sigmoid(gates[3 * HIDDEN + j]);
+                c[j] = forget * c[j] + input * cell;
+                h[j] = output * c[j].tanh();
+            }
+            let logit = self
+                .w_out
+                .iter()
+                .zip(&h)
+                .fold(self.b_out, |acc, (w, v)| acc + w * v.max(0.0));
+            probs.push(sigmoid(logit));
         }
+        probs
+    }
+}
 
-        #[test]
-        fn silence_yields_no_regions() {
-            assert!(mask_to_regions(&[false; 20]).is_empty());
+fn sigmoid(x: f32) -> f32 {
+    1.0 / (1.0 + (-x).exp())
+}
+
+// Eight independent accumulators so the compiler vectorizes the loop.
+fn dot(a: &[f32], b: &[f32]) -> f32 {
+    let mut acc = [0.0f32; 8];
+    let (lanes_a, lanes_b) = (a.chunks_exact(8), b.chunks_exact(8));
+    let tail: f32 = lanes_a
+        .remainder()
+        .iter()
+        .zip(lanes_b.remainder())
+        .map(|(x, y)| x * y)
+        .sum();
+    for (x, y) in lanes_a.zip(lanes_b) {
+        for i in 0..8 {
+            acc[i] += x[i] * y[i];
         }
+    }
+    acc.iter().sum::<f32>() + tail
+}
+
+// Name and raw little-endian data of each tensor in an ONNX file's top-level
+// graph, read straight from the protobuf: ModelProto.graph (7) ->
+// GraphProto.initializer (5) -> TensorProto name (8), raw_data (9).
+fn initializers(model: &[u8]) -> Option<Vec<(&[u8], &[u8])>> {
+    let graph = fields(model).find_map(|(field, value)| (field == 7).then_some(value))?;
+    let tensors = fields(graph)
+        .filter(|(field, _)| *field == 5)
+        .filter_map(|(_, tensor)| {
+            let mut name = None;
+            let mut raw = None;
+            for (field, value) in fields(tensor) {
+                match field {
+                    8 => name = Some(value),
+                    9 => raw = Some(value),
+                    _ => {}
+                }
+            }
+            Some((name?, raw?))
+        })
+        .collect();
+    Some(tensors)
+}
+
+// Protobuf (field number, payload) pairs; varint values are skipped and yield
+// an empty payload. Stops at the first malformed field.
+fn fields(mut buf: &[u8]) -> impl Iterator<Item = (u64, &[u8])> {
+    std::iter::from_fn(move || {
+        let key = varint(&mut buf)?;
+        let len = match key & 7 {
+            0 => {
+                varint(&mut buf)?;
+                0
+            }
+            1 => 8,
+            2 => usize::try_from(varint(&mut buf)?).ok()?,
+            5 => 4,
+            _ => return None,
+        };
+        let payload = buf.get(..len)?;
+        buf = &buf[len..];
+        Some((key >> 3, payload))
+    })
+}
+
+fn varint(buf: &mut &[u8]) -> Option<u64> {
+    let mut value = 0u64;
+    for shift in (0..64).step_by(7) {
+        let (&byte, rest) = buf.split_first()?;
+        *buf = rest;
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn mask_to_regions(mask: &[bool]) -> Vec<(f32, f32)> {
+    let mut regions: Vec<(usize, usize)> = Vec::new();
+    let mut start: Option<usize> = None;
+    let mut gap = 0usize;
+    for (i, &speech) in mask.iter().enumerate() {
+        if speech {
+            start.get_or_insert(i);
+            gap = 0;
+        } else if let Some(s) = start {
+            gap += 1;
+            if gap > BRIDGE_FRAMES {
+                regions.push((s, i - gap + 1));
+                start = None;
+                gap = 0;
+            }
+        }
+    }
+    if let Some(s) = start {
+        regions.push((s, mask.len() - gap));
+    }
+    regions
+        .into_iter()
+        .map(|(s, e)| {
+            (
+                (s as f32 * FRAME_S - PAD_S).max(0.0),
+                e as f32 * FRAME_S + PAD_S,
+            )
+        })
+        .collect()
+}
+
+static VAD: OnceLock<Option<Silero>> = OnceLock::new();
+
+/// Speech regions in seconds (padded), detected by the Silero neural VAD.
+/// Returns `None` if the model is unavailable so callers can fall back
+/// without dropping transcript text. Empty `Vec` means no speech.
+pub fn speech_regions(samples: &[i16], sample_rate: u32) -> Option<Vec<(f32, f32)>> {
+    if sample_rate > crate::audio::MAX_SAMPLE_RATE {
+        return None;
+    }
+    let audio = crate::audio::resample_i16_to_f32(samples, sample_rate, 16_000);
+    if audio.len() < WINDOW {
+        return Some(Vec::new());
+    }
+    let vad = VAD.get_or_init(Silero::load).as_ref()?;
+    let mask: Vec<bool> = vad
+        .frame_probs(&audio)
+        .into_iter()
+        .map(|p| p >= SPEECH_THRESHOLD)
+        .collect();
+    Some(mask_to_regions(&mask))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BRIDGE_FRAMES, FRAME_S, PAD_S, SPEECH_THRESHOLD, Silero, WINDOW, mask_to_regions};
+
+    #[test]
+    fn bridges_short_gaps_and_pads_regions() {
+        let mut mask = vec![true; 10];
+        mask.extend(std::iter::repeat_n(false, BRIDGE_FRAMES));
+        mask.extend(std::iter::repeat_n(true, 5));
+        mask.extend(std::iter::repeat_n(false, BRIDGE_FRAMES + 2));
+        mask.extend(std::iter::repeat_n(true, 3));
+
+        let regions = mask_to_regions(&mask);
+        assert_eq!(regions.len(), 2);
+        assert_eq!(regions[0].0, 0.0);
+        assert!((regions[0].1 - (19.0 * FRAME_S + PAD_S)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn silence_yields_no_regions() {
+        assert!(mask_to_regions(&[false; 20]).is_empty());
+    }
+
+    #[test]
+    fn bundled_model_loads_and_rejects_silence() {
+        let vad = Silero::load().expect("silero weights");
+        let probs = vad.frame_probs(&[0.0; 4 * WINDOW]);
+        assert_eq!(probs.len(), 4);
+        assert!(probs.iter().all(|&p| p < SPEECH_THRESHOLD));
     }
 }

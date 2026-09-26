@@ -929,7 +929,6 @@ dependencies = [
  "hound",
  "httpdate",
  "libc",
- "ort",
  "parakeet-rs",
  "reqwest",
  "serde",

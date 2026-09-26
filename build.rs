@@ -16,7 +16,6 @@ fn main() {
 
     // Named cfgs so source files can gate on capabilities instead of
     // repeating feature and target predicates.
-    emit_cfg("onnx_runtime", !intel_mac);
     emit_cfg("nvidia_engines", nvidia);
     emit_cfg("apple_speech_engine", apple_speech);
     emit_cfg("apple_cleanup", apple_cleanup);
