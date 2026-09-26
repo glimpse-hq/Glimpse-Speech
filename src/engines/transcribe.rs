@@ -7,7 +7,7 @@
 //! compiled Core ML encoder companion next to the model moves the audio
 //! encoder to the Neural Engine: `<gguf stem>-encoder.mlmodelc` for a GGUF,
 //! `whisper-<family>-encoder.mlmodelc` for a Whisper GGUF or
-//! `ggml-<family>[-qX_Y].bin`.
+//! `ggml-<family>[-qX_Y].bin`, with Distil-Whisper using its teacher's.
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -93,10 +93,13 @@ impl TranscribeEngine {
         let stem = model_path.file_stem()?.to_str()?;
         // One Whisper encoder serves every quantization of a family.
         let candidates = if model_path.extension().is_some_and(|ext| ext == "bin") {
-            let family = strip_quant_suffix(stem.strip_prefix("ggml-")?);
+            let family = distil_teacher(strip_quant_suffix(stem.strip_prefix("ggml-")?));
             vec![format!("whisper-{family}")]
         } else if stem.starts_with("whisper-") {
             vec![strip_quant_suffix(stem).to_string(), stem.to_string()]
+        } else if stem.starts_with("distil-") {
+            let family = distil_teacher(strip_quant_suffix(stem));
+            vec![format!("whisper-{family}")]
         } else {
             [Some(stem), stem.strip_suffix("-decoder")]
                 .into_iter()
@@ -706,6 +709,16 @@ fn whisper_prompt(prompt: Option<String>, dictionary: &[String]) -> Option<Strin
     match (prompt, build_dictionary_prompt(dictionary)) {
         (Some(prompt), Some(dictionary)) => Some(format!("{prompt}\n\n{dictionary}")),
         (prompt, dictionary) => prompt.or(dictionary),
+    }
+}
+
+// Distil-Whisper keeps its teacher's encoder, so it shares that companion.
+fn distil_teacher(family: &str) -> &str {
+    match family {
+        "distil-large-v3.5" => "large-v3",
+        "distil-medium.en" => "medium.en",
+        "distil-small.en" => "small.en",
+        other => other,
     }
 }
 
