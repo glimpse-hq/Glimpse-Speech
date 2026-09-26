@@ -275,8 +275,13 @@ impl TranscriptionEngine for TranscribeEngine {
         );
         // These companions hold 15 seconds of audio. Qwen also needs this
         // limit without Core ML because of its native generation budget.
-        self.chunk_samples = (arch == "qwen3_asr" || (arch == "parakeet" && uses_coreml))
-            .then_some(15 * SAMPLE_RATE);
+        // Whisper gets the 28 second chunks Glimpse's Library uses: long-form
+        // seeking can carry a garbage window's context into the next one.
+        self.chunk_samples = if arch == "whisper" {
+            Some(28 * SAMPLE_RATE)
+        } else {
+            (arch == "qwen3_asr" || (arch == "parakeet" && uses_coreml)).then_some(15 * SAMPLE_RATE)
+        };
         self.family = match arch.as_str() {
             "parakeet"
                 if model.accepts_ext(
