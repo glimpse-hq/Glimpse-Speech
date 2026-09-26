@@ -77,8 +77,6 @@ struct LoadedEngine {
 }
 
 enum EngineInstance {
-    #[cfg(feature = "whisper")]
-    Whisper(crate::engines::whisper::WhisperEngine),
     #[cfg(nvidia_engines)]
     Parakeet(crate::engines::parakeet::ParakeetEngine),
     #[cfg(nvidia_engines)]
@@ -108,10 +106,6 @@ impl EngineInstance {
                 engine.transcribe_chunk(chunk).map_err(boxed_error)?;
                 Ok(engine.get_transcript())
             }
-            #[cfg(feature = "whisper")]
-            Self::Whisper(_) => Err(anyhow!(
-                "Streaming is only supported with Apple, Nemotron, or unified Parakeet models"
-            )),
             #[cfg(transcribe_engine)]
             Self::Transcribe(_) => Err(anyhow!(
                 "Streaming is only supported with Apple, Nemotron, or unified Parakeet models"
@@ -127,8 +121,6 @@ impl EngineInstance {
             Self::Nemotron(engine) => engine.reset(),
             #[cfg(apple_speech_engine)]
             Self::Apple(engine) => engine.reset(),
-            #[cfg(feature = "whisper")]
-            Self::Whisper(_) => {}
             #[cfg(transcribe_engine)]
             Self::Transcribe(_) => {}
         }
@@ -161,8 +153,6 @@ impl EngineInstance {
             Self::Nemotron(engine) => Some(engine.get_transcript()),
             #[cfg(apple_speech_engine)]
             Self::Apple(engine) => Some(engine.get_transcript()),
-            #[cfg(feature = "whisper")]
-            Self::Whisper(_) => None,
             #[cfg(transcribe_engine)]
             Self::Transcribe(_) => None,
         }
@@ -183,7 +173,6 @@ impl SpeechService {
     }
 
     fn build(model_cache_dir: PathBuf, resolver: ModelResolver, loose_engine: ModelEngine) -> Self {
-        crate::silence_native_logs();
         Self {
             model_manager: ModelInstallManager::new(model_cache_dir),
             resolver,
@@ -465,28 +454,6 @@ fn boxed_error(err: Box<dyn std::error::Error>) -> anyhow::Error {
 
 fn load_engine(resolved: &ResolvedModel) -> Result<EngineInstance> {
     match resolved.engine {
-        ModelEngine::Whisper => {
-            #[cfg(feature = "whisper")]
-            {
-                use crate::engines::whisper::{
-                    WhisperEngine, WhisperModelParams, dtw_preset_for_variant,
-                };
-
-                let mut engine = WhisperEngine::new();
-                let params = WhisperModelParams {
-                    dtw_preset: resolved.variant.as_deref().and_then(dtw_preset_for_variant),
-                    ..Default::default()
-                };
-                engine
-                    .load_model_with_params(&resolved.path, params)
-                    .map_err(boxed_error)?;
-                Ok(EngineInstance::Whisper(engine))
-            }
-            #[cfg(not(feature = "whisper"))]
-            {
-                Err(anyhow!("Whisper support is not enabled"))
-            }
-        }
         ModelEngine::Parakeet => {
             #[cfg(nvidia_engines)]
             {
@@ -522,7 +489,7 @@ fn load_engine(resolved: &ResolvedModel) -> Result<EngineInstance> {
                 ))
             }
         }
-        ModelEngine::Transcribe => {
+        ModelEngine::Whisper | ModelEngine::Transcribe => {
             #[cfg(transcribe_engine)]
             {
                 use crate::engines::transcribe::{TranscribeEngine, TranscribeModelParams};
@@ -578,18 +545,6 @@ fn transcribe_with_engine(
     request: TranscribeRequest,
 ) -> Result<TranscriptionWithDuration> {
     match engine {
-        #[cfg(feature = "whisper")]
-        EngineInstance::Whisper(engine) => {
-            let wants_timestamps = request.timestamps || request.timestamp_granularity.is_some();
-            let params = crate::engines::whisper::WhisperInferenceParams {
-                language: request.language,
-                initial_prompt: combined_prompt(request.prompt, &request.dictionary),
-                print_timestamps: wants_timestamps,
-                word_timestamps: request.timestamp_granularity == Some(TimestampGranularity::Word),
-                ..Default::default()
-            };
-            transcribe_audio(engine, request.audio, Some(params))
-        }
         #[cfg(nvidia_engines)]
         EngineInstance::Parakeet(engine) => {
             use crate::engines::parakeet::TimestampGranularity as Granularity;
@@ -628,25 +583,14 @@ fn transcribe_with_engine(
             let params = crate::engines::transcribe::TranscribeInferenceParams {
                 language: request.language,
                 dictionary: request.dictionary,
+                prompt: request.prompt,
                 timestamps: request.timestamps || request.timestamp_granularity.is_some(),
+                word_timestamps: request.timestamp_granularity == Some(TimestampGranularity::Word),
             };
             transcribe_audio(engine, request.audio, Some(params))
         }
         #[allow(unreachable_patterns)]
         _ => Err(anyhow!("No speech engine support is enabled")),
-    }
-}
-
-#[cfg(feature = "whisper")]
-fn combined_prompt(prompt: Option<String>, dictionary: &[String]) -> Option<String> {
-    match (
-        prompt,
-        crate::dictionary::build_dictionary_prompt(dictionary),
-    ) {
-        (Some(prompt), Some(dictionary_prompt)) => Some(format!("{prompt}\n\n{dictionary_prompt}")),
-        (Some(prompt), None) => Some(prompt),
-        (None, Some(dictionary_prompt)) => Some(dictionary_prompt),
-        (None, None) => None,
     }
 }
 

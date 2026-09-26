@@ -1,16 +1,19 @@
-//! transcribe.cpp engine: GGUF models run through the `transcribe-cpp` crate.
+//! transcribe.cpp engine: GGUF models and whisper.cpp GGML `.bin` files run
+//! through the `transcribe-cpp` crate.
 //!
 //! The compute backend is chosen by the crate's build features (Metal on
 //! Apple platforms, Vulkan on Windows and Linux) and `Backend::Auto` picks
 //! the best one present, with CPU as the fallback. On Apple Silicon a
-//! compiled Core ML encoder companion (`<gguf stem>-encoder.mlmodelc`) next to
-//! the GGUF moves the audio encoder to the Neural Engine.
+//! compiled Core ML encoder companion next to the model moves the audio
+//! encoder to the Neural Engine: `<gguf stem>-encoder.mlmodelc` for a GGUF,
+//! `whisper-<family>-encoder.mlmodelc` for a Whisper GGUF or
+//! `ggml-<family>[-qX_Y].bin`.
 
 use std::path::{Path, PathBuf};
 
 use transcribe_cpp::{
     Backend, Error, Model, ModelOptions, Qwen3AsrRunOptions, RunExtension, RunOptions, Session,
-    SessionOptions, TimestampKind, Transcript,
+    SessionOptions, TimestampKind, Transcript, WhisperRunOptions,
 };
 
 use crate::{
@@ -30,16 +33,32 @@ pub struct TranscribeModelParams {
 #[derive(Debug, Clone, Default)]
 pub struct TranscribeInferenceParams {
     pub language: Option<String>,
-    /// Vocabulary hints for Qwen3-ASR. Other GGUF families ignore these entries.
+    /// Vocabulary hints for Qwen3-ASR and Whisper. Other families ignore these entries.
     pub dictionary: Vec<String>,
+    /// Whisper decoder prompt, placed before the dictionary hints.
+    pub prompt: Option<String>,
     pub timestamps: bool,
+    /// Whisper computes word timings in an extra alignment pass, so only
+    /// request them when they are used.
+    pub word_timestamps: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+enum Family {
+    #[default]
+    Other,
+    Qwen3Asr,
+    Whisper {
+        words: bool,
+        multilingual: bool,
+    },
 }
 
 #[derive(Default)]
 pub struct TranscribeEngine {
     session: Option<Session>,
     chunk_samples: Option<usize>,
-    supports_context: bool,
+    family: Family,
 }
 
 impl TranscribeEngine {
@@ -47,16 +66,28 @@ impl TranscribeEngine {
         Self::default()
     }
 
-    /// The Core ML companion the catalog unpacks next to a GGUF, when it is
+    /// The Core ML companion the catalog unpacks next to a model, when it is
     /// present and complete. Only meaningful on Apple Silicon.
     pub fn companion_for(model_path: &Path) -> Option<PathBuf> {
         if !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
             return None;
         }
         let stem = model_path.file_stem()?.to_str()?;
-        [Some(stem), stem.strip_suffix("-decoder")]
+        // One Whisper encoder serves every quantization of a family.
+        let candidates = if model_path.extension().is_some_and(|ext| ext == "bin") {
+            let family = strip_quant_suffix(stem.strip_prefix("ggml-")?);
+            vec![format!("whisper-{family}")]
+        } else if stem.starts_with("whisper-") {
+            vec![strip_quant_suffix(stem).to_string(), stem.to_string()]
+        } else {
+            [Some(stem), stem.strip_suffix("-decoder")]
+                .into_iter()
+                .flatten()
+                .map(str::to_string)
+                .collect()
+        };
+        candidates
             .into_iter()
-            .flatten()
             .map(|stem| model_path.with_file_name(format!("{stem}-encoder.mlmodelc")))
             .find(|dir| dir.join("coremldata.bin").is_file())
     }
@@ -86,34 +117,61 @@ impl TranscriptionEngine for TranscribeEngine {
             },
         )
         .map_err(transcribe_error)?;
-        let uses_coreml = params.coreml_encoder.is_some();
-        let session = model
-            .session_with(&SessionOptions {
+        let arch = model.arch();
+        let session_with = |coreml_encoder_path: Option<PathBuf>| {
+            model.session_with(&SessionOptions {
                 n_threads: crate::engines::inference_threads() as i32,
-                coreml_encoder_path: params.coreml_encoder,
+                coreml_encoder_path,
                 ..Default::default()
             })
-            .map_err(transcribe_error)?;
+        };
+        let mut uses_coreml = params.coreml_encoder.is_some();
+        let mut session = session_with(params.coreml_encoder.clone());
+        // Whisper keeps its ggml encoder, so a rejected companion only costs speed.
+        if let (Err(error @ Error::InvalidArgument(_)), Some(encoder)) =
+            (&session, &params.coreml_encoder)
+            && arch == "whisper"
+        {
+            tracing::warn!(
+                "[transcribe.cpp] Core ML encoder {} rejected, using the ggml encoder: {error}",
+                encoder.display()
+            );
+            uses_coreml = false;
+            session = session_with(None);
+        }
+        let session = session.map_err(transcribe_error)?;
         tracing::info!(
-            "[transcribe.cpp] loaded {} ({}) on {}",
+            "[transcribe.cpp] loaded {} ({}) on {} coreml={uses_coreml}",
             model.variant(),
-            model.arch(),
+            arch,
             model.backend()
         );
         // These companions hold 15 seconds of audio. Qwen also needs this
         // limit without Core ML because of its native generation budget.
-        self.chunk_samples = (model.arch() == "qwen3_asr"
-            || (model.arch() == "parakeet" && uses_coreml))
+        self.chunk_samples = (arch == "qwen3_asr" || (arch == "parakeet" && uses_coreml))
             .then_some(15 * SAMPLE_RATE);
+        self.family = match arch.as_str() {
+            "qwen3_asr" => Family::Qwen3Asr,
+            "whisper" => {
+                let capabilities = model.capabilities();
+                Family::Whisper {
+                    words: matches!(
+                        capabilities.max_timestamp_kind,
+                        TimestampKind::Word | TimestampKind::Token
+                    ),
+                    multilingual: capabilities.supports_language_detect,
+                }
+            }
+            _ => Family::Other,
+        };
         self.session = Some(session);
-        self.supports_context = model.arch() == "qwen3_asr";
         Ok(())
     }
 
     fn unload_model(&mut self) {
         self.session = None;
         self.chunk_samples = None;
-        self.supports_context = false;
+        self.family = Family::Other;
     }
 
     fn transcribe_samples(
@@ -121,40 +179,74 @@ impl TranscriptionEngine for TranscribeEngine {
         samples: Vec<f32>,
         params: Option<Self::InferenceParams>,
     ) -> Result<TranscriptionResult, Box<dyn std::error::Error>> {
+        let params = params.unwrap_or_default();
+        let wants_timestamps = params.timestamps || params.word_timestamps;
+        let mut language = params
+            .language
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("auto"))
+            .map(str::to_string);
         let session = self
             .session
             .as_mut()
             .ok_or_else(|| io_error("Model not loaded. Call load_model() first."))?;
-        let params = params.unwrap_or_default();
-        let context = self
-            .supports_context
-            .then(|| build_dictionary_prompt(&params.dictionary))
-            .flatten();
+        let (family, timestamps) = match self.family {
+            Family::Qwen3Asr => (
+                build_dictionary_prompt(&params.dictionary).map(|context| {
+                    RunExtension::Qwen3Asr(Qwen3AsrRunOptions {
+                        context: Some(context),
+                    })
+                }),
+                auto_timestamps(wants_timestamps),
+            ),
+            Family::Whisper {
+                words,
+                multilingual,
+            } => {
+                // English-only Whisper rejects any other language hint.
+                if !multilingual {
+                    language = None;
+                }
+                let timestamps = if params.word_timestamps && words {
+                    TimestampKind::Word
+                } else {
+                    auto_timestamps(wants_timestamps)
+                };
+                // whisper.cpp's decoding as Glimpse shipped it: non-speech tags
+                // kept for silence, no no-speech gate (whisper.cpp's never fired).
+                let options = WhisperRunOptions {
+                    initial_prompt: whisper_prompt(params.prompt, &params.dictionary),
+                    condition_on_prev_tokens: Some(true),
+                    no_speech_thold: Some(f32::INFINITY),
+                    suppress_non_speech: Some(false),
+                    best_of: Some(5),
+                    entropy_thold: Some(2.4),
+                    greedy_prompt_tokens: Some(true),
+                    ..Default::default()
+                };
+                (Some(RunExtension::Whisper(options)), timestamps)
+            }
+            Family::Other => (None, auto_timestamps(wants_timestamps)),
+        };
         let options = RunOptions {
-            family: context.map(|context| {
-                RunExtension::Qwen3Asr(Qwen3AsrRunOptions {
-                    context: Some(context),
-                })
-            }),
-            language: params
-                .language
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string),
-            timestamps: if params.timestamps {
-                TimestampKind::Auto
-            } else {
-                TimestampKind::None
-            },
+            family,
+            language: language.clone(),
+            timestamps,
             ..Default::default()
         };
+        if let Family::Whisper {
+            multilingual: false,
+            ..
+        } = self.family
+        {
+            language = Some("en".to_string());
+        }
         let chunks = decode_chunks(&samples, self.chunk_samples, |chunk| {
             session.run(chunk, &options)
         })
         .map_err(transcribe_error)?;
         let mut text = String::new();
-        let mut language = params.language;
         let mut segments = Vec::new();
         let mut words = Vec::new();
         let mut chunks = chunks.into_iter().peekable();
@@ -196,14 +288,46 @@ impl TranscriptionEngine for TranscribeEngine {
         }
         Ok(TranscriptionResult {
             text,
-            segments: (params.timestamps && !segments.is_empty()).then_some(segments),
-            words: (params.timestamps && !words.is_empty()).then_some(words),
+            segments: (wants_timestamps && !segments.is_empty()).then_some(segments),
+            words: (wants_timestamps && !words.is_empty()).then_some(words),
             language,
         })
     }
 }
 
 const SAMPLE_RATE: usize = 16_000;
+
+fn auto_timestamps(wanted: bool) -> TimestampKind {
+    if wanted {
+        TimestampKind::Auto
+    } else {
+        TimestampKind::None
+    }
+}
+
+fn whisper_prompt(prompt: Option<String>, dictionary: &[String]) -> Option<String> {
+    let prompt = prompt.filter(|prompt| !prompt.trim().is_empty());
+    match (prompt, build_dictionary_prompt(dictionary)) {
+        (Some(prompt), Some(dictionary)) => Some(format!("{prompt}\n\n{dictionary}")),
+        (prompt, dictionary) => prompt.or(dictionary),
+    }
+}
+
+// whisper.cpp names files `ggml-<family>[-qX_Y].bin`, GGUFs are
+// `whisper-<family>-<Q8_0|Q5_K_M|F16|...>.gguf`.
+fn strip_quant_suffix(stem: &str) -> &str {
+    let Some((family, quant)) = stem.rsplit_once('-') else {
+        return stem;
+    };
+    let quant = quant.as_bytes();
+    if matches!(quant.first(), Some(b'q' | b'Q' | b'F'))
+        && quant.get(1).is_some_and(u8::is_ascii_digit)
+    {
+        family
+    } else {
+        stem
+    }
+}
 
 // Match Qwen's reference splitter: use a quiet boundary and preserve every
 // sample exactly once. Search only before the limit so ANE capacity is respected.

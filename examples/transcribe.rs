@@ -1,9 +1,9 @@
-//! Transcribe a WAV with a transcribe.cpp GGUF model.
+//! Transcribe a WAV with a transcribe.cpp GGUF model or a whisper.cpp `.bin`.
 //!
 //!     cargo run --example transcribe --features transcribe -- \
 //!         models/Qwen3-ASR-0.6B-Q8_0.gguf samples/jfk.wav [language] [dictionary words...]
 //!
-//! A `<gguf stem>-encoder.mlmodelc` next to the GGUF is used on Apple Silicon.
+//! A Core ML encoder companion next to the model is used on Apple Silicon.
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use std::{path::PathBuf, time::Instant};
