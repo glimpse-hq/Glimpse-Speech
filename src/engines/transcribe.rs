@@ -84,6 +84,16 @@ impl TranscribeEngine {
         Self::default()
     }
 
+    /// Whether the app marked this encoder as still compiling for the Neural
+    /// Engine, with a `.<encoder dir>.compiling` file next to it.
+    pub fn is_compiling(encoder: &Path) -> bool {
+        encoder.file_name().is_some_and(|name| {
+            encoder
+                .with_file_name(format!(".{}.compiling", name.to_string_lossy()))
+                .is_file()
+        })
+    }
+
     /// The Core ML companion the catalog unpacks next to a model, when it is
     /// present and complete. Only meaningful on Apple Silicon.
     pub fn companion_for(model_path: &Path) -> Option<PathBuf> {

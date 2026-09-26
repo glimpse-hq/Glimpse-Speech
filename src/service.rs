@@ -55,6 +55,7 @@ pub struct SpeechService {
     model_manager: ModelInstallManager,
     resolver: ModelResolver,
     loose_engine: ModelEngine,
+    load_compiling_encoders: bool,
     loaded: Mutex<Option<LoadedEngine>>,
 }
 
@@ -182,8 +183,17 @@ impl SpeechService {
             model_manager: ModelInstallManager::new(model_cache_dir),
             resolver,
             loose_engine,
+            load_compiling_encoders: false,
             loaded: Mutex::new(None),
         }
+    }
+
+    /// Loads Core ML encoders that are still marked as compiling. Only the
+    /// service that runs the compile should use this; others skip the encoder
+    /// so a load never waits minutes on a first Neural Engine compile.
+    pub fn loading_compiling_encoders(mut self) -> Self {
+        self.load_compiling_encoders = true;
+        self
     }
 
     pub fn model_manager(&self) -> &ModelInstallManager {
@@ -397,7 +407,7 @@ impl SpeechService {
                 bytes
             );
             *guard = None;
-            let engine = load_engine(&resolved)?;
+            let engine = load_engine(&resolved, self.load_compiling_encoders)?;
             let load_elapsed = load_started.elapsed();
             *guard = Some(LoadedEngine {
                 model_id: resolved.id.clone(),
@@ -439,6 +449,7 @@ impl Clone for SpeechService {
             model_manager: self.model_manager.clone(),
             resolver: Arc::clone(&self.resolver),
             loose_engine: self.loose_engine,
+            load_compiling_encoders: self.load_compiling_encoders,
             loaded: Mutex::new(None),
         }
     }
@@ -457,7 +468,8 @@ fn boxed_error(err: Box<dyn std::error::Error>) -> anyhow::Error {
     anyhow!(err.to_string())
 }
 
-fn load_engine(resolved: &ResolvedModel) -> Result<EngineInstance> {
+#[cfg_attr(not(transcribe_engine), allow(unused_variables))]
+fn load_engine(resolved: &ResolvedModel, load_compiling_encoders: bool) -> Result<EngineInstance> {
     match resolved.engine {
         ModelEngine::Parakeet => {
             #[cfg(nvidia_engines)]
@@ -500,7 +512,14 @@ fn load_engine(resolved: &ResolvedModel) -> Result<EngineInstance> {
                 use crate::engines::transcribe::{TranscribeEngine, TranscribeModelParams};
 
                 let mut engine = TranscribeEngine::new();
-                let coreml_encoder = TranscribeEngine::companion_for(&resolved.path);
+                // Whisper runs without its encoder; decoder-only models need theirs.
+                let optional_encoder = matches!(resolved.engine, ModelEngine::Whisper);
+                let coreml_encoder =
+                    TranscribeEngine::companion_for(&resolved.path).filter(|dir| {
+                        load_compiling_encoders
+                            || !optional_encoder
+                            || !TranscribeEngine::is_compiling(dir)
+                    });
                 let variant = resolved.variant.as_deref().unwrap_or_default();
                 // Nemotron stays on the CPU like the ONNX runtime it replaces. On an
                 // M2 Pro its 560 ms stream chunks ran faster and steadier there than
