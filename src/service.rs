@@ -327,8 +327,7 @@ impl SpeechService {
         }
     }
 
-    /// Ends the stream and returns the final transcript. Engines that
-    /// finalize per chunk just return the current transcript.
+    /// Ends the stream and returns the final transcript.
     #[cfg(streaming_engines)]
     pub fn streaming_finalize(&self) -> String {
         let Ok(mut guard) = self.loaded.lock() else {
