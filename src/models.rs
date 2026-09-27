@@ -30,12 +30,13 @@ static MODEL_DOWNLOAD_COUNTER: AtomicU64 = AtomicU64::new(0);
 #[serde(rename_all = "snake_case")]
 pub enum ModelEngine {
     Whisper,
-    Parakeet,
-    Nemotron,
     /// Built into macOS 26; not selectable as a loose CLI engine.
     #[cfg_attr(feature = "cli", value(skip))]
     Apple,
-    /// A GGUF model run by transcribe.cpp.
+    /// A GGUF model run by transcribe.cpp. Parakeet and Nemotron once had their
+    /// own ONNX engines; their names still parse.
+    #[serde(alias = "parakeet", alias = "nemotron")]
+    #[cfg_attr(feature = "cli", value(alias = "parakeet", alias = "nemotron"))]
     Transcribe,
 }
 
@@ -43,8 +44,6 @@ impl ModelEngine {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Whisper => "whisper",
-            Self::Parakeet => "parakeet",
-            Self::Nemotron => "nemotron",
             Self::Apple => "apple",
             Self::Transcribe => "transcribe",
         }
@@ -55,16 +54,6 @@ impl fmt::Display for ModelEngine {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ModelLayout {
-    Whisper,
-    ParakeetTdt,
-    ParakeetUnified,
-    Nemotron,
-    Transcribe,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,8 +80,6 @@ pub struct RemoteFile {
 pub struct InstallSpec {
     pub id: String,
     pub engine: ModelEngine,
-    #[serde(default)]
-    pub layout: Option<ModelLayout>,
     pub storage: ModelStorage,
     pub files: Vec<RemoteFile>,
     /// Engine-specific model identity, e.g. the whisper family
@@ -115,7 +102,6 @@ pub struct ResolvedModel {
     pub id: String,
     pub path: PathBuf,
     pub engine: ModelEngine,
-    pub layout: ModelLayout,
     pub variant: Option<String>,
 }
 
@@ -214,7 +200,6 @@ impl ModelInstallManager {
             id: spec.id.clone(),
             path: self.artifact_path(spec),
             engine: spec.engine,
-            layout: spec_layout(spec),
             variant: spec.variant.clone(),
         })
     }
@@ -224,8 +209,8 @@ impl ModelInstallManager {
         reference: &str,
         fallback_engine: ModelEngine,
     ) -> Result<ResolvedModel> {
-        // The loose path has no catalog spec, so the engine and layout are
-        // inferred from the model id; `fallback_engine` covers ids with no marker.
+        // The loose path has no catalog spec, so the engine is inferred from
+        // the model id; `fallback_engine` covers ids with no marker.
         let engine = infer_engine(reference).unwrap_or(fallback_engine);
         if engine == ModelEngine::Apple {
             return resolve_apple(reference, None);
@@ -236,12 +221,6 @@ impl ModelInstallManager {
                 .find(|candidate| candidate.is_file())
                 .or_else(|| single_file_in_dir(&self.cache_dir.join(reference)))
                 .ok_or_else(|| anyhow!("Unknown model: {reference}"))?,
-            ModelEngine::Parakeet | ModelEngine::Nemotron => {
-                [PathBuf::from(reference), self.cache_dir.join(reference)]
-                    .into_iter()
-                    .find(|candidate| candidate.is_dir())
-                    .ok_or_else(|| anyhow!("{engine} models require a directory: {reference}"))?
-            }
             ModelEngine::Transcribe => [PathBuf::from(reference), self.cache_dir.join(reference)]
                 .into_iter()
                 .find(|candidate| candidate.is_file())
@@ -253,7 +232,6 @@ impl ModelInstallManager {
             id: reference.to_string(),
             path,
             engine,
-            layout: default_layout(engine, Some(reference)),
             variant: None,
         })
     }
@@ -589,7 +567,6 @@ fn resolve_apple(id: &str, variant: Option<&str>) -> Result<ResolvedModel> {
             id: id.to_string(),
             path: PathBuf::new(),
             engine: ModelEngine::Apple,
-            layout: default_layout(ModelEngine::Apple, variant),
             variant: variant.map(str::to_string),
         })
     }
@@ -599,18 +576,11 @@ fn resolve_apple(id: &str, variant: Option<&str>) -> Result<ResolvedModel> {
     }
 }
 
-fn spec_layout(spec: &InstallSpec) -> ModelLayout {
-    spec.layout
-        .unwrap_or_else(|| default_layout(spec.engine, spec.variant.as_deref()))
-}
-
 /// Best-effort engine guess from a model id, for the loose CLI path where no
 /// catalog spec names the engine. `None` when the id carries no known marker.
 pub fn infer_engine(reference: &str) -> Option<ModelEngine> {
-    const MARKERS: [ModelEngine; 5] = [
+    const MARKERS: [ModelEngine; 3] = [
         ModelEngine::Apple,
-        ModelEngine::Nemotron,
-        ModelEngine::Parakeet,
         ModelEngine::Whisper,
         ModelEngine::Transcribe,
     ];
@@ -620,28 +590,12 @@ pub fn infer_engine(reference: &str) -> Option<ModelEngine> {
         .and_then(|name| name.to_str())
         .unwrap_or(reference);
     let lower = name.to_ascii_lowercase();
-    if lower.ends_with(".gguf") {
+    if lower.ends_with(".gguf") || lower.contains("parakeet") || lower.contains("nemotron") {
         return Some(ModelEngine::Transcribe);
     }
     MARKERS
         .into_iter()
         .find(|engine| lower.contains(engine.as_str()))
-}
-
-fn default_layout(engine: ModelEngine, variant: Option<&str>) -> ModelLayout {
-    match engine {
-        ModelEngine::Nemotron => ModelLayout::Nemotron,
-        ModelEngine::Parakeet => {
-            if variant.is_some_and(|variant| variant.contains("unified")) {
-                ModelLayout::ParakeetUnified
-            } else {
-                ModelLayout::ParakeetTdt
-            }
-        }
-        // The OS owns the Apple model; layout is meaningless but the field is required.
-        ModelEngine::Whisper | ModelEngine::Apple => ModelLayout::Whisper,
-        ModelEngine::Transcribe => ModelLayout::Transcribe,
-    }
 }
 
 fn validate_spec(spec: &InstallSpec) -> Result<()> {
@@ -1129,7 +1083,6 @@ mod tests {
         InstallSpec {
             id: id.to_string(),
             engine: ModelEngine::Whisper,
-            layout: None,
             storage: ModelStorage::File {
                 artifact: artifact.to_string(),
             },
@@ -1317,18 +1270,18 @@ mod tests {
         assert_eq!(infer_engine("Whisper-large-v3"), Some(ModelEngine::Whisper));
         assert_eq!(
             infer_engine("parakeet-tdt-int8"),
-            Some(ModelEngine::Parakeet)
+            Some(ModelEngine::Transcribe)
         );
         assert_eq!(
             infer_engine("nemotron_streaming_en"),
-            Some(ModelEngine::Nemotron)
+            Some(ModelEngine::Transcribe)
         );
         assert_eq!(infer_engine("apple"), Some(ModelEngine::Apple));
         assert_eq!(infer_engine("ggml-turbo.bin"), None);
         assert_eq!(infer_engine("/models/parakeet/ggml-small.bin"), None);
         assert_eq!(
             infer_engine("/models/whisper/parakeet-tdt-int8"),
-            Some(ModelEngine::Parakeet)
+            Some(ModelEngine::Transcribe)
         );
     }
 
@@ -1446,64 +1399,6 @@ mod tests {
         assert!(
             manager
                 .resolve_loose("/no/such/file/model.bin", ModelEngine::Whisper)
-                .is_err()
-        );
-
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn resolve_loose_loads_parakeet_directory_by_name() {
-        let root =
-            std::env::temp_dir().join(format!("glimpse-speech-parakeet-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        let manager = ModelInstallManager::new(&root);
-        let dir = root.join("parakeet-local");
-        fs::create_dir_all(&dir).unwrap();
-
-        let resolved = manager
-            .resolve_loose("parakeet-local", ModelEngine::Parakeet)
-            .unwrap();
-        assert_eq!(resolved.engine, ModelEngine::Parakeet);
-        assert_eq!(resolved.path, dir);
-
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn resolve_loose_loads_nemotron_directory_by_path() {
-        let root =
-            std::env::temp_dir().join(format!("glimpse-speech-nemotron-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        let manager = ModelInstallManager::new(&root);
-        let dir = root.join("nemotron-local");
-        fs::create_dir_all(&dir).unwrap();
-
-        let resolved = manager
-            .resolve_loose(dir.to_str().unwrap(), ModelEngine::Nemotron)
-            .unwrap();
-        assert_eq!(resolved.engine, ModelEngine::Nemotron);
-        assert_eq!(resolved.path, dir);
-
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn resolve_loose_rejects_directory_engine_file() {
-        let root = std::env::temp_dir().join(format!(
-            "glimpse-speech-directory-engine-file-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        let manager = ModelInstallManager::new(&root);
-        let model_path = root.join("model.bin");
-        fs::write(&model_path, b"not a directory").unwrap();
-
-        assert!(
-            manager
-                .resolve_loose(model_path.to_str().unwrap(), ModelEngine::Parakeet)
                 .is_err()
         );
 

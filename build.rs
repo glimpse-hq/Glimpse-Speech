@@ -6,25 +6,19 @@ fn main() {
     let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
     let macos = target_os == "macos";
     let macos_arm = macos && target_arch == "aarch64";
-    let intel_mac = macos && target_arch == "x86_64";
 
     let whisper = feature("WHISPER");
-    let nvidia = feature("NVIDIA") && !intel_mac;
     let apple_speech = macos_arm && feature("APPLE_SPEECH");
     let apple_cleanup = macos_arm && feature("CLEANUP_APPLE");
     let transcribe = feature("TRANSCRIBE");
 
     // Named cfgs so source files can gate on capabilities instead of
     // repeating feature and target predicates.
-    emit_cfg("nvidia_engines", nvidia);
     emit_cfg("apple_speech_engine", apple_speech);
     emit_cfg("apple_cleanup", apple_cleanup);
     emit_cfg("transcribe_engine", transcribe);
-    emit_cfg(
-        "local_engines",
-        whisper || nvidia || apple_speech || transcribe,
-    );
-    emit_cfg("streaming_engines", nvidia || apple_speech || transcribe);
+    emit_cfg("local_engines", whisper || apple_speech || transcribe);
+    emit_cfg("streaming_engines", apple_speech || transcribe);
 
     if apple_cleanup || apple_speech {
         println!("cargo::rustc-link-arg=-Wl,-rpath,/usr/lib/swift");

@@ -78,10 +78,6 @@ struct LoadedEngine {
 }
 
 enum EngineInstance {
-    #[cfg(nvidia_engines)]
-    Parakeet(crate::engines::parakeet::ParakeetEngine),
-    #[cfg(nvidia_engines)]
-    Nemotron(crate::engines::nemotron::NemotronEngine),
     #[cfg(apple_speech_engine)]
     Apple(crate::engines::apple::AppleEngine),
     #[cfg(transcribe_engine)]
@@ -92,16 +88,6 @@ enum EngineInstance {
 impl EngineInstance {
     fn streaming_transcribe_chunk(&mut self, chunk: &[f32]) -> Result<String> {
         match self {
-            #[cfg(nvidia_engines)]
-            Self::Parakeet(engine) => {
-                engine.transcribe_chunk(chunk).map_err(boxed_error)?;
-                Ok(engine.get_transcript())
-            }
-            #[cfg(nvidia_engines)]
-            Self::Nemotron(engine) => {
-                engine.transcribe_chunk(chunk).map_err(boxed_error)?;
-                Ok(engine.get_transcript())
-            }
             #[cfg(apple_speech_engine)]
             Self::Apple(engine) => {
                 engine.transcribe_chunk(chunk).map_err(boxed_error)?;
@@ -114,10 +100,6 @@ impl EngineInstance {
 
     fn streaming_reset(&mut self) {
         match self {
-            #[cfg(nvidia_engines)]
-            Self::Parakeet(engine) => engine.reset(),
-            #[cfg(nvidia_engines)]
-            Self::Nemotron(engine) => engine.reset(),
             #[cfg(apple_speech_engine)]
             Self::Apple(engine) => engine.reset(),
             #[cfg(transcribe_engine)]
@@ -125,18 +107,12 @@ impl EngineInstance {
         }
     }
 
-    #[cfg_attr(
-        not(any(apple_speech_engine, transcribe_engine)),
-        allow(unused_variables)
-    )]
     fn streaming_configure(&mut self, language: Option<String>, dictionary: Vec<String>) {
         match self {
             #[cfg(apple_speech_engine)]
             Self::Apple(engine) => engine.configure_stream(language, dictionary),
             #[cfg(transcribe_engine)]
             Self::Transcribe(engine) => engine.configure_stream(language, dictionary),
-            #[allow(unreachable_patterns)]
-            _ => {}
         }
     }
 
@@ -146,17 +122,11 @@ impl EngineInstance {
             Self::Apple(engine) => engine.finalize().map_err(boxed_error),
             #[cfg(transcribe_engine)]
             Self::Transcribe(engine) => engine.finalize().map_err(boxed_error),
-            #[allow(unreachable_patterns)]
-            _ => Ok(self.streaming_get_transcript().unwrap_or_default()),
         }
     }
 
     fn streaming_get_transcript(&self) -> Option<String> {
         match self {
-            #[cfg(nvidia_engines)]
-            Self::Parakeet(engine) => Some(engine.get_transcript()),
-            #[cfg(nvidia_engines)]
-            Self::Nemotron(engine) => Some(engine.get_transcript()),
             #[cfg(apple_speech_engine)]
             Self::Apple(engine) => Some(engine.get_transcript()),
             #[cfg(transcribe_engine)]
@@ -471,41 +441,6 @@ fn boxed_error(err: Box<dyn std::error::Error>) -> anyhow::Error {
 #[cfg_attr(not(transcribe_engine), allow(unused_variables))]
 fn load_engine(resolved: &ResolvedModel, load_compiling_encoders: bool) -> Result<EngineInstance> {
     match resolved.engine {
-        ModelEngine::Parakeet => {
-            #[cfg(nvidia_engines)]
-            {
-                use crate::engines::parakeet::{ParakeetEngine, ParakeetModelParams};
-
-                let mut engine = ParakeetEngine::new();
-                engine
-                    .load_model_with_params(
-                        &resolved.path,
-                        ParakeetModelParams::int8_with_layout(resolved.layout),
-                    )
-                    .map_err(boxed_error)?;
-                Ok(EngineInstance::Parakeet(engine))
-            }
-            #[cfg(not(nvidia_engines))]
-            {
-                Err(anyhow!(
-                    "NVIDIA speech support is not enabled on this build"
-                ))
-            }
-        }
-        ModelEngine::Nemotron => {
-            #[cfg(nvidia_engines)]
-            {
-                let mut engine = crate::engines::nemotron::NemotronEngine::new();
-                engine.load_model(&resolved.path).map_err(boxed_error)?;
-                Ok(EngineInstance::Nemotron(engine))
-            }
-            #[cfg(not(nvidia_engines))]
-            {
-                Err(anyhow!(
-                    "NVIDIA speech support is not enabled on this build"
-                ))
-            }
-        }
         ModelEngine::Whisper | ModelEngine::Transcribe => {
             #[cfg(transcribe_engine)]
             {
@@ -570,30 +505,6 @@ fn transcribe_with_engine(
     request: TranscribeRequest,
 ) -> Result<TranscriptionWithDuration> {
     match engine {
-        #[cfg(nvidia_engines)]
-        EngineInstance::Parakeet(engine) => {
-            use crate::engines::parakeet::TimestampGranularity as Granularity;
-
-            let timestamp_granularity = match request.timestamp_granularity {
-                Some(TimestampGranularity::Word) => Granularity::Word,
-                Some(TimestampGranularity::Segment) => Granularity::Segment,
-                None if request.timestamps => Granularity::Segment,
-                None => Granularity::Token,
-            };
-            let params = crate::engines::parakeet::ParakeetInferenceParams {
-                timestamp_granularity,
-                language: request.language,
-                dictionary: request.dictionary,
-            };
-            transcribe_audio(engine, request.audio, Some(params))
-        }
-        #[cfg(nvidia_engines)]
-        EngineInstance::Nemotron(engine) => {
-            let params = crate::engines::nemotron::NemotronInferenceParams {
-                language: request.language,
-            };
-            transcribe_audio(engine, request.audio, Some(params))
-        }
         #[cfg(apple_speech_engine)]
         EngineInstance::Apple(engine) => {
             let params = crate::engines::apple::AppleInferenceParams {

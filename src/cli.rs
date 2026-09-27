@@ -361,7 +361,6 @@ async fn handle_models(
             let spec = InstallSpec {
                 id,
                 engine: ModelEngine::Whisper,
-                layout: None,
                 storage: ModelStorage::File {
                     artifact: artifact.clone(),
                 },

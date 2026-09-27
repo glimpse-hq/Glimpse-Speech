@@ -5,7 +5,7 @@ edition = "2024"
 resolver = "3"
 rust-version = "1.88"
 autoexamples = false
-description = "A transcription API powered by transcribe.cpp, with optional NVIDIA ONNX models via parakeet-rs"
+description = "A transcription API powered by transcribe.cpp"
 license = "MIT"
 repository = "https://github.com/glimpse-hq/Glimpse-Speech"
 homepage = "https://github.com/glimpse-hq/Glimpse-Speech"
@@ -14,10 +14,8 @@ documentation = "https://docs.rs/glimpse-speech"
 [features]
 default = []
 whisper = ["transcribe"]
-nvidia = ["dep:parakeet-rs"]
 transcribe = ["dep:transcribe-cpp"]
-parakeet = ["nvidia"]
-all = ["whisper", "nvidia", "transcribe"]
+all = ["whisper", "transcribe"]
 api = ["dep:axum", "dep:tower-http"]
 remote = ["reqwest/multipart", "dep:flacenc", "dep:base64", "dep:httpdate"]
 cleanup-apple = ["dep:fm-rs"]
@@ -67,11 +65,6 @@ transcribe-cpp = { git = "https://github.com/LegendarySpy/transcribe.cpp.git", r
 [target.'cfg(target_os = "linux")'.dependencies]
 transcribe-cpp = { git = "https://github.com/LegendarySpy/transcribe.cpp.git", rev = "2877ec028ff483b46d946d2bb326aad61a464cf8", default-features = false, features = ["vulkan"], optional = true }
 
-# Intel Mac excluded: parakeet-rs needs ONNX Runtime, which has no prebuilt
-# binary there.
-[target.'cfg(not(all(target_os = "macos", target_arch = "x86_64")))'.dependencies]
-parakeet-rs = { version = "0.3.8", optional = true }
-
 [[example]]
 name = "cleanup"
 required-features = ["cleanup-apple"]
@@ -81,10 +74,6 @@ name = "apple_speech"
 required-features = ["apple-speech"]
 
 [[example]]
-name = "nvidia"
-required-features = ["nvidia"]
-
-[[example]]
 name = "transcribe"
 required-features = ["transcribe"]
 
@@ -92,10 +81,6 @@ required-features = ["transcribe"]
 name = "glimpse-speech"
 path = "src/bin/glimpse-speech.rs"
 required-features = ["cli"]
-
-[[example]]
-name = "stream_bench"
-required-features = ["nvidia"]
 
 [[example]]
 name = "diarize"
