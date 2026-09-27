@@ -339,4 +339,24 @@ mod tests {
         assert_eq!(probs.len(), 4);
         assert!(probs.iter().all(|&p| p < SPEECH_THRESHOLD));
     }
+
+    #[test]
+    fn matches_onnxruntime_on_speech() {
+        // First 24 frames of whisper.cpp's jfk.wav (s16le) and onnxruntime's
+        // probabilities for them from the bundled model.
+        const REFERENCE: [f32; 24] = [
+            0.001670, 0.084632, 0.301986, 0.133493, 0.083199, 0.043454, 0.055422, 0.052693,
+            0.031314, 0.037638, 0.343341, 0.945989, 0.932934, 0.857259, 0.972762, 0.988260,
+            0.990164, 0.989361, 0.995614, 0.993969, 0.982173, 0.994392, 0.994515, 0.994812,
+        ];
+        let audio: Vec<f32> = include_bytes!("vad_reference.pcm")
+            .chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32_768.0)
+            .collect();
+        let probs = Silero::load().expect("silero weights").frame_probs(&audio);
+        assert_eq!(probs.len(), REFERENCE.len());
+        for (p, r) in probs.iter().zip(REFERENCE) {
+            assert!((p - r).abs() < 1e-4, "{p} vs {r}");
+        }
+    }
 }
