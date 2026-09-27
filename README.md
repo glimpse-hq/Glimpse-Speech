@@ -1,26 +1,34 @@
 # glimpse-speech
 
-Local speech-to-text for Rust. One crate, several engines, an OpenAI-compatible HTTP API, and a CLI.
+Local speech-to-text for Rust. One crate, an OpenAI-compatible HTTP API, and a CLI.
 
-- **Whisper** (GGUF or whisper.cpp GGML `.bin` files, run by transcribe.cpp): Metal and optional Core ML/ANE encoders on Apple Silicon, Vulkan on Windows and Linux
-- **transcribe.cpp** (GGUF via [transcribe-cpp](https://github.com/handy-computer/transcribe.cpp)): Qwen3-ASR, Parakeet TDT V3, Parakeet Unified, and Nemotron Streaming (English and 3.5 multilingual). Streaming for Nemotron and Parakeet Unified, phrase boosting for the Parakeet and Nemotron models. Metal on macOS, optional Core ML/ANE encoders on Apple Silicon, and Vulkan on Windows and Linux
+Every local model runs on [transcribe.cpp](https://github.com/LegendarySpy/transcribe.cpp) (our fork): Metal on macOS, optional Core ML/ANE encoders on Apple Silicon, and Vulkan on Windows and Linux.
+
+- **Whisper**: GGUF or whisper.cpp GGML `.bin` files, with word timestamps from an alignment pass
+- **Qwen3-ASR** and **Parakeet TDT V3**: batch transcription
+- **Parakeet Unified** and **Nemotron Streaming** (English and 3.5 multilingual): streaming transcription
+- **Nemotron-3 Diarization**: speaker detection, batch or live
+
+Parakeet and Nemotron boost dictionary words during decoding.
 
 ## Cargo features
 
 | Feature | Enables |
 | --- | --- |
-| `whisper` | Whisper GGUF and `.bin` models through `engines::transcribe::TranscribeEngine` (implies `transcribe`), and Silero VAD (`vad`, pure Rust, every target) |
-| `transcribe` | `engines::transcribe::TranscribeEngine` and `diarization::diarize` (speaker diarization with [Nemotron-3 Diarization](https://huggingface.co/Glimpse-Dictation/Nemotron-3-Diarization-gguf), up to 8 speakers) (builds transcribe.cpp from source: CMake and a C++ toolchain, plus the Vulkan SDK on Windows and Linux) |
+| `transcribe` | `engines::transcribe::TranscribeEngine`, `diarization` (`diarize` and `LiveDiarizer` with [Nemotron-3 Diarization](https://huggingface.co/Glimpse-Dictation/Nemotron-3-Diarization-gguf), up to 8 speakers; `diarize` also takes Sortformer v2.1), and Silero VAD (`vad`, pure Rust, Intel Macs included). Builds transcribe.cpp from source: CMake and a C++ toolchain, plus the Vulkan SDK on Windows and Linux |
+| `whisper` | Whisper as the default loose engine (implies `transcribe`) |
 | `api` | The OpenAI-compatible HTTP server (`api::serve`) |
 | `remote` | Proxying to a remote OpenAI-compatible endpoint, with local fallback |
 | `cli` | The `glimpse-speech` binary (implies `api`) |
+| `apple-speech` | `engines::apple`, the macOS 26 SpeechAnalyzer engine (Apple Silicon) |
+| `cleanup-apple` | Transcript cleanup with Apple's on-device Foundation Models (Apple Silicon) |
 | `all` | `whisper` + `transcribe` |
 
 ## Installation
 
 ```toml
 [dependencies]
-glimpse-speech = { git = "https://github.com/glimpse-hq/Glimpse-Speech.git", tag = "1.7.0", features = ["whisper"] }
+glimpse-speech = { git = "https://github.com/glimpse-hq/Glimpse-Speech.git", tag = "2.0.0", features = ["whisper"] }
 ```
 
 The transcribe.cpp dependency is pinned to an exact Git revision, including its
@@ -33,24 +41,37 @@ cargo check --manifest-path src-tauri/Cargo.toml \
   --config 'patch."https://github.com/glimpse-hq/Glimpse-Speech.git".glimpse-speech.path="../Glimpse-Speech"'
 ```
 
-Qwen3-ASR is decoded in chunks of at most 15 seconds, split at quiet boundaries
-without overlap or omitted samples. This also fits the default Core ML encoder
-capacity. Input-length and output-truncation errors retry smaller chunks; other
-errors propagate normally. Partial transcripts are never reported as complete.
+Long audio is decoded in chunks split at quiet boundaries, without overlap or
+omitted samples: 28 seconds for Whisper, 15 seconds for Qwen3-ASR and for
+Parakeet with a Core ML encoder (the encoder's capacity). Input-length and
+output-truncation errors retry smaller chunks; other errors propagate normally.
+Partial transcripts are never reported as complete. Parakeet TDT re-decodes
+stretches of detected speech that came back without words, which can happen
+after long pauses.
 
 Parakeet TDT V3 supports either a full GGUF for CPU/GPU inference or a compact
 decoder-only GGUF paired with its matching Core ML encoder on Apple Silicon.
 Keep the compiled `<model stem>-encoder.mlmodelc` directory beside the GGUF;
 decoder-only files also recognize the stem without `-decoder`. The compact
 package requires its encoder and cannot serve as a standalone CPU/GPU model.
-Parakeet exposes word timestamps; Qwen does not. Qwen uses the request dictionary
-as vocabulary context on every chunk. These are recognition hints, not forced
-replacements. Neither GGUF model exposes streaming.
+Parakeet and Whisper expose word timestamps; Qwen does not. Neither Qwen nor
+Parakeet TDT exposes streaming.
 
-Qwen's optional ANE companion accelerates the encoder; its decoder still runs
-on Metal. Installing a companion beside an already-loaded model requires
-`SpeechService::unload()` before loading or warming it again. The service cache
-tracks model id and path, not changes to companion files.
+The request dictionary is a recognition hint, not a forced replacement. Qwen and
+Whisper get it as vocabulary context. Parakeet and Nemotron boost up to 64
+entries (newest first, whole words only); Parakeet TDT switches to a 4-wide beam
+search when words are set, while Nemotron and streaming decode greedily.
+
+Core ML companions accelerate the encoder only. A Whisper encoder serves every
+quantization of its family, and distil-Whisper models use their teacher's
+encoder. A Whisper encoder marked as still compiling (`.<name>.compiling` beside
+it) is skipped unless the service was built with
+`SpeechService::loading_compiling_encoders()`; `TranscribeEngine::is_compiling`
+and `TranscribeEngine::companion_for` expose the same checks. Nemotron runs on
+the CPU. Installing a
+companion beside an already-loaded model requires `SpeechService::unload()`
+before loading or warming it again. The service cache tracks model id and path,
+not changes to companion files.
 
 ## CLI
 
@@ -72,7 +93,7 @@ glimpse-speech serve --port 11435 --remote-endpoint https://api.openai.com/v1 --
 
 Useful flags:
 
-- `--engine whisper|transcribe` (default `whisper`; a `.gguf` model path or a Parakeet or Nemotron model id selects `transcribe` automatically)
+- `--engine whisper|transcribe` (default `whisper`; `parakeet` and `nemotron` are accepted as aliases for `transcribe`, and a `.gguf` model path or a Parakeet or Nemotron model id selects it automatically)
 - `--response-format text|json|verbose_json|srt|vtt` (default `text`; `verbose_json`, `srt` and `vtt` turn on segment timestamps)
 - `--language`, `--prompt`, `--dictionary <term>` (repeatable), `--timestamps`
 - `--cache-dir <path>` or `GLIMPSE_SPEECH_CACHE_DIR` to override the model cache
@@ -149,12 +170,16 @@ println!("{}", result.text);
 
 `TranscribeEngine` streams Nemotron and Parakeet Unified GGUFs: `configure_stream(language, dictionary)`, then `transcribe_chunk(&[f32])` for each chunk, `finalize()` for the final text, and `reset()`.
 
+`diarization::LiveDiarizer` detects speakers while audio arrives: `feed(&[f32])` returns the turns so far as `LiveTurns`, and `finish()` returns the final `SpeakerTurn`s.
+
 ### Expected model files
 
 | Engine | Required files |
 | --- | --- |
 | Whisper | a single GGUF (for example `whisper-small-Q8_0.gguf`) or GGML `.bin` file |
-| transcribe.cpp | a single GGUF (for example `parakeet-tdt-0.6b-v3-Q8_0.gguf`) |
+| Qwen3-ASR, Parakeet, Nemotron | a single GGUF (for example `parakeet-tdt-0.6b-v3-Q8_0.gguf`) |
+
+Parakeet and Nemotron ONNX directories from 1.x no longer load; install the GGUF instead.
 
 For Core ML acceleration on Apple Silicon, place a transcribe.cpp Whisper encoder named `whisper-<family>-encoder.mlmodelc` (for example `whisper-small-encoder.mlmodelc`) next to the `whisper-<family>-<quant>.gguf` or `ggml-<family>[-qX_Y].bin` file. whisper.cpp's own `ggml-<family>-encoder.mlmodelc` encoders are not compatible; an encoder that fails to load is skipped and the ggml encoder runs instead.
 
