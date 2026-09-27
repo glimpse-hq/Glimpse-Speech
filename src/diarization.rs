@@ -2,10 +2,10 @@
 //! Nemotron-3 Diarization (up to 8 speakers) or Sortformer v2.1 (up to 4).
 //! Produces who-spoke-when turns, no text.
 
-use std::{mem::ManuallyDrop, path::Path, ptr::NonNull};
+use std::path::Path;
 
 use transcribe_cpp::{
-    Backend, Model, ModelOptions, RunExtension, RunOptions, Session, SessionOptions,
+    Backend, Model, ModelOptions, OwnedStream, RunExtension, RunOptions, Session, SessionOptions,
     SortformerLiveOptions, SortformerPreset, SortformerStreamOptions, SpeakerSegment,
     StreamExtension, StreamOptions, TimestampKind,
 };
@@ -77,17 +77,10 @@ pub struct LiveTurns {
 /// Diarizes 16 kHz mono audio pushed while it is recorded. Nemotron-3
 /// Diarization only; Sortformer v2.1 has no live path.
 pub struct LiveDiarizer {
-    stream: ManuallyDrop<transcribe_cpp::Stream<'static>>,
-    // Borrowed by `stream`. A raw pointer, since moving a `Box` would assert
-    // unique access while the stream holds it.
-    session: NonNull<Session>,
+    stream: OwnedStream,
     received: u64,
     settled_ms: u64,
 }
-
-// SAFETY: the stream is the only user of the boxed session and both move
-// together; `Stream` and `Session` are each `Send`.
-unsafe impl Send for LiveDiarizer {}
 
 impl LiveDiarizer {
     pub fn new(model_path: &Path, use_gpu: bool) -> Result<Self, Error> {
@@ -97,35 +90,25 @@ impl LiveDiarizer {
                 "live diarization needs Nemotron-3 Diarization, not Sortformer v2.1",
             ));
         }
-        let session = NonNull::from(Box::leak(Box::new(session)));
-        // SAFETY: `session` is a heap allocation nothing else touches until
-        // `Drop` frees it, after dropping the stream that borrows it. The
-        // 'static borrow never leaves this struct.
-        let stream = unsafe { &mut *session.as_ptr() }.stream(
-            &RunOptions {
-                timestamps: TimestampKind::None,
-                ..Default::default()
-            },
-            &StreamOptions {
-                family: Some(StreamExtension::SortformerLive(SortformerLiveOptions {
-                    preset: Some(SortformerPreset::LowLatency),
-                })),
-                ..Default::default()
-            },
-        );
-        match stream {
-            Ok(stream) => Ok(Self {
-                stream: ManuallyDrop::new(stream),
-                session,
-                received: 0,
-                settled_ms: 0,
-            }),
-            Err(err) => {
-                // SAFETY: the failed `stream` call left no borrow behind.
-                drop(unsafe { Box::from_raw(session.as_ptr()) });
-                Err(transcribe_error(err))
-            }
-        }
+        let stream = session
+            .into_stream(
+                &RunOptions {
+                    timestamps: TimestampKind::None,
+                    ..Default::default()
+                },
+                &StreamOptions {
+                    family: Some(StreamExtension::SortformerLive(SortformerLiveOptions {
+                        preset: Some(SortformerPreset::LowLatency),
+                    })),
+                    ..Default::default()
+                },
+            )
+            .map_err(|(err, _)| transcribe_error(err))?;
+        Ok(Self {
+            stream,
+            received: 0,
+            settled_ms: 0,
+        })
     }
 
     /// Takes 16 kHz mono samples of any length and returns all turns so far.
@@ -154,17 +137,6 @@ impl LiveDiarizer {
             &self.stream.snapshot().speaker_segments,
             update.input_received_ms.max(0) as u64,
         ))
-    }
-}
-
-impl Drop for LiveDiarizer {
-    fn drop(&mut self) {
-        // SAFETY: the stream goes first, ending its borrow of the session,
-        // and neither is used again.
-        unsafe {
-            ManuallyDrop::drop(&mut self.stream);
-            drop(Box::from_raw(self.session.as_ptr()));
-        }
     }
 }
 
