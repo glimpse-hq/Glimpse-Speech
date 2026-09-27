@@ -287,7 +287,11 @@ impl ModelInstallManager {
 
         let status = status_from_spec(&dir, spec);
         if !status.missing_files.is_empty() {
-            return Ok(status);
+            return Err(anyhow!(
+                "{} downloaded but is missing {}",
+                spec.id,
+                status.missing_files.join(", ")
+            ));
         }
 
         // Hashing multi-GB files must not stall the async runtime.
