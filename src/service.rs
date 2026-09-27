@@ -55,6 +55,7 @@ pub struct SpeechService {
     model_manager: ModelInstallManager,
     resolver: ModelResolver,
     loose_engine: ModelEngine,
+    load_compiling_encoders: bool,
     loaded: Mutex<Option<LoadedEngine>>,
 }
 
@@ -77,12 +78,6 @@ struct LoadedEngine {
 }
 
 enum EngineInstance {
-    #[cfg(feature = "whisper")]
-    Whisper(crate::engines::whisper::WhisperEngine),
-    #[cfg(nvidia_engines)]
-    Parakeet(crate::engines::parakeet::ParakeetEngine),
-    #[cfg(nvidia_engines)]
-    Nemotron(crate::engines::nemotron::NemotronEngine),
     #[cfg(apple_speech_engine)]
     Apple(crate::engines::apple::AppleEngine),
     #[cfg(transcribe_engine)]
@@ -93,54 +88,31 @@ enum EngineInstance {
 impl EngineInstance {
     fn streaming_transcribe_chunk(&mut self, chunk: &[f32]) -> Result<String> {
         match self {
-            #[cfg(nvidia_engines)]
-            Self::Parakeet(engine) => {
-                engine.transcribe_chunk(chunk).map_err(boxed_error)?;
-                Ok(engine.get_transcript())
-            }
-            #[cfg(nvidia_engines)]
-            Self::Nemotron(engine) => {
-                engine.transcribe_chunk(chunk).map_err(boxed_error)?;
-                Ok(engine.get_transcript())
-            }
             #[cfg(apple_speech_engine)]
             Self::Apple(engine) => {
                 engine.transcribe_chunk(chunk).map_err(boxed_error)?;
                 Ok(engine.get_transcript())
             }
-            #[cfg(feature = "whisper")]
-            Self::Whisper(_) => Err(anyhow!(
-                "Streaming is only supported with Apple, Nemotron, or unified Parakeet models"
-            )),
             #[cfg(transcribe_engine)]
-            Self::Transcribe(_) => Err(anyhow!(
-                "Streaming is only supported with Apple, Nemotron, or unified Parakeet models"
-            )),
+            Self::Transcribe(engine) => engine.transcribe_chunk(chunk).map_err(boxed_error),
         }
     }
 
     fn streaming_reset(&mut self) {
         match self {
-            #[cfg(nvidia_engines)]
-            Self::Parakeet(engine) => engine.reset(),
-            #[cfg(nvidia_engines)]
-            Self::Nemotron(engine) => engine.reset(),
             #[cfg(apple_speech_engine)]
             Self::Apple(engine) => engine.reset(),
-            #[cfg(feature = "whisper")]
-            Self::Whisper(_) => {}
             #[cfg(transcribe_engine)]
-            Self::Transcribe(_) => {}
+            Self::Transcribe(engine) => engine.reset(),
         }
     }
 
-    #[cfg_attr(not(apple_speech_engine), allow(unused_variables))]
     fn streaming_configure(&mut self, language: Option<String>, dictionary: Vec<String>) {
         match self {
             #[cfg(apple_speech_engine)]
             Self::Apple(engine) => engine.configure_stream(language, dictionary),
-            #[allow(unreachable_patterns)]
-            _ => {}
+            #[cfg(transcribe_engine)]
+            Self::Transcribe(engine) => engine.configure_stream(language, dictionary),
         }
     }
 
@@ -148,23 +120,17 @@ impl EngineInstance {
         match self {
             #[cfg(apple_speech_engine)]
             Self::Apple(engine) => engine.finalize().map_err(boxed_error),
-            #[allow(unreachable_patterns)]
-            _ => Ok(self.streaming_get_transcript().unwrap_or_default()),
+            #[cfg(transcribe_engine)]
+            Self::Transcribe(engine) => engine.finalize().map_err(boxed_error),
         }
     }
 
     fn streaming_get_transcript(&self) -> Option<String> {
         match self {
-            #[cfg(nvidia_engines)]
-            Self::Parakeet(engine) => Some(engine.get_transcript()),
-            #[cfg(nvidia_engines)]
-            Self::Nemotron(engine) => Some(engine.get_transcript()),
             #[cfg(apple_speech_engine)]
             Self::Apple(engine) => Some(engine.get_transcript()),
-            #[cfg(feature = "whisper")]
-            Self::Whisper(_) => None,
             #[cfg(transcribe_engine)]
-            Self::Transcribe(_) => None,
+            Self::Transcribe(engine) => Some(engine.get_transcript()),
         }
     }
 }
@@ -183,13 +149,21 @@ impl SpeechService {
     }
 
     fn build(model_cache_dir: PathBuf, resolver: ModelResolver, loose_engine: ModelEngine) -> Self {
-        crate::silence_native_logs();
         Self {
             model_manager: ModelInstallManager::new(model_cache_dir),
             resolver,
             loose_engine,
+            load_compiling_encoders: false,
             loaded: Mutex::new(None),
         }
+    }
+
+    /// Loads Core ML encoders that are still marked as compiling. Only the
+    /// service that runs the compile should use this; others skip the encoder
+    /// so a load never waits minutes on a first Neural Engine compile.
+    pub fn loading_compiling_encoders(mut self) -> Self {
+        self.load_compiling_encoders = true;
+        self
     }
 
     pub fn model_manager(&self) -> &ModelInstallManager {
@@ -353,8 +327,7 @@ impl SpeechService {
         }
     }
 
-    /// Ends the stream and returns the final transcript. Engines that
-    /// finalize per chunk just return the current transcript.
+    /// Ends the stream and returns the final transcript.
     #[cfg(streaming_engines)]
     pub fn streaming_finalize(&self) -> String {
         let Ok(mut guard) = self.loaded.lock() else {
@@ -403,7 +376,7 @@ impl SpeechService {
                 bytes
             );
             *guard = None;
-            let engine = load_engine(&resolved)?;
+            let engine = load_engine(&resolved, self.load_compiling_encoders)?;
             let load_elapsed = load_started.elapsed();
             *guard = Some(LoadedEngine {
                 model_id: resolved.id.clone(),
@@ -445,6 +418,7 @@ impl Clone for SpeechService {
             model_manager: self.model_manager.clone(),
             resolver: Arc::clone(&self.resolver),
             loose_engine: self.loose_engine,
+            load_compiling_encoders: self.load_compiling_encoders,
             loaded: Mutex::new(None),
         }
     }
@@ -463,77 +437,28 @@ fn boxed_error(err: Box<dyn std::error::Error>) -> anyhow::Error {
     anyhow!(err.to_string())
 }
 
-fn load_engine(resolved: &ResolvedModel) -> Result<EngineInstance> {
+#[cfg_attr(not(transcribe_engine), allow(unused_variables))]
+fn load_engine(resolved: &ResolvedModel, load_compiling_encoders: bool) -> Result<EngineInstance> {
     match resolved.engine {
-        ModelEngine::Whisper => {
-            #[cfg(feature = "whisper")]
-            {
-                use crate::engines::whisper::{
-                    WhisperEngine, WhisperModelParams, dtw_preset_for_variant,
-                };
-
-                let mut engine = WhisperEngine::new();
-                let params = WhisperModelParams {
-                    dtw_preset: resolved.variant.as_deref().and_then(dtw_preset_for_variant),
-                    ..Default::default()
-                };
-                engine
-                    .load_model_with_params(&resolved.path, params)
-                    .map_err(boxed_error)?;
-                Ok(EngineInstance::Whisper(engine))
-            }
-            #[cfg(not(feature = "whisper"))]
-            {
-                Err(anyhow!("Whisper support is not enabled"))
-            }
-        }
-        ModelEngine::Parakeet => {
-            #[cfg(nvidia_engines)]
-            {
-                use crate::engines::parakeet::{ParakeetEngine, ParakeetModelParams};
-
-                let mut engine = ParakeetEngine::new();
-                engine
-                    .load_model_with_params(
-                        &resolved.path,
-                        ParakeetModelParams::int8_with_layout(resolved.layout),
-                    )
-                    .map_err(boxed_error)?;
-                Ok(EngineInstance::Parakeet(engine))
-            }
-            #[cfg(not(nvidia_engines))]
-            {
-                Err(anyhow!(
-                    "NVIDIA speech support is not enabled on this build"
-                ))
-            }
-        }
-        ModelEngine::Nemotron => {
-            #[cfg(nvidia_engines)]
-            {
-                let mut engine = crate::engines::nemotron::NemotronEngine::new();
-                engine.load_model(&resolved.path).map_err(boxed_error)?;
-                Ok(EngineInstance::Nemotron(engine))
-            }
-            #[cfg(not(nvidia_engines))]
-            {
-                Err(anyhow!(
-                    "NVIDIA speech support is not enabled on this build"
-                ))
-            }
-        }
-        ModelEngine::Transcribe => {
+        ModelEngine::Whisper | ModelEngine::Transcribe => {
             #[cfg(transcribe_engine)]
             {
                 use crate::engines::transcribe::{TranscribeEngine, TranscribeModelParams};
 
                 let mut engine = TranscribeEngine::new();
-                let coreml_encoder = TranscribeEngine::companion_for(&resolved.path);
-                let backend = if coreml_encoder.is_some()
-                    && resolved
-                        .variant
-                        .as_deref()
-                        .is_some_and(|v| v.starts_with("parakeet-"))
+                // Whisper runs without its encoder; decoder-only models need theirs.
+                let optional_encoder = matches!(resolved.engine, ModelEngine::Whisper);
+                let coreml_encoder =
+                    TranscribeEngine::companion_for(&resolved.path).filter(|dir| {
+                        load_compiling_encoders
+                            || !optional_encoder
+                            || !TranscribeEngine::is_compiling(dir)
+                    });
+                let variant = resolved.variant.as_deref().unwrap_or_default();
+                // Nemotron stays on the CPU: on an M2 Pro its 560 ms stream chunks
+                // ran faster and steadier there than queued behind other GPU work.
+                let backend = if (coreml_encoder.is_some() && variant.starts_with("parakeet-"))
+                    || variant.starts_with("nemotron-")
                 {
                     transcribe_cpp::Backend::Cpu
                 } else {
@@ -578,42 +503,6 @@ fn transcribe_with_engine(
     request: TranscribeRequest,
 ) -> Result<TranscriptionWithDuration> {
     match engine {
-        #[cfg(feature = "whisper")]
-        EngineInstance::Whisper(engine) => {
-            let wants_timestamps = request.timestamps || request.timestamp_granularity.is_some();
-            let params = crate::engines::whisper::WhisperInferenceParams {
-                language: request.language,
-                initial_prompt: combined_prompt(request.prompt, &request.dictionary),
-                print_timestamps: wants_timestamps,
-                word_timestamps: request.timestamp_granularity == Some(TimestampGranularity::Word),
-                ..Default::default()
-            };
-            transcribe_audio(engine, request.audio, Some(params))
-        }
-        #[cfg(nvidia_engines)]
-        EngineInstance::Parakeet(engine) => {
-            use crate::engines::parakeet::TimestampGranularity as Granularity;
-
-            let timestamp_granularity = match request.timestamp_granularity {
-                Some(TimestampGranularity::Word) => Granularity::Word,
-                Some(TimestampGranularity::Segment) => Granularity::Segment,
-                None if request.timestamps => Granularity::Segment,
-                None => Granularity::Token,
-            };
-            let params = crate::engines::parakeet::ParakeetInferenceParams {
-                timestamp_granularity,
-                language: request.language,
-                dictionary: request.dictionary,
-            };
-            transcribe_audio(engine, request.audio, Some(params))
-        }
-        #[cfg(nvidia_engines)]
-        EngineInstance::Nemotron(engine) => {
-            let params = crate::engines::nemotron::NemotronInferenceParams {
-                language: request.language,
-            };
-            transcribe_audio(engine, request.audio, Some(params))
-        }
         #[cfg(apple_speech_engine)]
         EngineInstance::Apple(engine) => {
             let params = crate::engines::apple::AppleInferenceParams {
@@ -628,25 +517,14 @@ fn transcribe_with_engine(
             let params = crate::engines::transcribe::TranscribeInferenceParams {
                 language: request.language,
                 dictionary: request.dictionary,
+                prompt: request.prompt,
                 timestamps: request.timestamps || request.timestamp_granularity.is_some(),
+                word_timestamps: request.timestamp_granularity == Some(TimestampGranularity::Word),
             };
             transcribe_audio(engine, request.audio, Some(params))
         }
         #[allow(unreachable_patterns)]
         _ => Err(anyhow!("No speech engine support is enabled")),
-    }
-}
-
-#[cfg(feature = "whisper")]
-fn combined_prompt(prompt: Option<String>, dictionary: &[String]) -> Option<String> {
-    match (
-        prompt,
-        crate::dictionary::build_dictionary_prompt(dictionary),
-    ) {
-        (Some(prompt), Some(dictionary_prompt)) => Some(format!("{prompt}\n\n{dictionary_prompt}")),
-        (Some(prompt), None) => Some(prompt),
-        (None, Some(dictionary_prompt)) => Some(dictionary_prompt),
-        (None, None) => None,
     }
 }
 
