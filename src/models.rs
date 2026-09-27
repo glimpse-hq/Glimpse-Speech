@@ -379,7 +379,11 @@ impl ModelInstallManager {
                 request = request.header(RANGE, format!("bytes={downloaded}-"));
             }
 
-            let mut response = match request.send().await {
+            let Some(sent) = until_cancelled(options, request.send()).await else {
+                let _ = fs::remove_file(&download_path);
+                return Err(DownloadCancelled.into());
+            };
+            let mut response = match sent {
                 Ok(response) => response,
                 Err(err) if can_retry(&mut retries) => {
                     tracing::warn!("[models] retrying {} after {err}", file.path);
@@ -474,12 +478,7 @@ impl ModelInstallManager {
                     return Err(DownloadCancelled.into());
                 }
 
-                // A stalled connection must still stop the moment the user cancels.
-                let next = match options.cancel_token.as_ref() {
-                    Some(token) => token.run_until_cancelled(response.chunk()).await,
-                    None => Some(response.chunk().await),
-                };
-                let Some(next) = next else {
+                let Some(next) = until_cancelled(options, response.chunk()).await else {
                     drop(output);
                     let _ = fs::remove_file(&download_path);
                     return Err(DownloadCancelled.into());
@@ -1037,6 +1036,18 @@ fn can_retry(retries: &mut usize) -> bool {
 async fn wait_before_retry(retries: usize) {
     let delay_ms = RETRY_BACKOFF_BASE_MS.saturating_mul(retries as u64);
     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+}
+
+/// Races `future` against the cancel token, so a stalled connection still
+/// stops the moment the user cancels. `None` when cancelled.
+async fn until_cancelled<F: std::future::Future>(
+    options: &InstallOptions<'_>,
+    future: F,
+) -> Option<F::Output> {
+    match options.cancel_token.as_ref() {
+        Some(token) => token.run_until_cancelled(future).await,
+        None => Some(future.await),
+    }
 }
 
 fn is_cancelled(options: &InstallOptions<'_>) -> bool {
