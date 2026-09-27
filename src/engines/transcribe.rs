@@ -320,7 +320,6 @@ impl TranscriptionEngine for TranscribeEngine {
             Vec::new()
         };
         self.checks_dropped_speech = arch == "parakeet" && model.variant().starts_with("tdt-");
-        // Streaming geometry matching the previous ONNX runtime: 560 ms chunks.
         let accepts = |kind| model.accepts_ext(ExtSlot::Stream, kind);
         self.stream_options =
             if accepts(transcribe_cpp::sys::TRANSCRIBE_EXT_KIND_PARAKEET_BUFFERED_STREAM) {

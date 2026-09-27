@@ -456,9 +456,8 @@ fn load_engine(resolved: &ResolvedModel, load_compiling_encoders: bool) -> Resul
                             || !TranscribeEngine::is_compiling(dir)
                     });
                 let variant = resolved.variant.as_deref().unwrap_or_default();
-                // Nemotron stays on the CPU like the ONNX runtime it replaces. On an
-                // M2 Pro its 560 ms stream chunks ran faster and steadier there than
-                // queued behind other GPU work.
+                // Nemotron stays on the CPU: on an M2 Pro its 560 ms stream chunks
+                // ran faster and steadier there than queued behind other GPU work.
                 let backend = if (coreml_encoder.is_some() && variant.starts_with("parakeet-"))
                     || variant.starts_with("nemotron-")
                 {
