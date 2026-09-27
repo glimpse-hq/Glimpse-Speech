@@ -470,7 +470,17 @@ impl ModelInstallManager {
                     return Err(DownloadCancelled.into());
                 }
 
-                match response.chunk().await {
+                // A stalled connection must still stop the moment the user cancels.
+                let next = match options.cancel_token.as_ref() {
+                    Some(token) => token.run_until_cancelled(response.chunk()).await,
+                    None => Some(response.chunk().await),
+                };
+                let Some(next) = next else {
+                    drop(output);
+                    let _ = fs::remove_file(&download_path);
+                    return Err(DownloadCancelled.into());
+                };
+                match next {
                     Ok(Some(chunk)) => {
                         // Progress only earns fresh retries when a retry can
                         // resume from it; a restart from zero must stay bounded.
