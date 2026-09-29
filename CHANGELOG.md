@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.0.2
+
+### Fixed
+
+- A full Parakeet model with a Core ML encoder (Parakeet Unified) now loads on `Backend::Auto` instead of the CPU. Its streaming still runs the ggml encoder, and on an M2 Pro the CPU made release latency about three times slower (about 255 ms against 90 ms). Whole-file transcription with the Core ML encoder is as fast either way. Decoder-only files (Parakeet TDT V3) keep the CPU.
+
 ## 2.0.1
 
 ### Fixed
