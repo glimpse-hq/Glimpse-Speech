@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.0.1
+
+### Fixed
+
+- A service now skips any still-compiling Core ML encoder when the model file can run without it, not only Whisper's. Parakeet Unified keeps its full GGUF, so loading it no longer waits minutes on a first Neural Engine compile. Decoder-only files still load their encoder.
+
 ## 2.0.0
 
 Every local model now runs on [transcribe.cpp](https://github.com/LegendarySpy/transcribe.cpp) (our fork). whisper-rs, parakeet-rs and ONNX Runtime are gone, so there is one native engine to build and ship.
