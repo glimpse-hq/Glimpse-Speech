@@ -446,8 +446,11 @@ fn load_engine(resolved: &ResolvedModel, load_compiling_encoders: bool) -> Resul
                 use crate::engines::transcribe::{TranscribeEngine, TranscribeModelParams};
 
                 let mut engine = TranscribeEngine::new();
-                // Whisper runs without its encoder; decoder-only models need theirs.
-                let optional_encoder = matches!(resolved.engine, ModelEngine::Whisper);
+                // A full model runs without its Core ML encoder; a decoder-only file needs it.
+                let optional_encoder = !resolved
+                    .path
+                    .file_stem()
+                    .is_some_and(|stem| stem.to_string_lossy().ends_with("-decoder"));
                 let coreml_encoder =
                     TranscribeEngine::companion_for(&resolved.path).filter(|dir| {
                         load_compiling_encoders
