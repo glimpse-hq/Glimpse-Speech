@@ -460,7 +460,11 @@ fn load_engine(resolved: &ResolvedModel, load_compiling_encoders: bool) -> Resul
                 let variant = resolved.variant.as_deref().unwrap_or_default();
                 // Nemotron stays on the CPU: on an M2 Pro its 560 ms stream chunks
                 // ran faster and steadier there than queued behind other GPU work.
-                let backend = if (coreml_encoder.is_some() && variant.starts_with("parakeet-"))
+                // A full Parakeet model streams through its ggml encoder, which is
+                // three times slower on the CPU, so only decoder-only files go there.
+                let backend = if (coreml_encoder.is_some()
+                    && !optional_encoder
+                    && variant.starts_with("parakeet-"))
                     || variant.starts_with("nemotron-")
                 {
                     transcribe_cpp::Backend::Cpu
