@@ -77,6 +77,8 @@ pub struct TranscribeEngine {
     // Parakeet TDT can return no words for whole spans of speech after long
     // pauses, so its decodes are checked against Silero.
     checks_dropped_speech: bool,
+    // Parakeet's Core ML batch encodes the next chunk while one decodes.
+    batches_chunks: bool,
 }
 
 impl TranscribeEngine {
@@ -320,6 +322,7 @@ impl TranscriptionEngine for TranscribeEngine {
             Vec::new()
         };
         self.checks_dropped_speech = arch == "parakeet" && model.variant().starts_with("tdt-");
+        self.batches_chunks = arch == "parakeet" && uses_coreml;
         let accepts = |kind| model.accepts_ext(ExtSlot::Stream, kind);
         self.stream_options =
             if accepts(transcribe_cpp::sys::TRANSCRIBE_EXT_KIND_PARAKEET_BUFFERED_STREAM) {
@@ -351,6 +354,7 @@ impl TranscriptionEngine for TranscribeEngine {
         self.chunk_samples = None;
         self.family = Family::Other;
         self.checks_dropped_speech = false;
+        self.batches_chunks = false;
     }
 
     fn transcribe_samples(
@@ -426,6 +430,7 @@ impl TranscriptionEngine for TranscribeEngine {
         {
             language = Some("en".to_string());
         }
+        let batch = self.batches_chunks;
         let (chunks, speech) = std::thread::scope(|scope| {
             // Silero runs while the model decodes.
             let vad = self
@@ -434,8 +439,8 @@ impl TranscriptionEngine for TranscribeEngine {
                     std::thread::Builder::new().spawn_scoped(scope, || speech_ranges(&samples))
                 })
                 .and_then(Result::ok);
-            let mut chunks = decode_chunks(&samples, self.chunk_samples, |chunk| {
-                session.run(chunk, &options)
+            let mut chunks = decode_chunks(&samples, self.chunk_samples, |chunks| {
+                run_chunks(session, chunks, &options, batch)
             });
             // A rejected boost list must never fail dictation: decode unboosted.
             if let (Err(Error::InvalidArgument(error)), Some(RunExtension::Parakeet(_))) =
@@ -445,8 +450,8 @@ impl TranscriptionEngine for TranscribeEngine {
                     "[transcribe.cpp] phrase boosting rejected, decoding without it: {error}"
                 );
                 options.family = None;
-                chunks = decode_chunks(&samples, self.chunk_samples, |chunk| {
-                    session.run(chunk, &options)
+                chunks = decode_chunks(&samples, self.chunk_samples, |chunks| {
+                    run_chunks(session, chunks, &options, batch)
                 });
             }
             (chunks, vad.and_then(|vad| vad.join().ok().flatten()))
@@ -459,23 +464,22 @@ impl TranscriptionEngine for TranscribeEngine {
             && !holes.is_empty()
         {
             // Decoding the piece between long pauses on its own recovers it.
-            let retries: Result<Vec<_>, Error> = speech_between_long_pauses(&speech, samples.len())
+            let spans: Vec<_> = speech_between_long_pauses(&speech, samples.len())
                 .into_iter()
                 .filter(|span| {
                     *span != (0..samples.len()) && holes.iter().any(|hole| span.contains(hole))
                 })
-                .map(|span| {
-                    let chunks =
-                        decode_chunks(&samples[span.clone()], self.chunk_samples, |chunk| {
-                            session.run(chunk, &options)
-                        })?;
-                    let chunks = chunks
-                        .into_iter()
-                        .map(|(offset, transcript)| (span.start + offset, transcript))
-                        .collect();
-                    Ok((assemble(chunks, span.end), span))
-                })
                 .collect();
+            let retries = decode_spans(&samples, &spans, self.chunk_samples, |chunks| {
+                run_chunks(session, chunks, &options, batch)
+            })
+            .map(|decoded| {
+                decoded
+                    .into_iter()
+                    .zip(spans)
+                    .map(|(chunks, span)| (assemble(chunks, span.end), span))
+                    .collect()
+            });
             match retries {
                 Ok(retries) => result = splice(result, retries),
                 Err(error) => {
@@ -772,35 +776,86 @@ fn quiet_boundary(samples: &[f32], limit: usize) -> usize {
     best.1 + window / 2
 }
 
+// Results for the chunks in order. Unbatched runs stop at the first error;
+// decode_spans decodes any chunk left without a result on its own.
+fn run_chunks(
+    session: &mut Session,
+    chunks: &[&[f32]],
+    options: &RunOptions,
+    batch: bool,
+) -> Result<Vec<Result<Transcript, Error>>, Error> {
+    if batch && chunks.len() > 1 {
+        return session.run_batch(chunks, options);
+    }
+    let mut results = Vec::with_capacity(chunks.len());
+    for chunk in chunks {
+        let result = session.run(chunk, options);
+        let failed = result.is_err();
+        results.push(result);
+        if failed {
+            break;
+        }
+    }
+    Ok(results)
+}
+
 fn decode_chunks(
     samples: &[f32],
     max_samples: Option<usize>,
-    mut decode: impl FnMut(&[f32]) -> Result<Transcript, Error>,
+    decode: impl FnMut(&[&[f32]]) -> Result<Vec<Result<Transcript, Error>>, Error>,
 ) -> Result<Vec<(usize, Transcript)>, Error> {
-    let mut results = Vec::new();
-    let mut pending = Vec::new();
-    pending.push(0..samples.len());
-    while let Some(range) = pending.pop() {
-        let chunk = &samples[range.clone()];
-        if let Some(limit) = max_samples.filter(|limit| chunk.len() > *limit) {
-            let cut = range.start + quiet_boundary(chunk, limit);
-            pending.push(cut..range.end);
-            pending.push(range.start..cut);
-            continue;
+    let span = 0..samples.len();
+    Ok(decode_spans(samples, std::slice::from_ref(&span), max_samples, decode)?.remove(0))
+}
+
+// Decodes every span in one call, each split at quiet points to fit
+// `max_samples`. Results are per span, keyed by absolute sample offset.
+fn decode_spans(
+    samples: &[f32],
+    spans: &[Range<usize>],
+    max_samples: Option<usize>,
+    mut decode: impl FnMut(&[&[f32]]) -> Result<Vec<Result<Transcript, Error>>, Error>,
+) -> Result<Vec<Vec<(usize, Transcript)>>, Error> {
+    let mut chunks = Vec::new();
+    for (index, span) in spans.iter().enumerate() {
+        let mut start = span.start;
+        while let Some(limit) = max_samples.filter(|limit| span.end - start > *limit) {
+            let cut = start + quiet_boundary(&samples[start..span.end], limit);
+            chunks.push((index, start..cut));
+            start = cut;
         }
-        match decode(chunk) {
-            Ok(transcript) => results.push((range.start, transcript)),
-            Err(Error::InputTooLong(_) | Error::OutputTruncated { .. })
-                if chunk.len() > SAMPLE_RATE =>
-            {
-                // Discard the partial output and re-decode both halves. Never
-                // return a successful but incomplete transcript, or retry an
-                // unrelated model/backend error. The one-second floor bounds retries.
-                let cut = range.start + quiet_boundary(chunk, chunk.len() / 2);
-                pending.push(cut..range.end);
-                pending.push(range.start..cut);
+        chunks.push((index, start..span.end));
+    }
+    let pcm: Vec<&[f32]> = chunks
+        .iter()
+        .map(|(_, range)| &samples[range.clone()])
+        .collect();
+    let mut outcomes = decode(&pcm)?.into_iter();
+    let mut results: Vec<Vec<(usize, Transcript)>> = spans.iter().map(|_| Vec::new()).collect();
+    for (index, range) in chunks {
+        let mut pending = vec![(range, outcomes.next())];
+        while let Some((range, outcome)) = pending.pop() {
+            let result = match outcome {
+                Some(result) => result,
+                None => decode(&[&samples[range.clone()]])?.pop().ok_or_else(|| {
+                    Error::Backend("transcribe.cpp returned no result for a chunk".into())
+                })?,
+            };
+            match result {
+                Ok(transcript) => results[index].push((range.start, transcript)),
+                Err(Error::InputTooLong(_) | Error::OutputTruncated { .. })
+                    if range.len() > SAMPLE_RATE =>
+                {
+                    // Discard the partial output and re-decode both halves. Never
+                    // return a successful but incomplete transcript, or retry an
+                    // unrelated model/backend error. The one-second floor bounds retries.
+                    let cut =
+                        range.start + quiet_boundary(&samples[range.clone()], range.len() / 2);
+                    pending.push((cut..range.end, None));
+                    pending.push((range.start..cut, None));
+                }
+                Err(error) => return Err(error),
             }
-            Err(error) => return Err(error),
         }
     }
     Ok(results)
@@ -818,10 +873,15 @@ mod tests {
     fn splits_without_dropping_or_repeating_audio() {
         let samples: Vec<_> = (0..16_000 * 47).map(|i| i as f32).collect();
         let mut consumed = Vec::new();
-        let chunks = super::decode_chunks(&samples, Some(16_000 * 15), |chunk| {
-            assert!(chunk.len() <= 16_000 * 15);
-            consumed.extend_from_slice(chunk);
-            Ok(Default::default())
+        let chunks = super::decode_chunks(&samples, Some(16_000 * 15), |chunks| {
+            Ok(chunks
+                .iter()
+                .map(|chunk| {
+                    assert!(chunk.len() <= 16_000 * 15);
+                    consumed.extend_from_slice(chunk);
+                    Ok(Default::default())
+                })
+                .collect())
         })
         .unwrap();
         assert_eq!(consumed, samples);
@@ -833,24 +893,29 @@ mod tests {
     fn retries_length_errors_but_never_returns_partial_output() {
         let samples = vec![0.0; 16_000 * 8];
         let mut consumed = 0;
-        let chunks = super::decode_chunks(&samples, None, |chunk| {
-            if chunk.len() > 16_000 * 4 {
-                return Err(transcribe_cpp::Error::InputTooLong("test".into()));
-            }
-            if chunk.len() > 16_000 * 2 {
-                return Err(transcribe_cpp::Error::OutputTruncated {
-                    message: "test".into(),
-                    partial: Some(Box::new(transcribe_cpp::Transcript {
-                        text: "partial must be discarded".into(),
+        let chunks = super::decode_chunks(&samples, None, |chunks| {
+            Ok(chunks
+                .iter()
+                .map(|chunk| {
+                    if chunk.len() > 16_000 * 4 {
+                        return Err(transcribe_cpp::Error::InputTooLong("test".into()));
+                    }
+                    if chunk.len() > 16_000 * 2 {
+                        return Err(transcribe_cpp::Error::OutputTruncated {
+                            message: "test".into(),
+                            partial: Some(Box::new(transcribe_cpp::Transcript {
+                                text: "partial must be discarded".into(),
+                                ..Default::default()
+                            })),
+                        });
+                    }
+                    consumed += chunk.len();
+                    Ok(transcribe_cpp::Transcript {
+                        text: "complete".into(),
                         ..Default::default()
-                    })),
-                });
-            }
-            consumed += chunk.len();
-            Ok(transcribe_cpp::Transcript {
-                text: "complete".into(),
-                ..Default::default()
-            })
+                    })
+                })
+                .collect())
         })
         .unwrap();
         assert_eq!(consumed, samples.len());
@@ -860,16 +925,22 @@ mod tests {
     #[test]
     fn errors_stop_without_unbounded_retries() {
         let mut attempts = 0;
-        let result = super::decode_chunks(&vec![0.0; 16_000 * 4], None, |_| {
-            attempts += 1;
-            Err(transcribe_cpp::Error::InputTooLong("test".into()))
+        let result = super::decode_chunks(&vec![0.0; 16_000 * 4], None, |chunks| {
+            attempts += chunks.len();
+            Ok(chunks
+                .iter()
+                .map(|_| Err(transcribe_cpp::Error::InputTooLong("test".into())))
+                .collect())
         });
         assert!(result.is_err());
         assert!(attempts <= 4);
         attempts = 0;
-        let result = super::decode_chunks(&vec![0.0; 16_000 * 4], None, |_| {
-            attempts += 1;
-            Err(transcribe_cpp::Error::Backend("test".into()))
+        let result = super::decode_chunks(&vec![0.0; 16_000 * 4], None, |chunks| {
+            attempts += chunks.len();
+            Ok(chunks
+                .iter()
+                .map(|_| Err(transcribe_cpp::Error::Backend("test".into())))
+                .collect())
         });
         assert!(result.is_err());
         assert_eq!(attempts, 1);
