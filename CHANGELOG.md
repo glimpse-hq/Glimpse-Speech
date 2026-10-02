@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.0.3
+
+### Changed
+
+- Parakeet with a Core ML encoder decodes a recording's chunks, and its dropped-speech retries, as one transcribe.cpp batch, so the Neural Engine encodes the next chunk while the current one decodes. On an M2 Pro, Parakeet TDT V3 with the same model files transcribes a 554 s file in 2.26 s instead of 4.21 s, and short clips in 47 ms instead of 68 ms.
+- Silero VAD computes its spectrum with an FFT.
+- transcribe.cpp is pinned to the Parakeet speed work: quantized decoder step weights for Parakeet (Nemotron keeps fp32), smaller Core ML encoder functions for short audio when the encoder has them (macOS 15), and int8 weights in the Core ML converter.
+
 ## 2.0.2
 
 ### Fixed
