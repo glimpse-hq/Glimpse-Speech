@@ -54,16 +54,16 @@ libc = "0.2"
 
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
 fm-rs = { version = "0.3.0", optional = true }
-transcribe-cpp = { git = "https://github.com/LegendarySpy/transcribe.cpp.git", rev = "ee004124969fab9b84da75b14e2c79873e76973d", default-features = false, features = ["metal", "coreml"], optional = true }
+transcribe-cpp = { git = "https://github.com/LegendarySpy/transcribe.cpp.git", rev = "cb19bed73ffb6c36e5ba8ccd6befba0b9dcff049", default-features = false, features = ["metal", "coreml"], optional = true }
 
 [target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
-transcribe-cpp = { git = "https://github.com/LegendarySpy/transcribe.cpp.git", rev = "ee004124969fab9b84da75b14e2c79873e76973d", default-features = false, features = ["metal"], optional = true }
+transcribe-cpp = { git = "https://github.com/LegendarySpy/transcribe.cpp.git", rev = "cb19bed73ffb6c36e5ba8ccd6befba0b9dcff049", default-features = false, features = ["metal"], optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-transcribe-cpp = { git = "https://github.com/LegendarySpy/transcribe.cpp.git", rev = "ee004124969fab9b84da75b14e2c79873e76973d", default-features = false, features = ["vulkan"], optional = true }
+transcribe-cpp = { git = "https://github.com/LegendarySpy/transcribe.cpp.git", rev = "cb19bed73ffb6c36e5ba8ccd6befba0b9dcff049", default-features = false, features = ["vulkan"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-transcribe-cpp = { git = "https://github.com/LegendarySpy/transcribe.cpp.git", rev = "ee004124969fab9b84da75b14e2c79873e76973d", default-features = false, features = ["vulkan"], optional = true }
+transcribe-cpp = { git = "https://github.com/LegendarySpy/transcribe.cpp.git", rev = "cb19bed73ffb6c36e5ba8ccd6befba0b9dcff049", default-features = false, features = ["vulkan"], optional = true }
 
 [[example]]
 name = "cleanup"
