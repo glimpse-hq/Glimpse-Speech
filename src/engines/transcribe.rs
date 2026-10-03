@@ -257,9 +257,18 @@ impl TranscriptionEngine for TranscribeEngine {
         )
         .map_err(transcribe_error)?;
         let arch = model.arch();
+        let on_cpu = model.backend().eq_ignore_ascii_case("cpu");
         let session_with = |coreml_encoder_path: Option<PathBuf>| {
+            // Next to a GPU or Core ML encoder the CPU only runs the mel and
+            // the decoder, which gained nothing past 8 threads on Windows
+            // while the extra threads kept cores busy.
+            let threads = if on_cpu && coreml_encoder_path.is_none() {
+                crate::engines::inference_threads()
+            } else {
+                crate::engines::inference_threads().min(8)
+            };
             model.session_with(&SessionOptions {
-                n_threads: crate::engines::inference_threads() as i32,
+                n_threads: threads as i32,
                 coreml_encoder_path,
                 ..Default::default()
             })
