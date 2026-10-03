@@ -69,8 +69,62 @@ impl Conv {
     }
 }
 
+// The ONNX STFT basis is a periodic-Hann-windowed DFT, so the magnitudes come
+// from an FFT of the windowed frame. Row 0 of the basis (frequency 0) is the
+// window itself.
+struct Stft {
+    window: Vec<f32>,
+    twiddles: Vec<(f32, f32)>, // exp(-2 pi i k / N_FFT), k < N_FFT / 2
+    bit_reversed: Vec<usize>,
+}
+
+impl Stft {
+    fn new(basis: &[f32]) -> Self {
+        let bits = N_FFT.trailing_zeros();
+        Self {
+            window: basis[..N_FFT].to_vec(),
+            twiddles: (0..N_FFT / 2)
+                .map(|k| {
+                    let angle = -2.0 * std::f64::consts::PI * k as f64 / N_FFT as f64;
+                    (angle.cos() as f32, angle.sin() as f32)
+                })
+                .collect(),
+            bit_reversed: (0..N_FFT)
+                .map(|i| i.reverse_bits() >> (usize::BITS - bits))
+                .collect(),
+        }
+    }
+
+    // Appends |X_k| for k in 0..BINS.
+    fn magnitudes(&self, frame: &[f32], out: &mut Vec<f32>) {
+        let mut re = [0.0f32; N_FFT];
+        let mut im = [0.0f32; N_FFT];
+        for (i, &j) in self.bit_reversed.iter().enumerate() {
+            re[j] = frame[i] * self.window[i];
+        }
+        let mut half = 1;
+        while half < N_FFT {
+            let stride = N_FFT / (2 * half);
+            for start in (0..N_FFT).step_by(2 * half) {
+                for k in 0..half {
+                    let (wr, wi) = self.twiddles[k * stride];
+                    let (a, b) = (start + k, start + k + half);
+                    let tr = re[b] * wr - im[b] * wi;
+                    let ti = re[b] * wi + im[b] * wr;
+                    re[b] = re[a] - tr;
+                    im[b] = im[a] - ti;
+                    re[a] += tr;
+                    im[a] += ti;
+                }
+            }
+            half *= 2;
+        }
+        out.extend((0..BINS).map(|k| (re[k] * re[k] + im[k] * im[k]).sqrt()));
+    }
+}
+
 struct Silero {
-    stft: Vec<f32>, // [2 * BINS][N_FFT]: real rows, then imaginary rows
+    stft: Stft,
     encoder: [Conv; 4],
     w_ih: Vec<f32>, // [4 * HIDDEN][HIDDEN], LSTM gates i, f, g, o
     w_hh: Vec<f32>,
@@ -101,7 +155,10 @@ impl Silero {
             Some(Conv::new(&weight, bias, inputs, stride))
         };
         Some(Self {
-            stft: tensor("model.stft.forward_basis_buffer", 2 * BINS * N_FFT)?,
+            stft: Stft::new(&tensor(
+                "model.stft.forward_basis_buffer",
+                2 * BINS * N_FFT,
+            )?),
             encoder: [
                 conv(0, BINS, 128, 1)?,
                 conv(1, 128, 64, 2)?,
@@ -137,14 +194,7 @@ impl Silero {
 
             a.clear();
             for frame in x.windows(N_FFT).step_by(HOP) {
-                for k in 0..BINS {
-                    let re = dot(&self.stft[k * N_FFT..(k + 1) * N_FFT], frame);
-                    let im = dot(
-                        &self.stft[(k + BINS) * N_FFT..(k + BINS + 1) * N_FFT],
-                        frame,
-                    );
-                    a.push((re * re + im * im).sqrt());
-                }
+                self.stft.magnitudes(frame, &mut a);
             }
             for conv in &self.encoder {
                 conv.run(&a, &mut b);
