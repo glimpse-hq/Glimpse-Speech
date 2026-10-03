@@ -289,10 +289,16 @@ impl TranscriptionEngine for TranscribeEngine {
         // limit without Core ML because of its native generation budget.
         // Whisper gets the 28 second chunks Glimpse's Library uses: long-form
         // seeking can carry a garbage window's context into the next one.
-        self.chunk_samples = if arch == "whisper" {
-            Some(28 * SAMPLE_RATE)
-        } else {
-            (arch == "qwen3_asr" || (arch == "parakeet" && uses_coreml)).then_some(15 * SAMPLE_RATE)
+        // A ggml Parakeet encoder attends over its whole input: 60 second
+        // windows ran 2 to 3 times faster than whole recordings on Metal and
+        // the CPU, with lower long-form WER, and Unified returned no text for
+        // some recordings past 6 minutes.
+        self.chunk_samples = match arch.as_str() {
+            "whisper" => Some(28 * SAMPLE_RATE),
+            "qwen3_asr" => Some(15 * SAMPLE_RATE),
+            "parakeet" if uses_coreml => Some(15 * SAMPLE_RATE),
+            "parakeet" => Some(60 * SAMPLE_RATE),
+            _ => None,
         };
         self.family = match arch.as_str() {
             "parakeet"
