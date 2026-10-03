@@ -9,7 +9,7 @@
 - transcribe.cpp is pinned to the Parakeet speed work: quantized decoder step weights for Parakeet (Nemotron keeps fp32), smaller Core ML encoder functions for short audio when the encoder has them (macOS 15), and int8 weights in the Core ML converter.
 - Inference uses one thread per performance core, up to 24, instead of a flat 8 (Windows and Intel Macs included). With a GPU or Core ML encoder doing the heavy work the CPU side keeps 8. On a 24-core Xeon, Parakeet TDT V3 on the CPU transcribes a 554 s file in 24 s instead of 119 s together with the 60 second windows below.
 - Parakeet-family models without a Core ML encoder transcribe long recordings in 60 second windows. Faster on the CPU and Metal (Parakeet TDT V3 on Metal: 7.5 s instead of 19.8 s for 554 s) and a lower long-form error rate.
-- Whole Nemotron recordings run on a GPU copy of the model, loaded on the first file transcription, while live streaming stays on the CPU. On an RTX 4000 Ada, Nemotron EN transcribes a 554 s file in 2.8 s instead of 92 s. Nemotron 3.5 keeps whole recordings on the CPU on Metal.
+- Whole Nemotron recordings of 30 seconds or more run on a GPU copy of the model, loaded on the first such transcription, while live streaming and shorter audio (including dictation that falls back from streaming) stay on the CPU. On an RTX 4000 Ada, Nemotron EN transcribes a 554 s file in 2.8 s instead of 92 s. Nemotron 3.5 keeps whole recordings on the CPU on Metal.
 - transcribe.cpp's mel fallback without BLAS (Windows) is about 4x faster with identical output.
 
 ### Fixed

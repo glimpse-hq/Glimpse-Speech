@@ -40,6 +40,26 @@ pub enum AudioInput {
     PcmI16 { samples: Vec<i16>, sample_rate: u32 },
 }
 
+impl AudioInput {
+    fn duration_secs(&self) -> Option<f32> {
+        match self {
+            Self::WavPath(path) => {
+                let reader = hound::WavReader::open(path).ok()?;
+                Some(reader.duration() as f32 / reader.spec().sample_rate as f32)
+            }
+            Self::Samples16Khz(samples) => Some(samples.len() as f32 / 16_000.0),
+            Self::PcmI16 {
+                samples,
+                sample_rate,
+            } => Some(samples.len() as f32 / *sample_rate as f32),
+        }
+    }
+}
+
+// Audio shorter than this stays on the loaded CPU engine: on short clips the
+// GPU copy barely helps, and loading it would land in a dictation fallback.
+const GPU_COPY_MIN_SECS: f32 = 30.0;
+
 #[derive(Debug, Clone)]
 pub struct TranscribeRequest {
     pub audio: AudioInput,
@@ -215,7 +235,11 @@ impl SpeechService {
         let mut guard = self.ensure_loaded(&requested_model)?;
         let loaded = loaded_engine(&mut guard)?;
         let resolved_id = loaded.model_id.clone();
-        if let Some(resolved) = loaded.gpu_copy.take() {
+        let long = request
+            .audio
+            .duration_secs()
+            .is_some_and(|secs| secs >= GPU_COPY_MIN_SECS);
+        if long && let Some(resolved) = loaded.gpu_copy.take() {
             match load_engine(&resolved, self.load_compiling_encoders, true) {
                 Ok(engine) => loaded.batch_engine = Some(engine),
                 Err(error) => tracing::warn!(
@@ -224,7 +248,10 @@ impl SpeechService {
                 ),
             }
         }
-        let engine = loaded.batch_engine.as_mut().unwrap_or(&mut loaded.engine);
+        let engine = match loaded.batch_engine.as_mut() {
+            Some(batch) if long => batch,
+            _ => &mut loaded.engine,
+        };
         let transcribe_started = Instant::now();
         let transcription = transcribe_with_engine(engine, request)?;
         let transcribe_elapsed = transcribe_started.elapsed();
