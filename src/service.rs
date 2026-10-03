@@ -455,17 +455,17 @@ fn boxed_error(err: Box<dyn std::error::Error>) -> anyhow::Error {
 
 // Nemotron streams on the CPU: its 560 ms chunks finished later on Vulkan
 // (RTX 4000 Ada) and less steadily behind other GPU work on an M2 Pro. Whole
-// recordings ran several times faster on the GPU, so they get a second copy.
+// recordings ran several times faster on the GPU, so they get a second copy,
+// except Nemotron 3.5 on Metal, which was less accurate in Hungarian there.
 fn streams_on_cpu(resolved: &ResolvedModel) -> bool {
+    let variant = resolved.variant.as_deref().unwrap_or_default();
     #[cfg(transcribe_engine)]
-    let gpu = transcribe_cpp::backend_available(transcribe_cpp::Backend::Metal)
-        || transcribe_cpp::backend_available(transcribe_cpp::Backend::Vulkan);
+    let gpu = transcribe_cpp::backend_available(transcribe_cpp::Backend::Vulkan)
+        || (transcribe_cpp::backend_available(transcribe_cpp::Backend::Metal)
+            && !variant.starts_with("nemotron-35-"));
     #[cfg(not(transcribe_engine))]
     let gpu = false;
-    gpu && resolved
-        .variant
-        .as_deref()
-        .is_some_and(|variant| variant.starts_with("nemotron-"))
+    gpu && variant.starts_with("nemotron-")
 }
 
 #[cfg_attr(not(transcribe_engine), allow(unused_variables))]
