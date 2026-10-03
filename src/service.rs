@@ -75,6 +75,10 @@ struct LoadedEngine {
     path: PathBuf,
     warmed: bool,
     engine: EngineInstance,
+    // Nemotron streams on the CPU and transcribes whole recordings with a
+    // second copy on the GPU, loaded by the first one.
+    gpu_copy: Option<ResolvedModel>,
+    batch_engine: Option<EngineInstance>,
 }
 
 enum EngineInstance {
@@ -211,8 +215,18 @@ impl SpeechService {
         let mut guard = self.ensure_loaded(&requested_model)?;
         let loaded = loaded_engine(&mut guard)?;
         let resolved_id = loaded.model_id.clone();
+        if let Some(resolved) = loaded.gpu_copy.take() {
+            match load_engine(&resolved, self.load_compiling_encoders, true) {
+                Ok(engine) => loaded.batch_engine = Some(engine),
+                Err(error) => tracing::warn!(
+                    "[SpeechService] {} stays on the CPU, its GPU copy failed to load: {error}",
+                    resolved.id
+                ),
+            }
+        }
+        let engine = loaded.batch_engine.as_mut().unwrap_or(&mut loaded.engine);
         let transcribe_started = Instant::now();
-        let transcription = transcribe_with_engine(&mut loaded.engine, request)?;
+        let transcription = transcribe_with_engine(engine, request)?;
         let transcribe_elapsed = transcribe_started.elapsed();
         loaded.warmed = true;
         tracing::info!(
@@ -376,13 +390,15 @@ impl SpeechService {
                 bytes
             );
             *guard = None;
-            let engine = load_engine(&resolved, self.load_compiling_encoders)?;
+            let engine = load_engine(&resolved, self.load_compiling_encoders, false)?;
             let load_elapsed = load_started.elapsed();
             *guard = Some(LoadedEngine {
                 model_id: resolved.id.clone(),
                 path: resolved.path.clone(),
                 warmed: false,
                 engine,
+                gpu_copy: streams_on_cpu(&resolved).then(|| resolved.clone()),
+                batch_engine: None,
             });
             tracing::info!(
                 "[SpeechService] ensure_loaded model={} reloaded=true total={:.2}s resolve={:.2}s lock_wait={:.2}s load={:.2}s",
@@ -437,8 +453,27 @@ fn boxed_error(err: Box<dyn std::error::Error>) -> anyhow::Error {
     anyhow!(err.to_string())
 }
 
+// Nemotron streams on the CPU: its 560 ms chunks finished later on Vulkan
+// (RTX 4000 Ada) and less steadily behind other GPU work on an M2 Pro. Whole
+// recordings ran several times faster on the GPU, so they get a second copy.
+fn streams_on_cpu(resolved: &ResolvedModel) -> bool {
+    #[cfg(transcribe_engine)]
+    let gpu = transcribe_cpp::backend_available(transcribe_cpp::Backend::Metal)
+        || transcribe_cpp::backend_available(transcribe_cpp::Backend::Vulkan);
+    #[cfg(not(transcribe_engine))]
+    let gpu = false;
+    gpu && resolved
+        .variant
+        .as_deref()
+        .is_some_and(|variant| variant.starts_with("nemotron-"))
+}
+
 #[cfg_attr(not(transcribe_engine), allow(unused_variables))]
-fn load_engine(resolved: &ResolvedModel, load_compiling_encoders: bool) -> Result<EngineInstance> {
+fn load_engine(
+    resolved: &ResolvedModel,
+    load_compiling_encoders: bool,
+    gpu_copy: bool,
+) -> Result<EngineInstance> {
     match resolved.engine {
         ModelEngine::Whisper | ModelEngine::Transcribe => {
             #[cfg(transcribe_engine)]
@@ -458,14 +493,12 @@ fn load_engine(resolved: &ResolvedModel, load_compiling_encoders: bool) -> Resul
                             || !TranscribeEngine::is_compiling(dir)
                     });
                 let variant = resolved.variant.as_deref().unwrap_or_default();
-                // Nemotron stays on the CPU: on an M2 Pro its 560 ms stream chunks
-                // ran faster and steadier there than queued behind other GPU work.
                 // A full Parakeet model streams through its ggml encoder, which is
                 // three times slower on the CPU, so only decoder-only files go there.
                 let backend = if (coreml_encoder.is_some()
                     && !optional_encoder
                     && variant.starts_with("parakeet-"))
-                    || variant.starts_with("nemotron-")
+                    || (variant.starts_with("nemotron-") && !gpu_copy)
                 {
                     transcribe_cpp::Backend::Cpu
                 } else {
