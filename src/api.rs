@@ -1593,6 +1593,56 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn delete_removes_only_cached_model_directories() {
+            let cache = std::env::temp_dir()
+                .join(format!("glimpse-speech-api-delete-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&cache);
+            std::fs::create_dir_all(cache.join("whisper_base")).unwrap();
+            std::fs::write(cache.join("whisper_base/ggml-base.bin"), b"ggml").unwrap();
+            std::fs::write(cache.join("ggml-tiny.bin"), b"ggml").unwrap();
+            let service = Arc::new(
+                SpeechService::new_loose_with_engine(
+                    cache.clone(),
+                    crate::models::ModelEngine::Whisper,
+                )
+                .only_cached_models(None),
+            );
+            let mut state = state(ApiLimits::default());
+            state.provider = Arc::new(SpeechProvider::Local(Arc::clone(&service)));
+            state.service = service;
+            state.local_model_source = Some(Arc::new(Vec::new));
+            let delete = |id: &str| {
+                let request = Request::delete(format!("/v1/models/{id}"))
+                    .body(Body::empty())
+                    .unwrap();
+                let app = router(state.clone());
+                async move {
+                    let response = app.oneshot(request).await.unwrap();
+                    let status = response.status();
+                    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                        .await
+                        .unwrap();
+                    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    (status, json)
+                }
+            };
+
+            for id in ["ggml-tiny.bin", "missing", "%2E%2E"] {
+                let (status, json) = delete(id).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{id}: {json}");
+            }
+            assert!(cache.join("ggml-tiny.bin").is_file());
+
+            let (status, json) = delete("whisper_base").await;
+            assert_eq!(status, StatusCode::OK, "{json}");
+            assert_eq!(json["id"], "whisper_base");
+            assert_eq!(json["installed"], false);
+            assert!(!cache.join("whisper_base").exists());
+            assert!(cache.is_dir());
+            let _ = std::fs::remove_dir_all(&cache);
+        }
+
+        #[tokio::test]
         async fn a_stalled_upload_times_out() {
             let state = state(ApiLimits {
                 request_timeout: Some(Duration::from_millis(50)),

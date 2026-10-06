@@ -961,7 +961,129 @@ fn decode_spans(
 
 #[cfg(test)]
 mod tests {
-    use super::TranscribeEngine;
+    use super::{
+        SAMPLE_RATE, TranscribeEngine, TranscriptionResult, TranscriptionSegment, assemble,
+        dropped_speech, speech_between_long_pauses, splice,
+    };
+
+    fn span(start: f32, end: f32, text: &str) -> TranscriptionSegment {
+        TranscriptionSegment {
+            start,
+            end,
+            text: text.to_string(),
+        }
+    }
+
+    fn seconds(value: f32) -> usize {
+        (value * SAMPLE_RATE as f32) as usize
+    }
+
+    #[test]
+    fn assemble_offsets_and_clamps_each_chunk() {
+        let chunk = |text: &str, t1_ms, language: Option<&str>| transcribe_cpp::Transcript {
+            text: text.into(),
+            language: language.map(Into::into),
+            segments: vec![transcribe_cpp::Segment {
+                t0_ms: 0,
+                t1_ms,
+                text: text.into(),
+                ..Default::default()
+            }],
+            words: vec![transcribe_cpp::Word {
+                t0_ms: 0,
+                t1_ms,
+                text: text.into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let result = assemble(
+            vec![
+                (0, chunk(" hello ", 1000, Some("en"))),
+                (seconds(2.0), chunk(" ", 0, None)),
+                // TDT can time a word past the end of its chunk.
+                (seconds(2.5), chunk("world", 5000, Some("de"))),
+            ],
+            seconds(3.0),
+        );
+        assert_eq!(result.text, "hello world");
+        assert_eq!(
+            result.segments.unwrap(),
+            vec![span(0.0, 1.0, "hello"), span(2.5, 3.0, "world")]
+        );
+        assert_eq!(result.words.unwrap().len(), 2);
+        assert_eq!(result.language.as_deref(), Some("en"));
+    }
+
+    #[test]
+    fn dropped_speech_finds_long_stretches_without_words() {
+        let speech = [0..seconds(5.0), seconds(8.0)..seconds(12.0)];
+        let words = [
+            span(0.0, 1.0, "a"),
+            span(4.0, 5.0, "b"),
+            // Outside every speech range, so it covers nothing.
+            span(6.0, 7.0, "c"),
+            span(8.0, 9.0, "d"),
+            // 1 second after "d": too short to count.
+            span(10.0, 10.5, "e"),
+        ];
+        assert_eq!(
+            dropped_speech(&words, &speech),
+            // 1 s to 4 s, and 10.5 s to the end of the second range.
+            vec![seconds(1.0), seconds(10.5)]
+        );
+        assert!(dropped_speech(&[span(0.0, 5.0, "all")], &speech[..1]).is_empty());
+    }
+
+    #[test]
+    fn speech_splits_only_at_long_pauses_and_covers_the_whole_input() {
+        let speech = [
+            seconds(1.0)..seconds(2.0),
+            seconds(2.25)..seconds(3.0),
+            seconds(4.0)..seconds(5.0),
+        ];
+        assert_eq!(
+            speech_between_long_pauses(&speech, seconds(6.0)),
+            vec![0..seconds(3.0), seconds(4.0)..seconds(6.0)]
+        );
+        assert!(speech_between_long_pauses(&[], seconds(6.0)).is_empty());
+    }
+
+    #[test]
+    fn splice_replaces_the_words_a_retry_decoded() {
+        let first = TranscriptionResult {
+            text: "a b c".to_string(),
+            segments: Some(vec![span(0.0, 3.0, "a b c"), span(3.0, 4.0, "d")]),
+            words: Some(vec![
+                span(0.0, 1.0, "a"),
+                span(1.0, 2.0, "b"),
+                span(2.0, 3.0, "c"),
+                span(3.0, 4.0, "d"),
+            ]),
+            language: Some("en".to_string()),
+        };
+        let retry = TranscriptionResult {
+            text: "B".to_string(),
+            segments: Some(vec![span(1.0, 2.0, "B")]),
+            words: Some(vec![span(1.1, 1.9, "B")]),
+            language: Some("de".to_string()),
+        };
+        let result = splice(first, vec![(retry, seconds(1.0)..seconds(2.0))]);
+        assert_eq!(result.text, "a B c d");
+        // The segment around the retried span splits on either side of it.
+        assert_eq!(
+            result.segments.unwrap(),
+            vec![
+                span(0.0, 1.0, "a"),
+                span(1.0, 2.0, "B"),
+                span(2.0, 3.0, "c"),
+                span(3.0, 4.0, "d"),
+            ]
+        );
+        let words: Vec<_> = result.words.unwrap().into_iter().map(|w| w.text).collect();
+        assert_eq!(words, ["a", "B", "c", "d"]);
+        assert_eq!(result.language.as_deref(), Some("en"));
+    }
 
     // Tone bursts ("speech") separated by silent gaps at the given seconds.
     fn speech_with_gaps(seconds: f32, gaps: &[(f32, f32)]) -> Vec<f32> {
