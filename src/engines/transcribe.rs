@@ -581,24 +581,17 @@ fn assemble(chunks: Vec<(usize, Transcript)>, end: usize) -> TranscriptionResult
     }
 }
 
-// Silero's padded speech regions as merged sample ranges. The audio goes in by
-// the minute so a long recording never needs a second full copy.
+// Silero's padded speech regions as merged sample ranges. Silero reads the
+// samples in place, with one state across the whole recording.
 fn speech_ranges(samples: &[f32]) -> Option<Vec<Range<usize>>> {
-    const PIECE: usize = 60 * SAMPLE_RATE;
+    let sample = |seconds: f32| ((seconds * SAMPLE_RATE as f32) as usize).min(samples.len());
     let mut ranges: Vec<Range<usize>> = Vec::new();
-    for (index, piece) in samples.chunks(PIECE).enumerate() {
-        let pcm: Vec<i16> = piece.iter().map(|&s| (s * 32_768.0) as i16).collect();
-        let offset = index * PIECE;
-        for (start, end) in crate::vad::speech_regions(&pcm, SAMPLE_RATE as u32)? {
-            let sample = |seconds: f32| {
-                (offset + (seconds * SAMPLE_RATE as f32) as usize).min(offset + piece.len())
-            };
-            let (start, end) = (sample(start), sample(end));
-            match ranges.last_mut() {
-                Some(last) if start <= last.end => last.end = last.end.max(end),
-                _ if start < end => ranges.push(start..end),
-                _ => {}
-            }
+    for (start, end) in crate::vad::speech_regions_16k(samples)? {
+        let (start, end) = (sample(start), sample(end));
+        match ranges.last_mut() {
+            Some(last) if start <= last.end => last.end = last.end.max(end),
+            _ if start < end => ranges.push(start..end),
+            _ => {}
         }
     }
     Some(ranges)

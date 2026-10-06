@@ -419,12 +419,17 @@ pub fn speech_regions(samples: &[i16], sample_rate: u32) -> Option<Vec<(f32, f32
         return None;
     }
     let audio = crate::audio::resample_i16_to_f32(samples, sample_rate, 16_000);
+    speech_regions_16k(&audio)
+}
+
+/// [`speech_regions`] for 16 kHz mono samples in [-1, 1], without a copy.
+pub(crate) fn speech_regions_16k(audio: &[f32]) -> Option<Vec<(f32, f32)>> {
     if audio.len() < WINDOW {
         return Some(Vec::new());
     }
     let vad = VAD.get_or_init(Silero::load).as_ref()?;
     let mask: Vec<bool> = vad
-        .frame_probs(&audio)
+        .frame_probs(audio)
         .into_iter()
         .map(|p| p >= SPEECH_THRESHOLD)
         .collect();
