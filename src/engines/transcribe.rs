@@ -390,7 +390,18 @@ impl TranscriptionEngine for TranscribeEngine {
         self.reset();
         let params = params.unwrap_or_default();
         let wants_timestamps = params.timestamps || params.word_timestamps;
-        let mut language = self.language_hint(params.language.as_deref());
+        // English-only Whisper rejects any language hint and always
+        // transcribes English.
+        let (run_language, reported_language) = match self.family {
+            Family::Whisper {
+                multilingual: false,
+                ..
+            } => (None, Some("en".to_string())),
+            _ => {
+                let hint = self.language_hint(params.language.as_deref());
+                (hint.clone(), hint)
+            }
+        };
         let session = self
             .session
             .as_mut()
@@ -404,14 +415,7 @@ impl TranscriptionEngine for TranscribeEngine {
                 }),
                 auto_timestamps(wants_timestamps),
             ),
-            Family::Whisper {
-                words,
-                multilingual,
-            } => {
-                // English-only Whisper rejects any other language hint.
-                if !multilingual {
-                    language = None;
-                }
+            Family::Whisper { words, .. } => {
                 let timestamps = if params.word_timestamps && words {
                     TimestampKind::Word
                 } else {
@@ -439,7 +443,7 @@ impl TranscriptionEngine for TranscribeEngine {
         };
         let mut options = RunOptions {
             family,
-            language: language.clone(),
+            language: run_language,
             // The dropped-speech check needs words; Parakeet times come with its tokens.
             timestamps: if self.checks_dropped_speech {
                 TimestampKind::Auto
@@ -448,13 +452,6 @@ impl TranscriptionEngine for TranscribeEngine {
             },
             ..Default::default()
         };
-        if let Family::Whisper {
-            multilingual: false,
-            ..
-        } = self.family
-        {
-            language = Some("en".to_string());
-        }
         let batch = self.batches_chunks;
         let boundary = self.boundary;
         let (chunks, speech) = std::thread::scope(|scope| {
@@ -520,7 +517,7 @@ impl TranscriptionEngine for TranscribeEngine {
             text: result.text,
             segments: non_empty(result.segments),
             words: non_empty(result.words),
-            language: language.or(result.language),
+            language: reported_language.or(result.language),
         })
     }
 }
