@@ -284,11 +284,24 @@ impl SpeechService {
         self.model_manager.status(&spec)
     }
 
+    /// Deletes a model's directory from the cache. A catalog service only
+    /// deletes catalog models, and [`only_cached_models`](Self::only_cached_models)
+    /// only model directories in the cache; anything else is `Unknown model`.
     pub fn delete(&self, model_id: &str) -> Result<ModelStatus> {
-        if self.loaded_model_id().as_deref() == Some(model_id) {
+        let id = match (self.resolver)(model_id) {
+            Some(spec) => spec.id,
+            None => match &self.loose {
+                LooseModels::Any => model_id.to_string(),
+                LooseModels::Cached { .. } if self.model_manager.is_cached_model_dir(model_id) => {
+                    model_id.to_string()
+                }
+                _ => return Err(anyhow!("Unknown model: {model_id}")),
+            },
+        };
+        if self.loaded_model_id().as_deref() == Some(id.as_str()) {
             self.unload();
         }
-        self.model_manager.delete(model_id)
+        self.model_manager.delete(&id)
     }
 
     pub fn transcribe(&self, request: TranscribeRequest) -> Result<Transcription> {
@@ -916,6 +929,72 @@ mod resolve_tests {
         let dir = scratch("strict");
         let service = catalog_service(&dir.join("models")).only_cached_models(None);
         assert_unknown(&service, "stray");
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod delete_tests {
+    use std::fs;
+
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "glimpse-speech-delete-{name}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        for model in ["known", "stray"] {
+            fs::create_dir_all(dir.join(model)).unwrap();
+            fs::write(dir.join(model).join("ggml.bin"), b"ggml").unwrap();
+        }
+        dir
+    }
+
+    fn known_spec() -> InstallSpec {
+        InstallSpec {
+            id: "known".to_string(),
+            engine: ModelEngine::Whisper,
+            storage: crate::models::ModelStorage::Directory,
+            files: Vec::new(),
+            variant: None,
+        }
+    }
+
+    #[test]
+    fn catalog_service_deletes_only_catalog_models() {
+        let dir = scratch("catalog");
+        let service = SpeechService::new(SpeechConfig {
+            model_cache_dir: dir.clone(),
+            resolver: Arc::new(|id| (id == "known").then(known_spec)),
+            loose_paths: false,
+        });
+
+        let err = service.delete("stray").unwrap_err().to_string();
+        assert!(err.starts_with("Unknown model:"), "{err}");
+        assert!(dir.join("stray").is_dir());
+
+        service.delete("known").unwrap();
+        assert!(!dir.join("known").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cached_service_deletes_only_cache_directories() {
+        let dir = scratch("cached");
+        fs::write(dir.join("ggml-file.bin"), b"ggml").unwrap();
+        let service = SpeechService::new_loose_with_engine(dir.clone(), ModelEngine::Whisper)
+            .only_cached_models(None);
+
+        for id in ["missing", "ggml-file.bin", "..", "../stray"] {
+            let err = service.delete(id).unwrap_err().to_string();
+            assert!(err.starts_with("Unknown model:"), "{id}: {err}");
+        }
+        assert!(dir.join("ggml-file.bin").is_file());
+
+        service.delete("stray").unwrap();
+        assert!(!dir.join("stray").exists());
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -355,6 +355,12 @@ impl ModelInstallManager {
         Ok(status)
     }
 
+    /// Whether `id` is a valid model id naming a directory directly inside
+    /// the cache.
+    pub fn is_cached_model_dir(&self, id: &str) -> bool {
+        validate_model_id(id).is_ok() && self.model_dir(id).is_dir()
+    }
+
     pub fn delete(&self, id: &str) -> Result<ModelStatus> {
         validate_model_id(id)?;
         let dir = self.model_dir(id);
