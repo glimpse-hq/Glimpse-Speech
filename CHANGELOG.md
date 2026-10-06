@@ -2,9 +2,26 @@
 
 ## Unreleased
 
+### Breaking
+
+- `SpeechService::new` no longer loads a model id its resolver doesn't know as a file path. It returns `Unknown model: <id>`, a 400 from the API, so a request's `model` field can't point the engine at any file on disk. `SpeechConfig::loose` and `SpeechService::new_loose_with_engine` still resolve paths.
+- `SpeechConfig` has a new `loose_paths` field, set by `SpeechConfig::loose`. A service resolves ids outside its catalog as paths only when it is true, so configs built as struct literals need `loose_paths: false`.
+- `SpeechService::delete` (and `DELETE /v1/models/{id}`) looks the id up first: a catalog service deletes only catalog models, a service with `only_cached_models` only model directories in the cache. Anything else is `Unknown model`, where it used to remove any directory in the models dir with a valid name.
+
+### Added
+
+- `SpeechService::only_cached_models(pinned)`: request ids must name a model file or directory directly inside the cache; only `pinned` may be a path. `glimpse-speech serve` uses it, so requests can't load paths and only its `--model` may be one.
+- `ModelInstallManager::resolve_cached` and `ModelInstallManager::is_cached_model_dir`.
+- `api::ApiLimits` and `api::serve_with_limits`, and `serve`'s `--max-upload-mib`, `--max-queued` and `--request-timeout`.
+- `SpeechService::transcribe_before` and `SpeechProvider::transcribe_before`: a transcription still waiting for the engine when its deadline passes fails instead of starting.
+
 ### Removed
 
 - The `cleanup-apple` feature, the `cleanup` module and its Swift shim. Apple's on-device model moved to [Glimpse Language](https://github.com/glimpse-hq/Glimpse-Language) with the same API: enable its `apple` feature and use `glimpse_language::apple` instead of `glimpse_speech::cleanup`. Glimpse Speech no longer weak-links FoundationModels.
+
+### Fixed
+
+- The transcription endpoint limits what a request can take. Audio uploads stop at 768 MiB (an hour of 48 kHz stereo 16-bit WAV is about 660 MiB) instead of 1 GiB, each text field (`prompt`, `dictionary`, ...) at 64 KiB and all of them at 256 KiB, each a 413. At most 4 transcriptions are accepted at once, uploads included, and more get a 429. A request has 15 minutes: 408 while uploading, 504 after. `serve` and `serve_with_shutdown` use these defaults.
 
 ## 2.0.6
 

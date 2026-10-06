@@ -119,6 +119,14 @@ curl -F file=@audio.wav -F model=<model> -F response_format=verbose_json \
 
 Word timestamps from Whisper come from cross-attention alignment, computed only when word granularity is requested.
 
+A request's `model` must name a model directory in the cache, as `GET /v1/models` lists (it must hold exactly one model file, or one GGUF for transcribe.cpp models), or a model file directly in the cache, or be the `--model` value, which alone may be a path. The one name that needs no file is `apple` (or `apple_speech`), the OS's Apple Speech model, on builds with `apple-speech`. Anything else is a 400 `Unknown model`.
+
+Limits (`api::ApiLimits` for `api::serve_with_limits`):
+
+- `--max-upload-mib` (default 768, which fits an hour of 48 kHz stereo 16-bit WAV); text fields stop at 64 KiB each. Too large is a 413
+- `--max-queued` (default 4): transcription requests accepted at once, uploading, queued or running. More get a 429
+- `--request-timeout` (default 900 seconds, `0` for none), upload included: 408 while uploading, 504 after
+
 Auth and networking:
 
 - Loopback by default; binding to LAN requires `--api-key`
@@ -133,6 +141,8 @@ With `--remote-endpoint` set, transcription requests proxy to the remote service
 ### Service layer
 
 `SpeechService` manages the model cache, engine loading, and warmup. `api::serve` and the CLI are built on it.
+
+`SpeechService::new` takes a catalog resolver and rejects ids it doesn't know, unless the `SpeechConfig` sets `loose_paths` (as `SpeechConfig::loose` does). `new_loose_with_engine` resolves any file path, for ids the local user chose; call `only_cached_models` on it before resolving ids from requests.
 
 ```rust
 use glimpse_speech::service::{AudioInput, SpeechService, TranscribeRequest};
