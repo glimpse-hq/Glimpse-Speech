@@ -14,6 +14,7 @@
 - `ModelInstallManager::resolve_cached` and `ModelInstallManager::is_cached_model_dir`.
 - `api::ApiLimits` and `api::serve_with_limits`, and `serve`'s `--max-upload-mib`, `--max-queued` and `--request-timeout`.
 - `SpeechService::transcribe_before` and `SpeechProvider::transcribe_before`: a transcription still waiting for the engine when its deadline passes fails instead of starting.
+- `models::ModelError`, returned (inside the `anyhow::Error`) when a model id names no usable model: `UnknownModel`, `InvalidModelId`, `NotInstalled` and `NotGguf`. The messages are unchanged.
 
 ### Removed
 
@@ -22,6 +23,7 @@
 ### Fixed
 
 - The transcription endpoint limits what a request can take. Audio uploads stop at 768 MiB (an hour of 48 kHz stereo 16-bit WAV is about 660 MiB) instead of 1 GiB, each text field (`prompt`, `dictionary`, ...) at 64 KiB and all of them at 256 KiB, each a 413. At most 4 transcriptions are accepted at once, uploads included, and more get a 429. A request has 15 minutes: 408 while uploading, 504 after. `serve` and `serve_with_shutdown` use these defaults.
+- A transcription request naming an invalid model id, a catalog model that isn't fully installed or a transcribe.cpp model that isn't a GGUF got a 500. Like `Unknown model`, these are now a 400 `invalid_request_error`, decided by the error's type rather than its text.
 
 ## 2.0.6
 

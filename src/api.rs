@@ -32,7 +32,7 @@ use tower_http::cors::CorsLayer;
 
 use crate::{
     TimestampGranularity, Transcription, UnsupportedValue,
-    models::{InstallOptions, ModelDownloadProgress},
+    models::{InstallOptions, ModelDownloadProgress, ModelError},
     provider::{SpeechProvider, TranscribeError},
     service::{AudioInput, SpeechService, TranscribeRequest},
 };
@@ -1083,8 +1083,7 @@ fn map_transcribe_error(error: TranscribeError) -> ApiError {
 }
 
 fn map_local_transcribe_error(error: anyhow::Error) -> ApiError {
-    let message = error.to_string();
-    if message.starts_with("Unknown model:") || message.starts_with("Invalid model id:") {
+    if error.chain().any(|cause| cause.is::<ModelError>()) {
         map_error(error)
     } else {
         map_server_error(error)
@@ -1435,6 +1434,40 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn a_model_that_is_not_installed_is_a_400() {
+            let mut state = state(ApiLimits::default());
+            let service = Arc::new(SpeechService::new(crate::service::SpeechConfig {
+                model_cache_dir: std::env::temp_dir().join("glimpse-speech-api-not-installed"),
+                resolver: Arc::new(|id| {
+                    (id == "known").then(|| crate::models::InstallSpec {
+                        id: id.to_string(),
+                        engine: crate::models::ModelEngine::Whisper,
+                        storage: crate::models::ModelStorage::Directory,
+                        files: vec![crate::models::RemoteFile {
+                            url: "https://example.test/ggml-known.bin".to_string(),
+                            path: "ggml-known.bin".to_string(),
+                            size_bytes: None,
+                            sha256: None,
+                            extract: false,
+                        }],
+                        variant: None,
+                    })
+                }),
+                loose_paths: false,
+            }));
+            state.provider = Arc::new(SpeechProvider::Local(Arc::clone(&service)));
+            state.service = service;
+            let body = multipart(&[("model", b"known"), ("file", b"RIFF")]);
+            let (status, json) = send(&state, Body::from(body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+            assert_eq!(json["error"]["type"], "invalid_request_error");
+            assert_eq!(
+                json["error"]["message"],
+                "known is not fully installed. Missing: ggml-known.bin"
+            );
+        }
+
+        #[tokio::test]
         async fn oversized_text_fields_are_rejected() {
             let state = state(ApiLimits {
                 max_text_field_bytes: 16,
@@ -1607,6 +1640,20 @@ mod tests {
         );
         // Neither the body limit nor the semaphore overflows.
         let _ = router(limits::state(huge));
+    }
+
+    #[test]
+    fn only_model_errors_are_client_errors() {
+        let wrapped = anyhow::Error::from(ModelError::InvalidModelId("a/b".to_string()))
+            .context("load the model");
+        assert_eq!(
+            map_local_transcribe_error(wrapped).0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            map_local_transcribe_error(anyhow!("Unknown model: lookalike")).0,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 
     #[test]

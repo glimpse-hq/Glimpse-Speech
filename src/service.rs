@@ -12,7 +12,8 @@ use crate::TranscriptionEngine;
 use crate::{
     TimestampGranularity, Transcription, TranscriptionResult,
     models::{
-        InstallOptions, InstallSpec, ModelEngine, ModelInstallManager, ModelStatus, ResolvedModel,
+        InstallOptions, InstallSpec, ModelEngine, ModelError, ModelInstallManager, ModelStatus,
+        ResolvedModel,
     },
 };
 
@@ -256,7 +257,7 @@ impl SpeechService {
             return self.model_manager.resolve(&spec);
         }
         match &self.loose {
-            LooseModels::None => Err(anyhow!("Unknown model: {model_id}")),
+            LooseModels::None => Err(unknown_model(model_id)),
             LooseModels::Cached { pinned } if pinned.as_deref() != Some(model_id) => self
                 .model_manager
                 .resolve_cached(model_id, self.loose_engine),
@@ -267,7 +268,7 @@ impl SpeechService {
     }
 
     fn spec(&self, model_id: &str) -> Result<InstallSpec> {
-        (self.resolver)(model_id).ok_or_else(|| anyhow!("Unknown model: {model_id}"))
+        (self.resolver)(model_id).ok_or_else(|| unknown_model(model_id))
     }
 
     pub async fn install(
@@ -295,7 +296,7 @@ impl SpeechService {
                 LooseModels::Cached { .. } if self.model_manager.is_cached_model_dir(model_id) => {
                     model_id.to_string()
                 }
-                _ => return Err(anyhow!("Unknown model: {model_id}")),
+                _ => return Err(unknown_model(model_id)),
             },
         };
         if self.loaded_model_id().as_deref() == Some(id.as_str()) {
@@ -589,6 +590,10 @@ impl Clone for SpeechService {
 }
 
 pub type SharedSpeechService = Arc<SpeechService>;
+
+fn unknown_model(model_id: &str) -> anyhow::Error {
+    ModelError::UnknownModel(model_id.to_string()).into()
+}
 
 fn loaded_engine<'a>(
     guard: &'a mut MutexGuard<'_, Option<LoadedEngine>>,

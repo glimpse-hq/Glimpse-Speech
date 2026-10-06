@@ -642,6 +642,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "thiserror",
  "tokio",
  "tokio-util",
  "tower",

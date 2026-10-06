@@ -117,6 +117,24 @@ pub struct ModelDownloadProgress {
 
 pub type ProgressCallback<'a> = dyn Fn(ModelDownloadProgress) + Send + Sync + 'a;
 
+/// A model id that names no usable model. The API answers these with a 400,
+/// other errors with a 500.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ModelError {
+    #[error("Unknown model: {0}")]
+    UnknownModel(String),
+    #[error("Invalid model id: {0}")]
+    InvalidModelId(String),
+    #[error("{id} is not fully installed. Missing: {}", missing.join(", "))]
+    NotInstalled { id: String, missing: Vec<String> },
+    #[error("{engine} models require a GGUF file: {reference}")]
+    NotGguf {
+        engine: ModelEngine,
+        reference: String,
+    },
+}
+
 #[derive(Debug)]
 struct DownloadCancelled;
 
@@ -189,11 +207,11 @@ impl ModelInstallManager {
         }
         let status = self.status(spec)?;
         if !status.installed {
-            return Err(anyhow!(
-                "{} is not fully installed. Missing: {}",
-                spec.id,
-                status.missing_files.join(", ")
-            ));
+            return Err(ModelError::NotInstalled {
+                id: spec.id.clone(),
+                missing: status.missing_files,
+            }
+            .into());
         }
 
         Ok(ResolvedModel {
@@ -220,12 +238,15 @@ impl ModelInstallManager {
                 .into_iter()
                 .find(|candidate| candidate.is_file())
                 .or_else(|| single_file_in_dir(&self.cache_dir.join(reference)))
-                .ok_or_else(|| anyhow!("Unknown model: {reference}"))?,
+                .ok_or_else(|| ModelError::UnknownModel(reference.to_string()))?,
             ModelEngine::Transcribe => [PathBuf::from(reference), self.cache_dir.join(reference)]
                 .into_iter()
                 .find(|candidate| candidate.is_file())
                 .or_else(|| gguf_in_dir(&self.cache_dir.join(reference)))
-                .ok_or_else(|| anyhow!("{engine} models require a GGUF file: {reference}"))?,
+                .ok_or_else(|| ModelError::NotGguf {
+                    engine,
+                    reference: reference.to_string(),
+                })?,
             ModelEngine::Apple => unreachable!("handled above"),
         };
         Ok(ResolvedModel {
@@ -247,14 +268,14 @@ impl ModelInstallManager {
         name: &str,
         fallback_engine: ModelEngine,
     ) -> Result<ResolvedModel> {
-        let unknown = || anyhow!("Unknown model: {name}");
+        let unknown = || ModelError::UnknownModel(name.to_string());
         validate_model_id(name).map_err(|_| unknown())?;
         let engine = infer_engine(name).unwrap_or(fallback_engine);
         if engine == ModelEngine::Apple {
             return if is_apple_speech_id(name) {
                 resolve_apple(name, None)
             } else {
-                Err(unknown())
+                Err(unknown().into())
             };
         }
         let candidate = self.cache_dir.join(name);
@@ -683,7 +704,7 @@ fn validate_model_id(id: &str) -> Result<()> {
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
     {
-        return Err(anyhow!("Invalid model id: {id}"));
+        return Err(ModelError::InvalidModelId(id.to_string()).into());
     }
     Ok(())
 }
