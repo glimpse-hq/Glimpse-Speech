@@ -19,6 +19,10 @@ use tokio_util::sync::CancellationToken;
 
 const MAX_STREAM_RETRIES: usize = 4;
 const DOWNLOAD_REQUEST_TIMEOUT: Duration = Duration::from_secs(60 * 60 * 24);
+// A stalled connection fails after this long without data, so the download
+// retries and resumes instead of hanging until DOWNLOAD_REQUEST_TIMEOUT.
+const DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const DOWNLOAD_READ_TIMEOUT: Duration = Duration::from_secs(60);
 const RETRY_BACKOFF_BASE_MS: u64 = 300;
 const WRITE_BUFFER_BYTES: usize = 1024 * 1024;
 const PROGRESS_EMIT_STEP_BYTES: u64 = 1024 * 1024;
@@ -159,13 +163,17 @@ pub struct ModelInstallManager {
 }
 
 impl ModelInstallManager {
+    /// Downloads with a 30 second connect timeout and a 60 second read
+    /// timeout, so a stalled connection retries and resumes.
     pub fn new(cache_dir: impl Into<PathBuf>) -> Self {
         Self {
             cache_dir: cache_dir.into(),
-            client: Client::new(),
+            client: download_client(),
         }
     }
 
+    /// Downloads with `client`, whose timeouts decide when a stalled
+    /// connection gives up.
     pub fn with_client(cache_dir: impl Into<PathBuf>, client: Client) -> Self {
         Self {
             cache_dir: cache_dir.into(),
@@ -614,11 +622,10 @@ impl ModelInstallManager {
                     Err(err) => {
                         if !can_retry(&mut retries) {
                             let _ = output.flush().await;
-                            return Err(anyhow!(
+                            return Err(anyhow::Error::from(err).context(format!(
                                 "Network interrupted while downloading {}",
                                 file.path
-                            )
-                            .context(err));
+                            )));
                         }
                         wait_before_retry(retries).await;
                         let _ = output.flush().await;
@@ -630,6 +637,14 @@ impl ModelInstallManager {
             }
         }
     }
+}
+
+fn download_client() -> Client {
+    Client::builder()
+        .connect_timeout(DOWNLOAD_CONNECT_TIMEOUT)
+        .read_timeout(DOWNLOAD_READ_TIMEOUT)
+        .build()
+        .expect("the HTTP client needs a TLS backend")
 }
 
 /// The OS owns the Apple model, so resolution only checks runtime support.
@@ -1275,6 +1290,54 @@ mod tests {
 
         assert!(result.expect("install must not retry forever").is_err());
         assert!(*requests.lock().unwrap() <= MAX_STREAM_RETRIES + 2);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn a_stalled_download_times_out_with_a_readable_error() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/ggml-test.bin", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            // Headers, then nothing, on connections that stay open.
+            let mut open = Vec::new();
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = socket.read(&mut buf).await;
+                let head = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 100\r\n\r\n";
+                let _ = socket.write_all(head.as_bytes()).await;
+                open.push(socket);
+            }
+        });
+
+        let root =
+            std::env::temp_dir().join(format!("glimpse-speech-stalled-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let client = Client::builder()
+            .read_timeout(Duration::from_millis(100))
+            .build()
+            .unwrap();
+        let manager = ModelInstallManager::with_client(&root, client);
+        let mut spec = whisper_spec("whisper_stalled", "ggml-test.bin", Some(100));
+        spec.files[0].url = url;
+
+        let err = tokio::time::timeout(
+            Duration::from_secs(30),
+            manager.install(&spec, Default::default()),
+        )
+        .await
+        .expect("a stall must not hang the install")
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "Network interrupted while downloading ggml-test.bin"
+        );
+        assert!(
+            err.chain().count() > 1,
+            "keeps the network error as the cause"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
