@@ -679,22 +679,21 @@ fn is_apple_speech_id(name: &str) -> bool {
 
 /// Best-effort engine guess from a model id, for the loose CLI path where no
 /// catalog spec names the engine. `None` when the id carries no known marker.
+/// Only `apple` and `apple_speech` are Apple Speech; other names containing
+/// "apple" are files like any other.
 pub fn infer_engine(reference: &str) -> Option<ModelEngine> {
-    const MARKERS: [ModelEngine; 3] = [
-        ModelEngine::Apple,
-        ModelEngine::Whisper,
-        ModelEngine::Transcribe,
-    ];
-
     let name = Path::new(reference)
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or(reference);
+    if is_apple_speech_id(name) {
+        return Some(ModelEngine::Apple);
+    }
     let lower = name.to_ascii_lowercase();
     if lower.ends_with(".gguf") || lower.contains("parakeet") || lower.contains("nemotron") {
         return Some(ModelEngine::Transcribe);
     }
-    MARKERS
+    [ModelEngine::Whisper, ModelEngine::Transcribe]
         .into_iter()
         .find(|engine| lower.contains(engine.as_str()))
 }
@@ -1438,6 +1437,12 @@ mod tests {
             Some(ModelEngine::Transcribe)
         );
         assert_eq!(infer_engine("apple"), Some(ModelEngine::Apple));
+        assert_eq!(infer_engine("Apple_Speech"), Some(ModelEngine::Apple));
+        assert_eq!(
+            infer_engine("pineapple-whisper"),
+            Some(ModelEngine::Whisper)
+        );
+        assert_eq!(infer_engine("ggml-apple.bin"), None);
         assert_eq!(infer_engine("ggml-turbo.bin"), None);
         assert_eq!(infer_engine("/models/parakeet/ggml-small.bin"), None);
         assert_eq!(
@@ -1565,6 +1570,16 @@ mod tests {
             .resolve_cached("ggml-tiny.bin", ModelEngine::Whisper)
             .unwrap();
         assert_eq!(by_file.path, cache.join("ggml-tiny.bin"));
+
+        // Only Apple Speech's own ids skip the cache.
+        fs::write(cache.join("ggml-apple.bin"), b"ggml").unwrap();
+        assert_eq!(
+            manager
+                .resolve_cached("ggml-apple.bin", ModelEngine::Whisper)
+                .unwrap()
+                .path,
+            cache.join("ggml-apple.bin")
+        );
 
         for reference in [
             outside.to_str().unwrap(),

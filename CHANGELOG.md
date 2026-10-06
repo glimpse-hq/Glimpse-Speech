@@ -16,6 +16,10 @@
 - `SpeechService::transcribe_before` and `SpeechProvider::transcribe_before`: a transcription still waiting for the engine when its deadline passes fails instead of starting.
 - `models::ModelError`, returned (inside the `anyhow::Error`) when a model id names no usable model: `UnknownModel`, `InvalidModelId`, `NotInstalled` and `NotGguf`. The messages are unchanged.
 
+### Changed
+
+- `models::infer_engine` only takes `apple` and `apple_speech` as Apple Speech. Other names containing "apple" used to resolve to the OS model without a cache lookup; now they are files like any other, and `resolve_cached` rejects them unless the cache has them.
+
 ### Removed
 
 - The `cleanup-apple` feature, the `cleanup` module and its Swift shim. Apple's on-device model moved to [Glimpse Language](https://github.com/glimpse-hq/Glimpse-Language) with the same API: enable its `apple` feature and use `glimpse_language::apple` instead of `glimpse_speech::cleanup`. Glimpse Speech no longer weak-links FoundationModels.
