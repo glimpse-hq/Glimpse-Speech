@@ -170,12 +170,12 @@ impl EngineInstance {
         }
     }
 
-    fn streaming_get_transcript(&self) -> Option<String> {
+    fn streaming_get_transcript(&self) -> String {
         match self {
             #[cfg(apple_speech_engine)]
-            Self::Apple(engine) => Some(engine.get_transcript()),
+            Self::Apple(engine) => engine.get_transcript(),
             #[cfg(transcribe_engine)]
-            Self::Transcribe(engine) => Some(engine.get_transcript()),
+            Self::Transcribe(engine) => engine.get_transcript(),
         }
     }
 }
@@ -445,20 +445,20 @@ impl SpeechService {
         }
     }
 
-    /// Sets language and vocabulary for the next streaming session, for
-    /// engines that take per-session configuration.
+    /// Loads the model and sets language and vocabulary for its next
+    /// streaming session. Fails when the model doesn't load.
     #[cfg(streaming_engines)]
     pub fn streaming_configure(
         &self,
         model_id: &str,
         language: Option<String>,
         dictionary: Vec<String>,
-    ) {
-        if let Ok(mut guard) = self.ensure_loaded(model_id)
-            && let Some(loaded) = guard.as_mut()
-        {
-            loaded.engine.streaming_configure(language, dictionary);
-        }
+    ) -> Result<()> {
+        let mut guard = self.ensure_loaded(model_id)?;
+        loaded_engine(&mut guard)?
+            .engine
+            .streaming_configure(language, dictionary);
+        Ok(())
     }
 
     /// Ends the stream and returns the final transcript.
@@ -472,7 +472,7 @@ impl SpeechService {
         };
         loaded.engine.streaming_finalize().unwrap_or_else(|err| {
             tracing::error!("[SpeechService] streaming finalize failed: {err}");
-            loaded.engine.streaming_get_transcript().unwrap_or_default()
+            loaded.engine.streaming_get_transcript()
         })
     }
 
@@ -481,7 +481,11 @@ impl SpeechService {
         self.loaded
             .lock()
             .ok()
-            .and_then(|guard| guard.as_ref()?.engine.streaming_get_transcript())
+            .and_then(|guard| {
+                guard
+                    .as_ref()
+                    .map(|loaded| loaded.engine.streaming_get_transcript())
+            })
             .unwrap_or_default()
     }
 

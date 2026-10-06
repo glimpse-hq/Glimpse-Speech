@@ -6,6 +6,7 @@
 
 - `SpeechService::new` no longer loads a model id its resolver doesn't know as a file path. It returns `Unknown model: <id>`, a 400 from the API, so a request's `model` field can't point the engine at any file on disk. `SpeechConfig::loose` and `SpeechService::new_loose_with_engine` still resolve paths.
 - `SpeechConfig` has a new `loose_paths` field, set by `SpeechConfig::loose`. A service resolves ids outside its catalog as paths only when it is true, so configs built as struct literals need `loose_paths: false`.
+- `SpeechService::streaming_configure` returns `Result<()>`. When the model fails to load it returns the error, where it used to drop it and leave the next stream unconfigured.
 - `SpeechService::delete` (and `DELETE /v1/models/{id}`) looks the id up first: a catalog service deletes only catalog models, a service with `only_cached_models` only model directories in the cache. Anything else is `Unknown model`, where it used to remove any directory in the models dir with a valid name.
 
 ### Added
