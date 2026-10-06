@@ -305,6 +305,18 @@ impl SpeechService {
     }
 
     pub fn transcribe(&self, request: TranscribeRequest) -> Result<Transcription> {
+        self.transcribe_before(request, None)
+    }
+
+    /// Like [`transcribe`](Self::transcribe), but gives up with an error when
+    /// `deadline` has passed by the time the engine is free, for example
+    /// after queueing behind other transcriptions. A started transcription
+    /// runs to the end.
+    pub fn transcribe_before(
+        &self,
+        request: TranscribeRequest,
+        deadline: Option<Instant>,
+    ) -> Result<Transcription> {
         let total_started = Instant::now();
         let requested_language = request.language.clone();
         let requested_model = request.model_id.clone();
@@ -317,7 +329,7 @@ impl SpeechService {
             audio: request.audio.decoded()?,
             ..request
         };
-        let mut guard = self.ensure_loaded(&requested_model)?;
+        let mut guard = self.ensure_loaded_before(&requested_model, deadline)?;
         drop(decode_slot);
         let loaded = loaded_engine(&mut guard)?;
         let resolved_id = loaded.model_id.clone();
@@ -479,6 +491,16 @@ impl SpeechService {
     }
 
     fn ensure_loaded(&self, model_id: &str) -> Result<MutexGuard<'_, Option<LoadedEngine>>> {
+        self.ensure_loaded_before(model_id, None)
+    }
+
+    /// Fails without loading anything when `deadline` passed while waiting
+    /// for the engine.
+    fn ensure_loaded_before(
+        &self,
+        model_id: &str,
+        deadline: Option<Instant>,
+    ) -> Result<MutexGuard<'_, Option<LoadedEngine>>> {
         let total_started = Instant::now();
         let resolve_started = Instant::now();
         let resolved = self.resolve(model_id)?;
@@ -486,6 +508,11 @@ impl SpeechService {
         let lock_started = Instant::now();
         let mut guard = self.lock_loaded()?;
         let lock_wait = lock_started.elapsed();
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err(anyhow!(
+                "The transcription timed out waiting for the engine (model {model_id})"
+            ));
+        }
         let should_reload = guard
             .as_ref()
             .is_none_or(|loaded| loaded.model_id != resolved.id || loaded.path != resolved.path);
@@ -538,6 +565,12 @@ impl SpeechService {
         self.loaded
             .lock()
             .map_err(|_| anyhow!("speech service lock poisoned"))
+    }
+
+    /// Holds the engine as a running transcription would.
+    #[cfg(all(test, feature = "api"))]
+    pub(crate) fn hold_engine(&self) -> impl Sized + '_ {
+        self.loaded.lock().unwrap()
     }
 }
 
@@ -921,6 +954,31 @@ mod resolve_tests {
         for id in [planted.to_str().unwrap(), "../planted.bin", "../pinned.bin"] {
             assert_unknown(&service, id);
         }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_transcription_past_its_deadline_never_loads() {
+        let dir = scratch("deadline");
+        let service =
+            SpeechService::new_loose_with_engine(dir.join("models"), ModelEngine::Whisper);
+        let err = service
+            .transcribe_before(
+                TranscribeRequest {
+                    audio: AudioInput::Samples16Khz(vec![0.0; 16_000]),
+                    model_id: "stray".to_string(),
+                    language: None,
+                    prompt: None,
+                    dictionary: Vec::new(),
+                    timestamps: false,
+                    timestamp_granularity: None,
+                },
+                Some(Instant::now()),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("timed out waiting for the engine"), "{err}");
+        assert!(!service.is_loaded());
         let _ = fs::remove_dir_all(&dir);
     }
 
