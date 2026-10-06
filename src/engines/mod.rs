@@ -3,11 +3,6 @@ pub mod apple;
 #[cfg(transcribe_engine)]
 pub mod transcribe;
 
-#[cfg(transcribe_engine)]
-pub(crate) fn io_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
-    std::io::Error::other(message.into()).into()
-}
-
 /// Inference thread count. On macOS and Windows, one per performance core,
 /// up to 24: CPU inference still scaled at 24 threads on a 24-core Xeon, the
 /// most measured. Elsewhere, or when the core count is unavailable, the

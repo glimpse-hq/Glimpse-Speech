@@ -4,6 +4,7 @@
 
 use std::path::Path;
 
+use crate::{io_error, transcribe_error};
 use transcribe_cpp::{
     Backend, DiarizeExtension, DiarizeOptions, DiarizeSession, DiarizeSessionOptions,
     DiarizeStreamExtension, DiarizeStreamOptions, Model, ModelOptions, OwnedDiarizeStream,
@@ -35,13 +36,13 @@ pub fn diarize(
     use_gpu: bool,
 ) -> Result<Vec<SpeakerTurn>, Error> {
     if sample_rate == 0 {
-        return Err(error("sample rate must be greater than zero"));
+        return Err(io_error("sample rate must be greater than zero").into());
     }
     if sample_rate > crate::audio::MAX_SAMPLE_RATE {
-        return Err(error(format!("unsupported sample rate {sample_rate} Hz")));
+        return Err(io_error(format!("unsupported sample rate {sample_rate} Hz")).into());
     }
     if samples.len() as u64 / u64::from(sample_rate) > MAX_AUDIO_SECONDS {
-        return Err(too_long());
+        return Err(too_long().into());
     }
     let audio = crate::audio::resample_i16_to_f32(samples, sample_rate, SAMPLE_RATE);
     if audio.is_empty() {
@@ -94,7 +95,7 @@ impl LiveDiarizer {
             .map_err(|(err, _)| match err {
                 // Sortformer v2.1 has no push-audio entry point.
                 transcribe_cpp::Error::NotImplemented(_) => {
-                    error("live diarization needs Nemotron-3 Diarization, not Sortformer v2.1")
+                    io_error("live diarization needs Nemotron-3 Diarization, not Sortformer v2.1")
                 }
                 err => transcribe_error(err),
             })?;
@@ -110,7 +111,7 @@ impl LiveDiarizer {
         if !samples.is_empty() {
             let received = self.received + samples.len() as u64;
             if received / u64::from(SAMPLE_RATE) > MAX_AUDIO_SECONDS {
-                return Err(too_long());
+                return Err(too_long().into());
             }
             self.received = received;
             let update = self.stream.feed(samples).map_err(transcribe_error)?;
@@ -136,10 +137,11 @@ impl LiveDiarizer {
 
 fn open_session(model_path: &Path, use_gpu: bool) -> Result<DiarizeSession, Error> {
     if !model_path.is_file() {
-        return Err(error(format!(
+        return Err(io_error(format!(
             "diarization model file not found: {}",
             model_path.display()
-        )));
+        ))
+        .into());
     }
     crate::silence_transcribe_cpp_logs();
     let model = Model::load_with(
@@ -151,16 +153,17 @@ fn open_session(model_path: &Path, use_gpu: bool) -> Result<DiarizeSession, Erro
     )
     .map_err(transcribe_error)?;
     if !matches!(model.arch().as_str(), "sortformer" | "nemotron3_diar") {
-        return Err(error(format!(
+        return Err(io_error(format!(
             "{} is not a Sortformer diarization model",
             model_path.display()
-        )));
+        ))
+        .into());
     }
     model
         .diarize_session_with(&DiarizeSessionOptions {
             n_threads: crate::engines::inference_threads() as i32,
         })
-        .map_err(transcribe_error)
+        .map_err(|err| transcribe_error(err).into())
 }
 
 fn to_turns(segments: &[SpeakerSegment], duration_ms: u64) -> Vec<SpeakerTurn> {
@@ -178,17 +181,9 @@ fn to_turns(segments: &[SpeakerSegment], duration_ms: u64) -> Vec<SpeakerTurn> {
     turns
 }
 
-fn too_long() -> Error {
-    error(format!(
+fn too_long() -> std::io::Error {
+    io_error(format!(
         "audio is too long to diarize: the limit is {} hours",
         MAX_AUDIO_SECONDS / 3600
     ))
-}
-
-fn error(message: impl Into<String>) -> Error {
-    std::io::Error::other(message.into()).into()
-}
-
-fn transcribe_error(err: transcribe_cpp::Error) -> Error {
-    error(format!("transcribe.cpp error: {err}"))
 }

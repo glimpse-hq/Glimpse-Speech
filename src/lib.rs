@@ -17,6 +17,16 @@ pub mod vad;
 
 use std::path::Path;
 
+/// An error carrying only a message. `?` turns it into any boxed error.
+pub(crate) fn io_error(message: impl Into<String>) -> std::io::Error {
+    std::io::Error::other(message.into())
+}
+
+#[cfg(transcribe_engine)]
+pub(crate) fn transcribe_error(error: impl std::fmt::Display) -> std::io::Error {
+    io_error(format!("transcribe.cpp error: {error}"))
+}
+
 /// Route transcribe.cpp and its ggml diagnostics into the `log` facade once,
 /// so they never reach the process's stderr.
 #[cfg(transcribe_engine)]

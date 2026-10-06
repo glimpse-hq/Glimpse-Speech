@@ -6,6 +6,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use crate::io_error;
+
 const PCM16_SCALE: f32 = 32_768.0;
 pub(crate) const MAX_SAMPLE_RATE: u32 = 384_000;
 
@@ -64,10 +66,7 @@ pub fn read_audio_samples(path: &Path) -> Result<Vec<f32>, Box<dyn std::error::E
         .map_err(|err| io_error(format!("Failed to run ffmpeg: {err}")))?;
 
     if !status.success() {
-        return Err(io_error(format!(
-            "ffmpeg failed to decode {}",
-            path.display()
-        )));
+        return Err(io_error(format!("ffmpeg failed to decode {}", path.display())).into());
     }
 
     read_wav_samples(&converted.path)
@@ -161,16 +160,13 @@ fn temp_wav_path() -> Result<TempWav, Box<dyn std::error::Error>> {
                 return Err(io_error(format!(
                     "Failed to create temp decode directory {}: {err}",
                     dir.display()
-                )));
+                ))
+                .into());
             }
         }
     }
 
-    Err(io_error("Failed to create a unique temp decode directory"))
-}
-
-fn io_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
-    io::Error::other(message.into()).into()
+    Err(io_error("Failed to create a unique temp decode directory").into())
 }
 
 /// Converts PCM16 to normalized f32 and resamples to `to_rate`.

@@ -22,7 +22,7 @@ use transcribe_cpp::{
 use crate::{
     TranscriptionEngine, TranscriptionResult, TranscriptionSegment,
     dictionary::{build_dictionary_prompt, sanitize_dictionary_entries},
-    engines::io_error,
+    io_error, transcribe_error,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -175,7 +175,7 @@ impl TranscribeEngine {
                 Ok(stream) => self.stream = Some(stream),
                 Err((error, session)) => {
                     self.session = Some(session);
-                    return Err(transcribe_error(error));
+                    return Err(transcribe_error(error).into());
                 }
             }
         }
@@ -249,7 +249,8 @@ impl TranscriptionEngine for TranscribeEngine {
             return Err(io_error(format!(
                 "transcribe.cpp model file not found: {}",
                 model_path.display()
-            )));
+            ))
+            .into());
         }
         crate::silence_transcribe_cpp_logs();
         let model = Model::load_with(
@@ -956,10 +957,6 @@ fn decode_spans(
         }
     }
     Ok(results)
-}
-
-fn transcribe_error(error: impl std::fmt::Display) -> Box<dyn std::error::Error> {
-    io_error(format!("transcribe.cpp error: {error}"))
 }
 
 #[cfg(test)]
