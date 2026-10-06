@@ -208,7 +208,10 @@ async fn serve(args: ServeArgs, cache_dir: PathBuf) -> anyhow::Result<()> {
         cors_enabled,
     });
     let installed_models_dir = cache_dir.clone();
-    let service = Arc::new(SpeechService::new_loose_with_engine(cache_dir, engine));
+    // Requests may only name models in the cache; a path comes from `--model`.
+    let service = Arc::new(
+        SpeechService::new_loose_with_engine(cache_dir, engine).only_cached_models(model.clone()),
+    );
 
     if !remote_enabled && let Some(model_id) = model.clone() {
         let warm = Arc::clone(&service);

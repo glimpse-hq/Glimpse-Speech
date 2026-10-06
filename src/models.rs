@@ -236,6 +236,43 @@ impl ModelInstallManager {
         })
     }
 
+    /// Like [`resolve_loose`](Self::resolve_loose), but `name` must be a plain
+    /// model id naming a file or model directory directly inside the cache.
+    /// Paths, separators and `..` are rejected before any disk access, so a
+    /// request-supplied name can't reach outside the cache. The one exception
+    /// is Apple Speech, whose model the OS owns: `apple` and `apple_speech`
+    /// resolve to it without a cache lookup.
+    pub fn resolve_cached(
+        &self,
+        name: &str,
+        fallback_engine: ModelEngine,
+    ) -> Result<ResolvedModel> {
+        let unknown = || anyhow!("Unknown model: {name}");
+        validate_model_id(name).map_err(|_| unknown())?;
+        let engine = infer_engine(name).unwrap_or(fallback_engine);
+        if engine == ModelEngine::Apple {
+            return if is_apple_speech_id(name) {
+                resolve_apple(name, None)
+            } else {
+                Err(unknown())
+            };
+        }
+        let candidate = self.cache_dir.join(name);
+        let path = if candidate.is_file() {
+            candidate
+        } else if engine == ModelEngine::Transcribe {
+            gguf_in_dir(&candidate).ok_or_else(unknown)?
+        } else {
+            single_file_in_dir(&candidate).ok_or_else(unknown)?
+        };
+        Ok(ResolvedModel {
+            id: name.to_string(),
+            path,
+            engine,
+            variant: None,
+        })
+    }
+
     pub fn verify(&self, spec: &InstallSpec) -> Result<ModelStatus> {
         validate_spec(spec)?;
         let dir = self.model_dir(&spec.id);
@@ -587,6 +624,15 @@ fn resolve_apple(id: &str, variant: Option<&str>) -> Result<ResolvedModel> {
     {
         Err(anyhow!("Apple speech support is not enabled on this build"))
     }
+}
+
+/// Ids that name the OS's Apple Speech model rather than a file.
+const APPLE_SPEECH_IDS: [&str; 2] = ["apple", "apple_speech"];
+
+fn is_apple_speech_id(name: &str) -> bool {
+    APPLE_SPEECH_IDS
+        .iter()
+        .any(|id| name.eq_ignore_ascii_case(id))
 }
 
 /// Best-effort engine guess from a model id, for the loose CLI path where no
@@ -1404,6 +1450,48 @@ mod tests {
             .resolve_loose("ggml-arbitrary.bin", ModelEngine::Whisper)
             .unwrap();
         assert_eq!(by_name.path, model_path);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolve_cached_stays_inside_the_cache() {
+        let root =
+            std::env::temp_dir().join(format!("glimpse-speech-cached-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let cache = root.join("models");
+        fs::create_dir_all(cache.join("whisper_base")).unwrap();
+        fs::write(cache.join("whisper_base/ggml-base.bin"), b"ggml").unwrap();
+        fs::write(cache.join("ggml-tiny.bin"), b"ggml").unwrap();
+        let outside = root.join("planted.bin");
+        fs::write(&outside, b"not a model").unwrap();
+        let manager = ModelInstallManager::new(&cache);
+
+        let by_dir = manager
+            .resolve_cached("whisper_base", ModelEngine::Whisper)
+            .unwrap();
+        assert_eq!(by_dir.path, cache.join("whisper_base/ggml-base.bin"));
+        let by_file = manager
+            .resolve_cached("ggml-tiny.bin", ModelEngine::Whisper)
+            .unwrap();
+        assert_eq!(by_file.path, cache.join("ggml-tiny.bin"));
+
+        for reference in [
+            outside.to_str().unwrap(),
+            "../planted.bin",
+            "whisper_base/ggml-base.bin",
+            "..",
+            "missing",
+            "pineapple",
+        ] {
+            let err = manager
+                .resolve_cached(reference, ModelEngine::Whisper)
+                .unwrap_err();
+            assert!(
+                err.to_string().starts_with("Unknown model:"),
+                "{reference}: {err}"
+            );
+        }
 
         let _ = fs::remove_dir_all(&root);
     }
