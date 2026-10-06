@@ -16,18 +16,18 @@ Parakeet and Nemotron boost dictionary words during decoding.
 | Feature | Enables |
 | --- | --- |
 | `transcribe` | `engines::transcribe::TranscribeEngine`, `diarization` (`diarize` and `LiveDiarizer` with [Nemotron-3 Diarization](https://huggingface.co/Glimpse-Dictation/Nemotron-3-Diarization-gguf), up to 8 speakers; `diarize` also takes Sortformer v2.1), and Silero VAD (`vad`, pure Rust, Intel Macs included). Builds transcribe.cpp from source: CMake and a C++ toolchain, plus the Vulkan SDK on Windows and Linux |
-| `whisper` | Whisper as the default loose engine (implies `transcribe`) |
+| `whisper` | Compatibility alias for `transcribe`, which runs Whisper too |
 | `api` | The OpenAI-compatible HTTP server (`api::serve`) |
 | `remote` | Proxying to a remote OpenAI-compatible endpoint, with local fallback |
 | `cli` | The `glimpse-speech` binary (implies `api`) |
 | `apple-speech` | `engines::apple`, the macOS 26 SpeechAnalyzer engine (Apple Silicon) |
-| `all` | `whisper` + `transcribe` |
+| `all` | Compatibility alias for `transcribe` |
 
 ## Installation
 
 ```toml
 [dependencies]
-glimpse-speech = { git = "https://github.com/glimpse-hq/Glimpse-Speech.git", tag = "2.0.6", features = ["whisper"] }
+glimpse-speech = { git = "https://github.com/glimpse-hq/Glimpse-Speech.git", tag = "2.0.6", features = ["transcribe"] }
 ```
 
 The transcribe.cpp dependency is pinned to an exact Git revision, including its
