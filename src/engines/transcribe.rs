@@ -772,8 +772,11 @@ fn strip_quant_suffix(stem: &str) -> &str {
     }
 }
 
-// Match Qwen's reference splitter: use a quiet boundary and preserve every
-// sample exactly once. Search only before the limit so ANE capacity is respected.
+// Where to cut `samples` so the first piece is at most `limit` long: the
+// middle of the quietest 100 ms in the last 3 seconds before the limit (never
+// before half of it), the latest one on a tie. The caller keeps every sample
+// exactly once, and no chunk outgrows what the model, or its Core ML encoder,
+// takes. Adapted from Qwen3-ASR's splitter:
 // https://github.com/QwenLM/Qwen3-ASR/blob/main/qwen_asr/inference/utils.py
 fn quiet_boundary(samples: &[f32], limit: usize) -> usize {
     let start = limit.saturating_sub(3 * SAMPLE_RATE).max(limit / 2);
