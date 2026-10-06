@@ -42,11 +42,12 @@ cargo check --manifest-path src-tauri/Cargo.toml \
 
 Long audio is decoded in chunks split at quiet boundaries, without overlap or
 omitted samples: 28 seconds for Whisper, 15 seconds for Qwen3-ASR and for
-Parakeet with a Core ML encoder (the encoder's capacity). Input-length and
-output-truncation errors retry smaller chunks; other errors propagate normally.
-Partial transcripts are never reported as complete. Parakeet TDT re-decodes
-stretches of detected speech that came back without words, which can happen
-after long pauses.
+Parakeet with a Core ML encoder (the encoder's capacity), and 60 seconds for
+Parakeet without one (faster than whole recordings, with a lower long-form
+error rate). Input-length and output-truncation errors retry smaller chunks;
+other errors propagate normally. Partial transcripts are never reported as
+complete. Parakeet TDT re-decodes stretches of detected speech that came back
+without words, which can happen after long pauses.
 
 Parakeet TDT V3 supports either a full GGUF for CPU/GPU inference or a compact
 decoder-only GGUF paired with its matching Core ML encoder on Apple Silicon.
@@ -63,14 +64,20 @@ search when words are set, while Nemotron and streaming decode greedily.
 
 Core ML companions accelerate the encoder only. A Whisper encoder serves every
 quantization of its family, and distil-Whisper models use their teacher's
-encoder. A Whisper encoder marked as still compiling (`.<name>.compiling` beside
-it) is skipped unless the service was built with
+encoder. An encoder marked as still compiling (`.<name>.compiling` beside it)
+is skipped when its model can run without it (a full GGUF or Whisper file,
+not a decoder-only one) unless the service was built with
 `SpeechService::loading_compiling_encoders()`; `TranscribeEngine::is_compiling`
-and `TranscribeEngine::companion_for` expose the same checks. Nemotron runs on
-the CPU. Installing a
-companion beside an already-loaded model requires `SpeechService::unload()`
-before loading or warming it again. The service cache tracks model id and path,
-not changes to companion files.
+and `TranscribeEngine::companion_for` expose the same checks.
+
+A Nemotron model whose catalog `variant` starts with `nemotron-` streams, and
+transcribes audio shorter than 30 seconds, on the CPU. Whole recordings of 30
+seconds or more run on a GPU copy of the model, loaded by the first one, when
+Metal or Vulkan is available; Nemotron 3.5 keeps them on the CPU on Metal.
+
+Installing a companion beside an already-loaded model requires
+`SpeechService::unload()` before loading or warming it again. The service cache
+tracks model id and path, not changes to companion files.
 
 ## CLI
 
