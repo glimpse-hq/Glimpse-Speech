@@ -24,6 +24,8 @@
 
 - The transcription endpoint limits what a request can take. Audio uploads stop at 768 MiB (an hour of 48 kHz stereo 16-bit WAV is about 660 MiB) instead of 1 GiB, each text field (`prompt`, `dictionary`, ...) at 64 KiB and all of them at 256 KiB, each a 413. At most 4 transcriptions are accepted at once, uploads included, and more get a 429. A request has 15 minutes: 408 while uploading, 504 after. `serve` and `serve_with_shutdown` use these defaults.
 - A transcription request naming an invalid model id, a catalog model that isn't fully installed or a transcribe.cpp model that isn't a GGUF got a 500. Like `Unknown model`, these are now a 400 `invalid_request_error`, decided by the error's type rather than its text.
+- Whole Nemotron recordings decide between the CPU engine and the GPU copy by the decoded audio's length, so long MP3, M4A, Ogg and FLAC uploads (decoded by ffmpeg) use the GPU copy like WAV does. The audio is decoded once instead of opening a WAV a second time, and PCM with a sample rate of 0 no longer counts as long.
+- A transcription on Nemotron's GPU copy no longer marks the CPU engine as warmed, so `preload_and_warm` still warms it.
 
 ## 2.0.6
 

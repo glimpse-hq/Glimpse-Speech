@@ -61,37 +61,9 @@ pub enum AudioInput {
     PcmI16 { samples: Vec<i16>, sample_rate: u32 },
 }
 
-impl AudioInput {
-    fn duration_secs(&self) -> Option<f32> {
-        match self {
-            Self::WavPath(path) => {
-                let reader = hound::WavReader::open(path).ok()?;
-                Some(reader.duration() as f32 / reader.spec().sample_rate as f32)
-            }
-            Self::Samples16Khz(samples) => Some(samples.len() as f32 / 16_000.0),
-            Self::PcmI16 {
-                samples,
-                sample_rate,
-            } => Some(samples.len() as f32 / *sample_rate as f32),
-        }
-    }
-
-    // Decodes a file before the engine lock, so another request isn't held
-    // up behind ffmpeg or resampling.
-    #[cfg(local_engines)]
-    fn decoded(self) -> Result<Self> {
-        match self {
-            Self::WavPath(path) => crate::audio::read_audio_samples(&path)
-                .map(Self::Samples16Khz)
-                .map_err(boxed_error),
-            other => Ok(other),
-        }
-    }
-}
-
 // Audio shorter than this stays on the loaded CPU engine: on short clips the
 // GPU copy barely helps, and loading it would land in a dictation fallback.
-const GPU_COPY_MIN_SECS: f32 = 30.0;
+const GPU_COPY_MIN_MS: u128 = 30_000;
 
 #[derive(Debug, Clone)]
 pub struct TranscribeRequest {
@@ -121,10 +93,22 @@ struct TranscriptionWithDuration {
     audio_duration_ms: u128,
 }
 
-#[cfg(local_engines)]
+/// 16 kHz mono samples, padded for the engines, and the input's length.
+#[cfg_attr(not(local_engines), allow(dead_code))]
 struct PreparedAudio {
     samples: Vec<f32>,
     duration_ms: u128,
+}
+
+/// What a request asks of the engine besides its audio. Apple Speech takes
+/// no prompt or word timestamps.
+#[cfg_attr(not(transcribe_engine), allow(dead_code))]
+struct DecodeOptions {
+    language: Option<String>,
+    prompt: Option<String>,
+    dictionary: Vec<String>,
+    timestamps: bool,
+    word_timestamps: bool,
 }
 
 struct LoadedEngine {
@@ -319,25 +303,25 @@ impl SpeechService {
         deadline: Option<Instant>,
     ) -> Result<Transcription> {
         let total_started = Instant::now();
-        let requested_language = request.language.clone();
-        let requested_model = request.model_id.clone();
+        let TranscribeRequest {
+            audio,
+            model_id: requested_model,
+            language: requested_language,
+            prompt,
+            dictionary,
+            timestamps,
+            timestamp_granularity,
+        } = request;
         let decode_slot = self
             .decode_slot
             .lock()
             .map_err(|_| anyhow!("speech service lock poisoned"))?;
-        #[cfg(local_engines)]
-        let request = TranscribeRequest {
-            audio: request.audio.decoded()?,
-            ..request
-        };
+        let audio = prepare_audio(audio)?;
         let mut guard = self.ensure_loaded_before(&requested_model, deadline)?;
         drop(decode_slot);
         let loaded = loaded_engine(&mut guard)?;
         let resolved_id = loaded.model_id.clone();
-        let long = request
-            .audio
-            .duration_secs()
-            .is_some_and(|secs| secs >= GPU_COPY_MIN_SECS);
+        let long = audio.duration_ms >= GPU_COPY_MIN_MS;
         if long && let Some(resolved) = loaded.gpu_copy.take() {
             match load_engine(&resolved, self.load_compiling_encoders, true) {
                 Ok(engine) => loaded.batch_engine = Some(engine),
@@ -347,14 +331,25 @@ impl SpeechService {
                 ),
             }
         }
+        let on_batch_engine = long && loaded.batch_engine.is_some();
         let engine = match loaded.batch_engine.as_mut() {
-            Some(batch) if long => batch,
+            Some(batch) if on_batch_engine => batch,
             _ => &mut loaded.engine,
         };
+        let options = DecodeOptions {
+            language: requested_language.clone(),
+            prompt,
+            dictionary,
+            timestamps: timestamps || timestamp_granularity.is_some(),
+            word_timestamps: timestamp_granularity == Some(TimestampGranularity::Word),
+        };
         let transcribe_started = Instant::now();
-        let transcription = transcribe_with_engine(engine, request)?;
+        let transcription = transcribe_with_engine(engine, audio, options)?;
         let transcribe_elapsed = transcribe_started.elapsed();
-        loaded.warmed = true;
+        // Only the main engine serves warmups and streaming.
+        if !on_batch_engine {
+            loaded.warmed = true;
+        }
         tracing::info!(
             "[SpeechService] transcribe model={} resolved={} total={:.2}s engine={:.2}s",
             requested_model,
@@ -392,18 +387,17 @@ impl SpeechService {
             return Ok(());
         }
 
-        let silence = vec![0.0f32; 16_000 * 2];
+        let silence = prepare_audio(AudioInput::Samples16Khz(vec![0.0f32; 16_000 * 2]))?;
         let warm_started = Instant::now();
         transcribe_with_engine(
             &mut loaded.engine,
-            TranscribeRequest {
-                audio: AudioInput::Samples16Khz(silence),
-                model_id: loaded.model_id.clone(),
+            silence,
+            DecodeOptions {
                 language: None,
                 prompt: None,
                 dictionary: Vec::new(),
                 timestamps: false,
-                timestamp_granularity: None,
+                word_timestamps: false,
             },
         )?;
         loaded.warmed = true;
@@ -693,28 +687,29 @@ fn load_engine(
 #[cfg_attr(not(local_engines), allow(unused_variables))]
 fn transcribe_with_engine(
     engine: &mut EngineInstance,
-    request: TranscribeRequest,
+    audio: PreparedAudio,
+    options: DecodeOptions,
 ) -> Result<TranscriptionWithDuration> {
     match engine {
         #[cfg(apple_speech_engine)]
         EngineInstance::Apple(engine) => {
             let params = crate::engines::apple::AppleInferenceParams {
-                language: request.language,
-                long_form: request.timestamps || request.timestamp_granularity.is_some(),
-                dictionary: request.dictionary,
+                language: options.language,
+                long_form: options.timestamps,
+                dictionary: options.dictionary,
             };
-            transcribe_audio(engine, request.audio, Some(params))
+            transcribe_audio(engine, audio, Some(params))
         }
         #[cfg(transcribe_engine)]
         EngineInstance::Transcribe(engine) => {
             let params = crate::engines::transcribe::TranscribeInferenceParams {
-                language: request.language,
-                dictionary: request.dictionary,
-                prompt: request.prompt,
-                timestamps: request.timestamps || request.timestamp_granularity.is_some(),
-                word_timestamps: request.timestamp_granularity == Some(TimestampGranularity::Word),
+                language: options.language,
+                dictionary: options.dictionary,
+                prompt: options.prompt,
+                timestamps: options.timestamps,
+                word_timestamps: options.word_timestamps,
             };
-            transcribe_audio(engine, request.audio, Some(params))
+            transcribe_audio(engine, audio, Some(params))
         }
         #[allow(unreachable_patterns)]
         _ => Err(anyhow!("No speech engine support is enabled")),
@@ -724,10 +719,9 @@ fn transcribe_with_engine(
 #[cfg(local_engines)]
 fn transcribe_audio<E: TranscriptionEngine>(
     engine: &mut E,
-    audio: AudioInput,
+    prepared: PreparedAudio,
     params: Option<E::InferenceParams>,
 ) -> Result<TranscriptionWithDuration> {
-    let prepared = prepare_audio(audio)?;
     let mut result = engine
         .transcribe_samples(prepared.samples, params)
         .map_err(boxed_error)?;
@@ -748,14 +742,14 @@ fn transcribe_audio<E: TranscriptionEngine>(
     })
 }
 
-#[cfg(local_engines)]
 fn prepare_audio(audio: AudioInput) -> Result<PreparedAudio> {
     const MIN_SAMPLES: usize = 16_000;
     const EXTRA_PADDING: usize = 4_000;
 
     let (mut samples, source_sample_rate, source_sample_count) = match audio {
         AudioInput::WavPath(path) => {
-            let samples = crate::audio::read_audio_samples(&path).map_err(boxed_error)?;
+            let samples =
+                crate::audio::read_audio_samples(&path).map_err(|err| anyhow!(err.to_string()))?;
             let sample_count = samples.len();
             (samples, 16_000, sample_count)
         }
@@ -785,7 +779,6 @@ fn prepare_audio(audio: AudioInput) -> Result<PreparedAudio> {
     })
 }
 
-#[cfg(local_engines)]
 fn audio_duration_ms(sample_count: usize, sample_rate: u32) -> u128 {
     if sample_rate == 0 {
         return 0;
@@ -793,7 +786,7 @@ fn audio_duration_ms(sample_count: usize, sample_rate: u32) -> u128 {
     (sample_count as u128 * 1000) / u128::from(sample_rate)
 }
 
-#[cfg(all(test, local_engines))]
+#[cfg(test)]
 mod prepare_tests {
     use super::{AudioInput, prepare_audio};
 
@@ -816,6 +809,19 @@ mod prepare_tests {
             sample_rate: crate::audio::MAX_SAMPLE_RATE + 1,
         });
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn duration_uses_the_input_rate() {
+        let prepared = prepare_audio(AudioInput::PcmI16 {
+            samples: vec![0i16; 8_000 * 40],
+            sample_rate: 8_000,
+        })
+        .expect("prepare_audio");
+
+        assert_eq!(prepared.duration_ms, 40_000);
+        assert!(prepared.duration_ms >= super::GPU_COPY_MIN_MS);
+        assert_eq!(prepared.samples.len(), 16_000 * 40 + 4_000);
     }
 
     #[test]
