@@ -2,7 +2,7 @@
 
 Local speech-to-text for Rust. One crate, an OpenAI-compatible HTTP API, and a CLI.
 
-Every local model runs on [transcribe.cpp](https://github.com/LegendarySpy/transcribe.cpp) (our fork): Metal on macOS, optional Core ML/ANE encoders on Apple Silicon, and Vulkan on Windows and Linux.
+Every local model runs on [transcribe.cpp](https://github.com/glimpse-hq/transcribe.cpp) (our fork): Metal on macOS, optional Core ML/ANE encoders on Apple Silicon, and Vulkan on Windows and Linux.
 
 - **Whisper**: GGUF or whisper.cpp GGML `.bin` files, with word timestamps from an alignment pass
 - **Qwen3-ASR** and **Parakeet TDT V3**: batch transcription
