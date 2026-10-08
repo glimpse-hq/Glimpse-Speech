@@ -79,6 +79,9 @@ pub struct TranscribeEngine {
     checks_dropped_speech: bool,
     // Parakeet's Core ML batch encodes the next chunk while one decodes.
     batches_chunks: bool,
+    // Where long audio is cut: at a pause for Parakeet, Qwen's reference
+    // quiet-window splitter for everything else.
+    boundary: Boundary,
 }
 
 impl TranscribeEngine {
@@ -338,6 +341,11 @@ impl TranscriptionEngine for TranscribeEngine {
         };
         self.checks_dropped_speech = arch == "parakeet" && model.variant().starts_with("tdt-");
         self.batches_chunks = arch == "parakeet" && uses_coreml;
+        self.boundary = if arch == "parakeet" {
+            Boundary::Pause
+        } else {
+            Boundary::Quiet
+        };
         let accepts = |kind| model.accepts_ext(ExtSlot::Stream, kind);
         self.stream_options =
             if accepts(transcribe_cpp::sys::TRANSCRIBE_EXT_KIND_PARAKEET_BUFFERED_STREAM) {
@@ -370,6 +378,7 @@ impl TranscriptionEngine for TranscribeEngine {
         self.family = Family::Other;
         self.checks_dropped_speech = false;
         self.batches_chunks = false;
+        self.boundary = Boundary::Quiet;
     }
 
     fn transcribe_samples(
@@ -446,6 +455,7 @@ impl TranscriptionEngine for TranscribeEngine {
             language = Some("en".to_string());
         }
         let batch = self.batches_chunks;
+        let boundary = self.boundary;
         let (chunks, speech) = std::thread::scope(|scope| {
             // Silero runs while the model decodes.
             let vad = self
@@ -454,7 +464,7 @@ impl TranscriptionEngine for TranscribeEngine {
                     std::thread::Builder::new().spawn_scoped(scope, || speech_ranges(&samples))
                 })
                 .and_then(Result::ok);
-            let mut chunks = decode_chunks(&samples, self.chunk_samples, |chunks| {
+            let mut chunks = decode_chunks(&samples, self.chunk_samples, boundary, |chunks| {
                 run_chunks(session, chunks, &options, batch)
             });
             // A rejected boost list must never fail dictation: decode unboosted.
@@ -465,7 +475,7 @@ impl TranscriptionEngine for TranscribeEngine {
                     "[transcribe.cpp] phrase boosting rejected, decoding without it: {error}"
                 );
                 options.family = None;
-                chunks = decode_chunks(&samples, self.chunk_samples, |chunks| {
+                chunks = decode_chunks(&samples, self.chunk_samples, boundary, |chunks| {
                     run_chunks(session, chunks, &options, batch)
                 });
             }
@@ -485,7 +495,7 @@ impl TranscriptionEngine for TranscribeEngine {
                     *span != (0..samples.len()) && holes.iter().any(|hole| span.contains(hole))
                 })
                 .collect();
-            let retries = decode_spans(&samples, &spans, self.chunk_samples, |chunks| {
+            let retries = decode_spans(&samples, &spans, self.chunk_samples, boundary, |chunks| {
                 run_chunks(session, chunks, &options, batch)
             })
             .map(|decoded| {
@@ -791,6 +801,69 @@ fn quiet_boundary(samples: &[f32], limit: usize) -> usize {
     best.1 + window / 2
 }
 
+// How long audio is cut into chunks.
+#[derive(Clone, Copy, Default)]
+enum Boundary {
+    #[default]
+    Quiet,
+    Pause,
+}
+
+impl Boundary {
+    // A cut point in `samples` at or before `limit` (both relative to the chunk start).
+    fn cut(self, samples: &[f32], limit: usize) -> usize {
+        match self {
+            Self::Quiet => quiet_boundary(samples, limit),
+            Self::Pause => pause_boundary(samples, limit),
+        }
+    }
+}
+
+// 20 ms frames: a frame is a pause when it is within PAUSE_DB of the chunk's
+// noise floor (its 2nd-percentile level); a run of at least MIN_PAUSE frames
+// is a pause long enough to cut in.
+const PAUSE_FRAME: usize = SAMPLE_RATE / 50;
+const PAUSE_DB: f32 = 8.0;
+const MIN_PAUSE: usize = 10;
+
+// Cut in the middle of the latest pause of at least 0.2 s in the back half of
+// the window, so no word straddles the cut (the way Moondream's Photon cuts
+// Parakeet long-form; it measured overlaps and context margins worse for the
+// transducer). Audio without a clear pause, such as continuous noise or
+// speech, falls back to the quietest window.
+fn pause_boundary(samples: &[f32], limit: usize) -> usize {
+    let frames = limit / PAUSE_FRAME;
+    let level: Vec<f32> = samples[..frames * PAUSE_FRAME]
+        .chunks(PAUSE_FRAME)
+        .map(|frame| {
+            let power = frame.iter().map(|v| v * v).sum::<f32>() / PAUSE_FRAME as f32;
+            10.0 * (power + 1e-10).log10()
+        })
+        .collect();
+    let mut sorted = level.clone();
+    sorted.sort_by(f32::total_cmp);
+    let percentile = |p: usize| sorted[(sorted.len() - 1) * p / 100];
+    let floor = percentile(2);
+    if frames < 2 * MIN_PAUSE || percentile(90) < floor + PAUSE_DB {
+        return quiet_boundary(samples, limit);
+    }
+    let first = frames / 2;
+    let mut run_end = frames;
+    for frame in (first..frames).rev() {
+        if level[frame] >= floor + PAUSE_DB {
+            run_end = frame;
+            continue;
+        }
+        let run_start = frame;
+        if run_end - run_start >= MIN_PAUSE
+            && (frame == first || level[frame - 1] >= floor + PAUSE_DB)
+        {
+            return (run_start + run_end) / 2 * PAUSE_FRAME;
+        }
+    }
+    quiet_boundary(samples, limit)
+}
+
 // Results for the chunks in order. Unbatched runs stop at the first error;
 // decode_spans decodes any chunk left without a result on its own.
 fn run_chunks(
@@ -817,10 +890,18 @@ fn run_chunks(
 fn decode_chunks(
     samples: &[f32],
     max_samples: Option<usize>,
+    boundary: Boundary,
     decode: impl FnMut(&[&[f32]]) -> Result<Vec<Result<Transcript, Error>>, Error>,
 ) -> Result<Vec<(usize, Transcript)>, Error> {
     let span = 0..samples.len();
-    Ok(decode_spans(samples, std::slice::from_ref(&span), max_samples, decode)?.remove(0))
+    Ok(decode_spans(
+        samples,
+        std::slice::from_ref(&span),
+        max_samples,
+        boundary,
+        decode,
+    )?
+    .remove(0))
 }
 
 // Decodes every span in one call, each split at quiet points to fit
@@ -829,13 +910,20 @@ fn decode_spans(
     samples: &[f32],
     spans: &[Range<usize>],
     max_samples: Option<usize>,
+    boundary: Boundary,
     mut decode: impl FnMut(&[&[f32]]) -> Result<Vec<Result<Transcript, Error>>, Error>,
 ) -> Result<Vec<Vec<(usize, Transcript)>>, Error> {
     let mut chunks = Vec::new();
     for (index, span) in spans.iter().enumerate() {
+        // A single cut keeps the quietest point: pause cuts measured mixed on
+        // 15 to 30 s clips (FLEURS) and only pay off across many windows.
+        let boundary = match max_samples {
+            Some(limit) if span.len() > 2 * limit => boundary,
+            _ => Boundary::Quiet,
+        };
         let mut start = span.start;
         while let Some(limit) = max_samples.filter(|limit| span.end - start > *limit) {
-            let cut = start + quiet_boundary(&samples[start..span.end], limit);
+            let cut = start + boundary.cut(&samples[start..span.end], limit);
             chunks.push((index, start..cut));
             start = cut;
         }
@@ -884,20 +972,67 @@ fn transcribe_error(error: impl std::fmt::Display) -> Box<dyn std::error::Error>
 mod tests {
     use super::TranscribeEngine;
 
+    // Tone bursts ("speech") separated by silent gaps at the given seconds.
+    fn speech_with_gaps(seconds: f32, gaps: &[(f32, f32)]) -> Vec<f32> {
+        (0..(seconds * 16_000.0) as usize)
+            .map(|i| {
+                let t = i as f32 / 16_000.0;
+                let silent = gaps.iter().any(|&(a, b)| t >= a && t < b);
+                if silent {
+                    0.0001 * ((i * 7919) % 13) as f32
+                } else {
+                    0.3 * (t * 1_300.0).sin()
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn pause_cut_lands_in_the_latest_pause() {
+        // Pauses at 9.0-9.5 s and 12.2-12.6 s, limit 15 s: cut mid second pause.
+        let samples = speech_with_gaps(20.0, &[(9.0, 9.5), (12.2, 12.6)]);
+        let cut = super::pause_boundary(&samples, 15 * 16_000) as f32 / 16_000.0;
+        assert!((12.3..12.5).contains(&cut), "cut at {cut}");
+    }
+
+    #[test]
+    fn pause_cut_ignores_gaps_shorter_than_200_ms() {
+        // 120 ms between "syllables" late in the window; the real pause is earlier.
+        let samples = speech_with_gaps(20.0, &[(9.0, 9.6), (13.0, 13.12)]);
+        let cut = super::pause_boundary(&samples, 15 * 16_000) as f32 / 16_000.0;
+        assert!((9.1..9.5).contains(&cut), "cut at {cut}");
+    }
+
+    #[test]
+    fn pause_cut_falls_back_without_a_pause() {
+        let samples = speech_with_gaps(20.0, &[]);
+        let limit = 15 * 16_000;
+        assert_eq!(
+            super::pause_boundary(&samples, limit),
+            super::quiet_boundary(&samples, limit)
+        );
+        assert!(super::pause_boundary(&samples, limit) <= limit);
+    }
+
     #[test]
     fn splits_without_dropping_or_repeating_audio() {
         let samples: Vec<_> = (0..16_000 * 47).map(|i| i as f32).collect();
         let mut consumed = Vec::new();
-        let chunks = super::decode_chunks(&samples, Some(16_000 * 15), |chunks| {
-            Ok(chunks
-                .iter()
-                .map(|chunk| {
-                    assert!(chunk.len() <= 16_000 * 15);
-                    consumed.extend_from_slice(chunk);
-                    Ok(Default::default())
-                })
-                .collect())
-        })
+        let chunks = super::decode_chunks(
+            &samples,
+            Some(16_000 * 15),
+            super::Boundary::Quiet,
+            |chunks| {
+                Ok(chunks
+                    .iter()
+                    .map(|chunk| {
+                        assert!(chunk.len() <= 16_000 * 15);
+                        consumed.extend_from_slice(chunk);
+                        Ok(Default::default())
+                    })
+                    .collect())
+            },
+        )
         .unwrap();
         assert_eq!(consumed, samples);
         assert_eq!(chunks[0].0, 0);
@@ -908,7 +1043,7 @@ mod tests {
     fn retries_length_errors_but_never_returns_partial_output() {
         let samples = vec![0.0; 16_000 * 8];
         let mut consumed = 0;
-        let chunks = super::decode_chunks(&samples, None, |chunks| {
+        let chunks = super::decode_chunks(&samples, None, super::Boundary::Quiet, |chunks| {
             Ok(chunks
                 .iter()
                 .map(|chunk| {
@@ -940,23 +1075,33 @@ mod tests {
     #[test]
     fn errors_stop_without_unbounded_retries() {
         let mut attempts = 0;
-        let result = super::decode_chunks(&vec![0.0; 16_000 * 4], None, |chunks| {
-            attempts += chunks.len();
-            Ok(chunks
-                .iter()
-                .map(|_| Err(transcribe_cpp::Error::InputTooLong("test".into())))
-                .collect())
-        });
+        let result = super::decode_chunks(
+            &vec![0.0; 16_000 * 4],
+            None,
+            super::Boundary::Quiet,
+            |chunks| {
+                attempts += chunks.len();
+                Ok(chunks
+                    .iter()
+                    .map(|_| Err(transcribe_cpp::Error::InputTooLong("test".into())))
+                    .collect())
+            },
+        );
         assert!(result.is_err());
         assert!(attempts <= 4);
         attempts = 0;
-        let result = super::decode_chunks(&vec![0.0; 16_000 * 4], None, |chunks| {
-            attempts += chunks.len();
-            Ok(chunks
-                .iter()
-                .map(|_| Err(transcribe_cpp::Error::Backend("test".into())))
-                .collect())
-        });
+        let result = super::decode_chunks(
+            &vec![0.0; 16_000 * 4],
+            None,
+            super::Boundary::Quiet,
+            |chunks| {
+                attempts += chunks.len();
+                Ok(chunks
+                    .iter()
+                    .map(|_| Err(transcribe_cpp::Error::Backend("test".into())))
+                    .collect())
+            },
+        );
         assert!(result.is_err());
         assert_eq!(attempts, 1);
     }
