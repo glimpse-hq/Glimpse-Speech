@@ -1015,6 +1015,42 @@ mod tests {
     }
 
     #[test]
+    fn pause_cuts_only_audio_longer_than_two_windows() {
+        let limit = 15 * 16_000;
+        for (seconds, pause) in [(25.0, false), (30.0, false), (40.0, true)] {
+            let samples = speech_with_gaps(seconds, &[(8.0, 8.6), (12.2, 12.6)]);
+            let (by_pause, by_quiet) = (
+                super::pause_boundary(&samples, limit),
+                super::quiet_boundary(&samples, limit),
+            );
+            assert_ne!(
+                by_pause, by_quiet,
+                "the two cuts must differ to tell them apart"
+            );
+            let mut consumed = Vec::new();
+            let chunks =
+                super::decode_chunks(&samples, Some(limit), super::Boundary::Pause, |chunks| {
+                    Ok(chunks
+                        .iter()
+                        .map(|chunk| {
+                            assert!(chunk.len() <= limit);
+                            consumed.extend_from_slice(chunk);
+                            Ok(Default::default())
+                        })
+                        .collect())
+                })
+                .unwrap();
+            assert_eq!(consumed, samples, "{seconds} s");
+            let first_cut = chunks[1].0;
+            assert_eq!(
+                first_cut,
+                if pause { by_pause } else { by_quiet },
+                "{seconds} s"
+            );
+        }
+    }
+
+    #[test]
     fn splits_without_dropping_or_repeating_audio() {
         let samples: Vec<_> = (0..16_000 * 47).map(|i| i as f32).collect();
         let mut consumed = Vec::new();
