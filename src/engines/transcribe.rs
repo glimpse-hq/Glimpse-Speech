@@ -323,7 +323,7 @@ impl TranscriptionEngine for TranscribeEngine {
             }
             "qwen3_asr" => Family::Qwen3Asr,
             "whisper" => {
-                let capabilities = model.capabilities();
+                let capabilities = model.capabilities().map_err(transcribe_error)?;
                 Family::Whisper {
                     words: matches!(
                         capabilities.max_timestamp_kind,
@@ -335,7 +335,7 @@ impl TranscriptionEngine for TranscribeEngine {
             _ => Family::Other,
         };
         self.languages = if arch == "parakeet" {
-            model.capabilities().languages
+            model.capabilities().map_err(transcribe_error)?.languages
         } else {
             Vec::new()
         };

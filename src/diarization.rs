@@ -5,9 +5,9 @@
 use std::path::Path;
 
 use transcribe_cpp::{
-    Backend, Model, ModelOptions, OwnedStream, RunExtension, RunOptions, Session, SessionOptions,
-    SortformerLiveOptions, SortformerPreset, SortformerStreamOptions, SpeakerSegment,
-    StreamExtension, StreamOptions, TimestampKind,
+    Backend, DiarizeExtension, DiarizeOptions, DiarizeSession, DiarizeSessionOptions,
+    DiarizeStreamExtension, DiarizeStreamOptions, Model, ModelOptions, OwnedDiarizeStream,
+    SortformerDiarizeOptions, SortformerLiveOptions, SortformerPreset, SpeakerSegment,
 };
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -49,21 +49,19 @@ pub fn diarize(
     }
 
     let mut session = open_session(model_path, use_gpu)?;
-    let transcript = session
+    let segments = session
         .run(
             &audio,
-            &RunOptions {
-                timestamps: TimestampKind::None,
+            &DiarizeOptions {
                 // The published offline-file operating point.
-                family: Some(RunExtension::Sortformer(SortformerStreamOptions {
+                family: Some(DiarizeExtension::Sortformer(SortformerDiarizeOptions {
                     preset: Some(SortformerPreset::VeryHighLatency),
                 })),
-                ..Default::default()
             },
         )
         .map_err(transcribe_error)?;
     let duration_ms = audio.len() as u64 * 1000 / u64::from(SAMPLE_RATE);
-    Ok(to_turns(&transcript.speaker_segments, duration_ms))
+    Ok(to_turns(&segments, duration_ms))
 }
 
 /// Turns so far from [`LiveDiarizer::feed`].
@@ -77,7 +75,7 @@ pub struct LiveTurns {
 /// Diarizes 16 kHz mono audio pushed while it is recorded. Nemotron-3
 /// Diarization only; Sortformer v2.1 has no live path.
 pub struct LiveDiarizer {
-    stream: OwnedStream,
+    stream: OwnedDiarizeStream,
     received: u64,
     settled_ms: u64,
 }
@@ -85,25 +83,21 @@ pub struct LiveDiarizer {
 impl LiveDiarizer {
     pub fn new(model_path: &Path, use_gpu: bool) -> Result<Self, Error> {
         let session = open_session(model_path, use_gpu)?;
-        if session.model().arch() != "nemotron3_diar" {
-            return Err(error(
-                "live diarization needs Nemotron-3 Diarization, not Sortformer v2.1",
-            ));
-        }
         let stream = session
-            .into_stream(
-                &RunOptions {
-                    timestamps: TimestampKind::None,
-                    ..Default::default()
-                },
-                &StreamOptions {
-                    family: Some(StreamExtension::SortformerLive(SortformerLiveOptions {
+            .into_stream(&DiarizeStreamOptions {
+                family: Some(DiarizeStreamExtension::SortformerLive(
+                    SortformerLiveOptions {
                         preset: Some(SortformerPreset::LowLatency),
-                    })),
-                    ..Default::default()
-                },
-            )
-            .map_err(|(err, _)| transcribe_error(err))?;
+                    },
+                )),
+            })
+            .map_err(|(err, _)| match err {
+                // Sortformer v2.1 has no push-audio entry point.
+                transcribe_cpp::Error::NotImplemented(_) => {
+                    error("live diarization needs Nemotron-3 Diarization, not Sortformer v2.1")
+                }
+                err => transcribe_error(err),
+            })?;
         Ok(Self {
             stream,
             received: 0,
@@ -125,7 +119,7 @@ impl LiveDiarizer {
             self.settled_ms = (update.audio_committed_ms.max(0) as u64).saturating_sub(1);
         }
         Ok(LiveTurns {
-            turns: to_turns(&self.stream.snapshot().speaker_segments, u64::MAX),
+            turns: to_turns(&self.stream.segments(), u64::MAX),
             settled_ms: self.settled_ms,
         })
     }
@@ -134,13 +128,13 @@ impl LiveDiarizer {
     pub fn finish(mut self) -> Result<Vec<SpeakerTurn>, Error> {
         let update = self.stream.finalize().map_err(transcribe_error)?;
         Ok(to_turns(
-            &self.stream.snapshot().speaker_segments,
+            &self.stream.segments(),
             update.input_received_ms.max(0) as u64,
         ))
     }
 }
 
-fn open_session(model_path: &Path, use_gpu: bool) -> Result<Session, Error> {
+fn open_session(model_path: &Path, use_gpu: bool) -> Result<DiarizeSession, Error> {
     if !model_path.is_file() {
         return Err(error(format!(
             "diarization model file not found: {}",
@@ -163,9 +157,8 @@ fn open_session(model_path: &Path, use_gpu: bool) -> Result<Session, Error> {
         )));
     }
     model
-        .session_with(&SessionOptions {
+        .diarize_session_with(&DiarizeSessionOptions {
             n_threads: crate::engines::inference_threads() as i32,
-            ..Default::default()
         })
         .map_err(transcribe_error)
 }
