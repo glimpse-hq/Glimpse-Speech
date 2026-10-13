@@ -23,12 +23,22 @@ fn main() {
     if apple_cleanup || apple_speech {
         println!("cargo::rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
         // Weak-link so binaries still launch on macOS < 26, where the
-        // framework is absent. cleanup.rs guards every call by OS version.
+        // framework is absent. The shims guard every call with #available.
         println!("cargo::rustc-link-arg=-Wl,-weak_framework,FoundationModels");
     }
 
     if apple_speech {
-        compile_apple_speech_shim();
+        compile_swift_shim("apple_speech");
+        println!("cargo::rustc-link-lib=framework=AVFoundation");
+        println!("cargo::rustc-link-lib=framework=CoreMedia");
+        // The macOS 26 analyzer classes live in Speech.framework, which predates
+        // them; the framework link is safe on macOS 14, and the new symbols are
+        // weak because the shim's deployment target is 14 with #available guards.
+        println!("cargo::rustc-link-lib=framework=Speech");
+    }
+
+    if apple_cleanup {
+        compile_swift_shim("apple_cleanup");
     }
 }
 
@@ -43,40 +53,35 @@ fn emit_cfg(name: &str, enabled: bool) {
     }
 }
 
-fn compile_apple_speech_shim() {
-    println!("cargo::rerun-if-changed=swift/apple_speech.swift");
+/// Builds swift/<name>.swift into a static lib with a macOS 14 deployment
+/// target, so newer APIs stay weak behind #available.
+fn compile_swift_shim(name: &str) {
+    let source = format!("swift/{name}.swift");
+    println!("cargo::rerun-if-changed={source}");
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
-    let lib_path = out_dir.join("libglimpse_apple_speech.a");
+    let lib_name = format!("glimpse_{name}");
+    let lib_path = out_dir.join(format!("lib{lib_name}.a"));
 
     let status = Command::new("swiftc")
         .args([
             "-O",
             "-parse-as-library",
             "-module-name",
-            "glimpse_apple_speech",
+            &lib_name,
             "-emit-library",
             "-static",
             "-target",
             "arm64-apple-macosx14.0",
-            "swift/apple_speech.swift",
+            &source,
             "-o",
         ])
         .arg(&lib_path)
         .status()
-        .expect("failed to run swiftc; the apple-speech feature needs Xcode command line tools");
-    assert!(
-        status.success(),
-        "swiftc failed for swift/apple_speech.swift"
-    );
+        .expect("failed to run swiftc; the Apple features need Xcode command line tools");
+    assert!(status.success(), "swiftc failed for {source}");
 
     println!("cargo::rustc-link-search=native={}", out_dir.display());
-    println!("cargo::rustc-link-lib=static=glimpse_apple_speech");
+    println!("cargo::rustc-link-lib=static={lib_name}");
     println!("cargo::rustc-link-lib=framework=Foundation");
-    println!("cargo::rustc-link-lib=framework=AVFoundation");
-    println!("cargo::rustc-link-lib=framework=CoreMedia");
-    // The macOS 26 analyzer classes live in Speech.framework, which predates
-    // them; the framework link is safe on macOS 14, and the new symbols are
-    // weak because the shim's deployment target is 14 with #available guards.
-    println!("cargo::rustc-link-lib=framework=Speech");
     println!("cargo::rustc-link-search=native=/usr/lib/swift");
 }

@@ -9,7 +9,14 @@
 
 ### Changed
 
+- `cleanup-apple` runs on a small Swift shim (swift/apple_cleanup.swift) instead of the `fm-rs` crate. fm-rs builds its Swift for macOS 26, which hard-linked Foundation symbols missing on older systems, so apps using the feature crashed at launch on macOS 14 and 15. The shim builds for macOS 14 with `#available` checks.
+- The on-device model uses Apple's permissive guardrails for text transformations, and temperature 0 samples greedily.
+- `apple_generate` takes a timeout and cancels the request when it passes, and returns an `AppleError` whose `kind` separates input problems (too long for the context window, refused, unsupported language) from the model being unavailable or busy.
 - transcribe.cpp is pinned to upstream 0.4.0: ggml 0.26.0, plus language ID (ECAPA-TDNN) and Silero VAD sessions in the C API. Glimpse Speech does not use the new language ID or VAD sessions yet.
+
+### Removed
+
+- `CleanupProvider` and its built-in cleanup prompt. Use `apple_availability`, `apple_prewarm` and `apple_generate`.
 
 ## 2.0.3
 
