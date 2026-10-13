@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.0.5
+
+### Changed
+
+- transcribe.cpp is pinned to upstream 0.4.0: ggml 0.26.0, plus language ID (ECAPA-TDNN) and Silero VAD sessions in the C API. Glimpse Speech does not use the new language ID or VAD sessions yet.
+
 ## 2.0.3
 
 ### Changed

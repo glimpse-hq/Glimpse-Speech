@@ -28,7 +28,7 @@ Parakeet and Nemotron boost dictionary words during decoding.
 
 ```toml
 [dependencies]
-glimpse-speech = { git = "https://github.com/glimpse-hq/Glimpse-Speech.git", tag = "2.0.0", features = ["whisper"] }
+glimpse-speech = { git = "https://github.com/glimpse-hq/Glimpse-Speech.git", tag = "2.0.5", features = ["whisper"] }
 ```
 
 The transcribe.cpp dependency is pinned to an exact Git revision, including its
