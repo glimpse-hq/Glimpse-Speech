@@ -18,6 +18,7 @@ const BRIDGE_FRAMES: usize = 4; // merge speech across silence gaps up to ~128 m
 const PAD_S: f32 = 0.25; // widen each region so words adjacent to speech survive
 const MAX_THREADS: usize = 8;
 const MIN_FRAMES_PER_THREAD: usize = 32;
+const BLOCK_FRAMES: usize = if cfg!(test) { 64 } else { 4_096 }; // 131 s of encoder gates, 8 MB
 
 // Conv1d with kernel 3, padding 1 and ReLU over time-major input [t][inputs].
 struct Conv {
@@ -183,34 +184,41 @@ impl Silero {
         if frames == 0 {
             return Vec::new();
         }
-        let threads = std::thread::available_parallelism()
+        let cores = std::thread::available_parallelism()
             .map_or(1, |n| n.get())
-            .min(MAX_THREADS)
-            .min(frames.div_ceil(MIN_FRAMES_PER_THREAD));
-        let per_thread = frames.div_ceil(threads);
-        let mut inputs = vec![0.0f32; frames * 4 * HIDDEN];
-        std::thread::scope(|scope| {
-            for (t, out) in inputs.chunks_mut(per_thread * 4 * HIDDEN).enumerate() {
-                scope.spawn(move || {
-                    let mut x = [0.0f32; CONTEXT + WINDOW + CONTEXT];
-                    let (mut a, mut b) = (Vec::new(), Vec::new());
-                    for (k, gates) in out.chunks_exact_mut(4 * HIDDEN).enumerate() {
-                        let start = (t * per_thread + k) * WINDOW;
-                        if start >= CONTEXT {
-                            x[..CONTEXT].copy_from_slice(&samples[start - CONTEXT..start]);
-                        }
-                        x[CONTEXT..CONTEXT + WINDOW]
-                            .copy_from_slice(&samples[start..start + WINDOW]);
-                        self.input_gates(&mut x, &mut a, &mut b, gates);
-                    }
-                });
-            }
-        });
+            .min(MAX_THREADS);
+        let mut inputs = vec![0.0f32; frames.min(BLOCK_FRAMES) * 4 * HIDDEN];
         let (mut h, mut c) = ([0.0f32; HIDDEN], [0.0f32; HIDDEN]);
-        inputs
-            .chunks_exact(4 * HIDDEN)
-            .map(|gates| self.recur(&mut h, &mut c, gates))
-            .collect()
+        let mut probs = Vec::with_capacity(frames);
+        for block in (0..frames).step_by(BLOCK_FRAMES) {
+            let count = BLOCK_FRAMES.min(frames - block);
+            let inputs = &mut inputs[..count * 4 * HIDDEN];
+            let threads = cores.min(count.div_ceil(MIN_FRAMES_PER_THREAD));
+            let per_thread = count.div_ceil(threads);
+            std::thread::scope(|scope| {
+                for (t, out) in inputs.chunks_mut(per_thread * 4 * HIDDEN).enumerate() {
+                    scope.spawn(move || {
+                        let mut x = [0.0f32; CONTEXT + WINDOW + CONTEXT];
+                        let (mut a, mut b) = (Vec::new(), Vec::new());
+                        for (k, gates) in out.chunks_exact_mut(4 * HIDDEN).enumerate() {
+                            let start = (block + t * per_thread + k) * WINDOW;
+                            if start >= CONTEXT {
+                                x[..CONTEXT].copy_from_slice(&samples[start - CONTEXT..start]);
+                            }
+                            x[CONTEXT..CONTEXT + WINDOW]
+                                .copy_from_slice(&samples[start..start + WINDOW]);
+                            self.input_gates(&mut x, &mut a, &mut b, gates);
+                        }
+                    });
+                }
+            });
+            probs.extend(
+                inputs
+                    .chunks_exact(4 * HIDDEN)
+                    .map(|gates| self.recur(&mut h, &mut c, gates)),
+            );
+        }
+        probs
     }
 
     fn step(&self, state: &mut State, chunk: &[f32]) -> f32 {
@@ -426,6 +434,9 @@ pub fn speech_regions(samples: &[i16], sample_rate: u32) -> Option<Vec<(f32, f32
 const REGION_EXIT: f32 = 0.35;
 const REGION_PAD_FRAMES: usize = 16; // 512 ms
 const STREAM_HISTORY_FRAMES: usize = 64;
+const LOUDNESS_WINDOW: usize = 1_600; // 100 ms
+const GAIN_TARGET: f32 = 0.1; // -20 dBFS
+const MAX_GAIN: f32 = 31.62; // +30 dB
 
 /// Silero's speech probability for each 32 ms frame of a recording.
 pub struct Speech {
@@ -438,12 +449,38 @@ pub fn analyze(samples: &[i16], sample_rate: u32) -> Option<Speech> {
     if sample_rate > crate::audio::MAX_SAMPLE_RATE {
         return None;
     }
-    let audio = crate::audio::resample_i16_to_f32(samples, sample_rate, 16_000);
+    let mut audio = crate::audio::resample_i16_to_f32(samples, sample_rate, 16_000);
+    even_out(&mut audio);
     let vad = VAD.get_or_init(Silero::load).as_ref()?;
     Some(Speech {
         probs: vad.frame_probs(&audio),
         samples: audio.len(),
     })
+}
+
+/// Raises a quiet recording so its loudest 100 ms sits near -20 dBFS, by at
+/// most 30 dB. Silero misses quiet single words at their recorded level.
+fn even_out(audio: &mut [f32]) {
+    let window = LOUDNESS_WINDOW.min(audio.len());
+    if window == 0 {
+        return;
+    }
+    let mut energy: f64 = audio[..window].iter().map(|&s| f64::from(s * s)).sum();
+    let mut loudest = energy;
+    for i in window..audio.len() {
+        energy += f64::from(audio[i] * audio[i]) - f64::from(audio[i - window] * audio[i - window]);
+        loudest = loudest.max(energy);
+    }
+    let rms = (loudest.max(0.0) / window as f64).sqrt() as f32;
+    if rms <= 0.0 {
+        return;
+    }
+    let gain = (GAIN_TARGET / rms).clamp(1.0, MAX_GAIN);
+    if gain > 1.0 {
+        for sample in audio.iter_mut() {
+            *sample = (*sample * gain).clamp(-1.0, 1.0);
+        }
+    }
 }
 
 impl Speech {
@@ -470,7 +507,7 @@ impl Speech {
     /// about half a second on both sides.
     pub fn regions(&self, frame: usize) -> Vec<bool> {
         on_frames(
-            &regions_mask(&self.probs),
+            &regions_mask(&self.probs, false),
             0,
             0,
             frame,
@@ -487,6 +524,7 @@ pub struct SpeechStream {
     pending: Vec<f32>,
     probs: Vec<f32>,
     first: usize,
+    speech_before_first: bool,
 }
 
 impl SpeechStream {
@@ -497,6 +535,7 @@ impl SpeechStream {
             pending: Vec::new(),
             probs: Vec::new(),
             first: 0,
+            speech_before_first: false,
         })
     }
 
@@ -514,13 +553,22 @@ impl SpeechStream {
     pub fn regions(&self, from: u64, frame: usize) -> Vec<bool> {
         let end = (self.first + self.probs.len()) * WINDOW;
         let count = (end as u64).saturating_sub(from) as usize / frame;
-        on_frames(&regions_mask(&self.probs), self.first, from, frame, count)
+        on_frames(
+            &regions_mask(&self.probs, self.speech_before_first),
+            self.first,
+            from,
+            frame,
+            count,
+        )
     }
 
     /// Drops analysis no longer needed for frames from `sample` on.
     pub fn forget_before(&mut self, sample: u64) {
         let keep_from = (sample as usize / WINDOW).saturating_sub(STREAM_HISTORY_FRAMES);
         let drop = keep_from.saturating_sub(self.first).min(self.probs.len());
+        for &p in &self.probs[..drop] {
+            self.speech_before_first = still_speech(self.speech_before_first, p);
+        }
         self.probs.drain(..drop);
         self.first += drop;
     }
@@ -530,20 +578,23 @@ impl SpeechStream {
         self.pending.clear();
         self.probs.clear();
         self.first = 0;
+        self.speech_before_first = false;
     }
 }
 
-fn regions_mask(probs: &[f32]) -> Vec<bool> {
-    let mut speech = false;
+fn still_speech(speech: bool, p: f32) -> bool {
+    p >= if speech {
+        REGION_EXIT
+    } else {
+        SPEECH_THRESHOLD
+    }
+}
+
+fn regions_mask(probs: &[f32], mut speech: bool) -> Vec<bool> {
     let core: Vec<bool> = probs
         .iter()
         .map(|&p| {
-            speech = p
-                >= if speech {
-                    REGION_EXIT
-                } else {
-                    SPEECH_THRESHOLD
-                };
+            speech = still_speech(speech, p);
             speech
         })
         .collect();
@@ -596,12 +647,25 @@ mod tests {
             stream.regions(0, 480),
             whole.regions(480)[..stream.regions(0, 480).len()]
         );
-        assert_eq!(stream.regions(4800, 480), stream.regions(0, 480)[10..]);
-        stream.forget_before(4800);
+        assert_eq!(stream.regions(96_000, 480), stream.regions(0, 480)[200..]);
+        stream.forget_before(96_000);
+        assert!(stream.first > 0);
         assert_eq!(
-            stream.regions(4800, 480),
-            whole.regions(480)[10..10 + stream.regions(4800, 480).len()]
+            stream.regions(96_000, 480),
+            whole.regions(480)[200..200 + stream.regions(96_000, 480).len()]
         );
+    }
+
+    #[test]
+    fn forgotten_frames_keep_speech_going() {
+        let mut stream = SpeechStream::new().expect("silero weights");
+        stream.probs = std::iter::once(0.9)
+            .chain(std::iter::repeat_n(0.4, 300))
+            .collect();
+        let from = 200 * WINDOW as u64;
+        stream.forget_before(from);
+        assert!(stream.first > 0);
+        assert!(stream.regions(from, WINDOW).iter().all(|&speech| speech));
     }
 
     #[test]
@@ -622,7 +686,7 @@ mod tests {
         probs[20] = 0.9;
         probs[21] = 0.4;
         probs[22] = 0.2;
-        let mask = regions_mask(&probs);
+        let mask = regions_mask(&probs, false);
         assert!(mask[21] && mask[20 - REGION_PAD_FRAMES] && mask[21 + REGION_PAD_FRAMES]);
         assert!(!mask[20 - REGION_PAD_FRAMES - 1] && !mask[21 + REGION_PAD_FRAMES + 1]);
     }

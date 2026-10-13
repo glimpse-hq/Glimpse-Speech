@@ -166,8 +166,11 @@ mod apple {
     ) -> Result<String, AppleError> {
         let instructions = cstring(instructions)?;
         let prompt = cstring(prompt)?;
+        if timeout.is_zero() {
+            return Err(error(AppleErrorKind::TimedOut, "on-device model timed out"));
+        }
         let max_tokens = max_response_tokens.map_or(0, |n| i32::try_from(n).unwrap_or(i32::MAX));
-        let timeout_ms = i64::try_from(timeout.as_millis()).unwrap_or(i64::MAX);
+        let timeout_ms = i64::try_from(timeout.as_micros().div_ceil(1_000)).unwrap_or(i64::MAX);
         let ptr = unsafe {
             gs_cleanup_generate(
                 instructions.as_ptr(),

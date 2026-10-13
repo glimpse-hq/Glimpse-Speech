@@ -88,7 +88,7 @@ public func gs_cleanup_prewarm(_ instructions: UnsafePointer<CChar>) -> Int32 {
 }
 
 // Returns JSON {"text": ...} or {"error": ..., "kind": ...}. temperature <= 0
-// samples greedily; max_tokens <= 0 means no limit.
+// samples greedily; max_tokens <= 0 and timeout_ms <= 0 mean no limit.
 @_cdecl("gs_cleanup_generate")
 public func gs_cleanup_generate(
     _ instructions: UnsafePointer<CChar>,
@@ -121,7 +121,8 @@ public func gs_cleanup_generate(
         }
         semaphore.signal()
     }
-    let deadline: DispatchTime = timeoutMs > 0 ? .now() + .milliseconds(Int(timeoutMs)) : .distantFuture
+    let deadline: DispatchTime =
+        timeoutMs > 0 && timeoutMs < 86_400_000 ? .now() + .milliseconds(Int(timeoutMs)) : .distantFuture
     if semaphore.wait(timeout: deadline) == .timedOut {
         task.cancel()
         return errorJson("timeout", "on-device model timed out")

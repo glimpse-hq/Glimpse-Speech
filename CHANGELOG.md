@@ -4,8 +4,8 @@
 
 ### Added
 
-- `vad::analyze` runs Silero over a whole recording: the share of speech frames, per-frame decisions on any frame size, and padded speech regions (speech starts at 0.5, lasts until below 0.35, widened by about half a second) for cutting audio.
-- `vad::SpeechStream` runs Silero on live audio as it arrives, with the same padded regions. Its results match `vad::analyze` on the same audio.
+- `vad::analyze` runs Silero over a whole recording: the share of speech frames, per-frame decisions on any frame size, and padded speech regions (speech starts at 0.5, lasts until below 0.35, widened by about half a second) for cutting audio. It first raises a quiet recording so its loudest 100 ms sits near -20 dBFS, by at most 30 dB. In model-bench's replay of Glimpse's recorder check, single words cut from real speech pass 92.3% instead of 66.7% at -20 dB and 96.7% instead of 86.3% at -10 dB, while room tone and typing pass 0 to 22.5% (WebRTC VAD: 62.5 to 100%).
+- `vad::SpeechStream` runs Silero on live audio as it arrives, with the same padded regions. It does not raise quiet audio, so it matches `vad::analyze` on recordings whose loudest 100 ms reaches -20 dBFS.
 
 ### Changed
 
