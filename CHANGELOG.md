@@ -18,6 +18,21 @@
 
 - `CleanupProvider` and its built-in cleanup prompt. Use `apple_availability`, `apple_prewarm` and `apple_generate`.
 
+## 2.0.4
+
+### Changed
+
+- transcribe.cpp is pinned to `ec5f294d` (glimpse-hq main: the decoder speed work plus upstream main through 95d82e51), and the dependency now points at github.com/glimpse-hq/transcribe.cpp.
+- Parakeet recordings longer than two windows are cut in the middle of the latest pause of at least 0.2 s in each window's back half, so no word straddles a cut. Shorter audio keeps the quietest-point cut. On an M2 Pro, Parakeet TDT V3 on the Neural Engine transcribes a 554 s file in 1.50 s instead of 1.76 s, with long-form WER 3.26% instead of 3.47% and 5.50% instead of 6.19%. On Windows (Vulkan) the same file takes 4.82 s instead of 5.21 s.
+- Dictionary words a model spells another way can be boosted again (transcribe.cpp boost floor 1e-5 to 1e-7). Parakeet TDT V3 dictionary recall is 95.1% instead of 91.0% on the Neural Engine and 89.3% instead of 85.2% on Windows, with false insertions unchanged or up by 1 of 797 control clips. Parakeet Ultra writes "Tauri" again.
+- Diarization runs through transcribe.cpp's diarize sessions; live diarization rows are unchanged.
+- Nemotron streaming on Metal handles short clips in 186 ms instead of 266 ms.
+- Parakeet token confidence is vectorized on Apple, about 4% faster on short clips on the Neural Engine.
+
+### Fixed
+
+- Parakeet no longer prints `<unk>`, `<pad>` or `<|...|>` pieces.
+
 ## 2.0.3
 
 ### Changed
