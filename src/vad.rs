@@ -16,6 +16,8 @@ const SPEECH_THRESHOLD: f32 = 0.5;
 const FRAME_S: f32 = WINDOW as f32 / 16_000.0; // 32 ms
 const BRIDGE_FRAMES: usize = 4; // merge speech across silence gaps up to ~128 ms
 const PAD_S: f32 = 0.25; // widen each region so words adjacent to speech survive
+const MAX_THREADS: usize = 8;
+const MIN_FRAMES_PER_THREAD: usize = 32;
 
 // Conv1d with kernel 3, padding 1 and ReLU over time-major input [t][inputs].
 struct Conv {
@@ -177,24 +179,62 @@ impl Silero {
     // Speech probability per 512-sample frame of 16 kHz mono audio in [-1, 1].
     // A trailing partial frame is dropped.
     fn frame_probs(&self, samples: &[f32]) -> Vec<f32> {
-        let mut state = State::new();
-        samples
-            .chunks_exact(WINDOW)
-            .map(|chunk| self.step(&mut state, chunk))
+        let frames = samples.len() / WINDOW;
+        if frames == 0 {
+            return Vec::new();
+        }
+        let threads = std::thread::available_parallelism()
+            .map_or(1, |n| n.get())
+            .min(MAX_THREADS)
+            .min(frames.div_ceil(MIN_FRAMES_PER_THREAD));
+        let per_thread = frames.div_ceil(threads);
+        let mut inputs = vec![0.0f32; frames * 4 * HIDDEN];
+        std::thread::scope(|scope| {
+            for (t, out) in inputs.chunks_mut(per_thread * 4 * HIDDEN).enumerate() {
+                scope.spawn(move || {
+                    let mut x = [0.0f32; CONTEXT + WINDOW + CONTEXT];
+                    let (mut a, mut b) = (Vec::new(), Vec::new());
+                    for (k, gates) in out.chunks_exact_mut(4 * HIDDEN).enumerate() {
+                        let start = (t * per_thread + k) * WINDOW;
+                        if start >= CONTEXT {
+                            x[..CONTEXT].copy_from_slice(&samples[start - CONTEXT..start]);
+                        }
+                        x[CONTEXT..CONTEXT + WINDOW]
+                            .copy_from_slice(&samples[start..start + WINDOW]);
+                        self.input_gates(&mut x, &mut a, &mut b, gates);
+                    }
+                });
+            }
+        });
+        let (mut h, mut c) = ([0.0f32; HIDDEN], [0.0f32; HIDDEN]);
+        inputs
+            .chunks_exact(4 * HIDDEN)
+            .map(|gates| self.recur(&mut h, &mut c, gates))
             .collect()
     }
 
     fn step(&self, state: &mut State, chunk: &[f32]) -> f32 {
         let State { h, c, x, a, b } = state;
-        // Previous frame's last 64 samples, the frame, then a 64-sample right
-        // reflection pad, as the ONNX graph builds its STFT input.
         x.copy_within(WINDOW..WINDOW + CONTEXT, 0);
         x[CONTEXT..CONTEXT + WINDOW].copy_from_slice(chunk);
+        let mut gates = [0.0f32; 4 * HIDDEN];
+        self.input_gates(x, a, b, &mut gates);
+        self.recur(h, c, &gates)
+    }
+
+    // `x` holds the previous frame's last 64 samples, then the frame; a 64-sample
+    // right reflection pad completes the STFT input, as the ONNX graph builds it.
+    fn input_gates(
+        &self,
+        x: &mut [f32; CONTEXT + WINDOW + CONTEXT],
+        a: &mut Vec<f32>,
+        b: &mut Vec<f32>,
+        gates: &mut [f32],
+    ) {
         let end = CONTEXT + WINDOW;
         for i in 0..CONTEXT {
             x[end + i] = x[end - 2 - i];
         }
-
         a.clear();
         for frame in x.windows(N_FFT).step_by(HOP) {
             self.stft.magnitudes(frame, a);
@@ -203,14 +243,16 @@ impl Silero {
             conv.run(a, b);
             std::mem::swap(a, b);
         }
-
-        let mut gates = [0.0f32; 4 * HIDDEN];
         for (r, gate) in gates.iter_mut().enumerate() {
             let row = r * HIDDEN..(r + 1) * HIDDEN;
-            *gate = self.b_ih[r]
-                + self.b_hh[r]
-                + dot(&self.w_ih[row.clone()], a)
-                + dot(&self.w_hh[row], &h[..]);
+            *gate = self.b_ih[r] + self.b_hh[r] + dot(&self.w_ih[row], a);
+        }
+    }
+
+    fn recur(&self, h: &mut [f32; HIDDEN], c: &mut [f32; HIDDEN], inputs: &[f32]) -> f32 {
+        let mut gates = [0.0f32; 4 * HIDDEN];
+        for (r, gate) in gates.iter_mut().enumerate() {
+            *gate = inputs[r] + dot(&self.w_hh[r * HIDDEN..(r + 1) * HIDDEN], &h[..]);
         }
         for j in 0..HIDDEN {
             let input = sigmoid(gates[j]);
@@ -531,7 +573,7 @@ fn on_frames(mask: &[bool], first: usize, from: u64, frame: usize, count: usize)
 mod tests {
     use super::{
         BRIDGE_FRAMES, FRAME_S, PAD_S, REGION_PAD_FRAMES, SPEECH_THRESHOLD, Silero, SpeechStream,
-        WINDOW, analyze, mask_to_regions, regions_mask,
+        State, WINDOW, analyze, mask_to_regions, regions_mask,
     };
 
     fn reference_audio() -> Vec<f32> {
@@ -543,7 +585,7 @@ mod tests {
 
     #[test]
     fn stream_matches_whole_recording() {
-        let audio = reference_audio();
+        let audio = reference_audio().repeat(12);
         let pcm: Vec<i16> = audio.iter().map(|v| (v * 32_768.0) as i16).collect();
         let whole = analyze(&pcm, 16_000).expect("silero weights");
         let mut stream = SpeechStream::new().expect("silero weights");
@@ -560,6 +602,18 @@ mod tests {
             stream.regions(4800, 480),
             whole.regions(480)[10..10 + stream.regions(4800, 480).len()]
         );
+    }
+
+    #[test]
+    fn parallel_frames_match_frame_by_frame() {
+        let audio = reference_audio().repeat(12);
+        let vad = Silero::load().expect("silero weights");
+        let mut state = State::new();
+        let stepped: Vec<f32> = audio
+            .chunks_exact(WINDOW)
+            .map(|chunk| vad.step(&mut state, chunk))
+            .collect();
+        assert_eq!(vad.frame_probs(&audio), stepped);
     }
 
     #[test]
