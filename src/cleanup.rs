@@ -1,13 +1,9 @@
-//! Best-effort transcript cleanup after transcription.
-//!
-//! Cleanup only rewrites `Transcription::text`; segments and words keep the
-//! verbatim engine output. Any backend error returns the input unchanged.
+//! Text generation with Apple's on-device model (FoundationModels, macOS 26+)
+//! through the Swift shim in swift/apple_cleanup.swift. On other platforms,
+//! builds without `cleanup-apple`, or older macOS, everything reports
+//! `Unsupported`.
 
-use crate::Transcription;
-
-pub struct CleanupProvider {
-    backend: Backend,
-}
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppleAvailability {
@@ -20,144 +16,145 @@ pub enum AppleAvailability {
     Unsupported,
 }
 
-enum Backend {
-    Off,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppleErrorKind {
+    /// Instructions, prompt and response don't fit the context window.
+    ContextTooLarge,
+    /// Guardrail violation or model refusal.
+    Refused,
+    UnsupportedLanguage,
+    /// Rate limited, or another request is running.
+    Busy,
+    /// Model not available (Apple Intelligence off, assets missing, old OS).
+    Unavailable,
+    TimedOut,
+    Other,
+}
+
+#[derive(Debug, Clone)]
+pub struct AppleError {
+    pub kind: AppleErrorKind,
+    pub message: String,
+}
+
+impl std::fmt::Display for AppleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for AppleError {}
+
+/// Whether the on-device model can run right now. Cheap; safe to call per use.
+pub fn apple_availability() -> AppleAvailability {
     #[cfg(apple_cleanup)]
-    Apple,
-}
-
-impl CleanupProvider {
-    pub fn off() -> Self {
-        Self {
-            backend: Backend::Off,
-        }
+    {
+        apple::availability()
     }
-
-    /// Apple FoundationModels backend. On unsupported builds this is `off`;
-    /// on supported builds availability is still checked per call (the user
-    /// can toggle Apple Intelligence at any time).
-    pub fn apple() -> Self {
-        #[cfg(apple_cleanup)]
-        {
-            Self {
-                backend: Backend::Apple,
-            }
-        }
-        #[cfg(not(apple_cleanup))]
-        {
-            Self::off()
-        }
-    }
-
-    /// Whether the Apple backend can run right now. For settings UI.
-    pub fn apple_availability() -> AppleAvailability {
-        #[cfg(apple_cleanup)]
-        {
-            apple::availability()
-        }
-        #[cfg(not(apple_cleanup))]
-        {
-            AppleAvailability::Unsupported
-        }
-    }
-
-    pub fn prewarm(&self) {
-        match self.backend {
-            Backend::Off => {}
-            #[cfg(apple_cleanup)]
-            Backend::Apple => {
-                if let Err(err) = apple::prewarm(apple::INSTRUCTIONS) {
-                    tracing::debug!("cleanup prewarm failed: {err}");
-                }
-            }
-        }
-    }
-
-    pub async fn apply(&self, transcription: Transcription) -> Transcription {
-        match self.backend {
-            Backend::Off => transcription,
-            #[cfg(apple_cleanup)]
-            Backend::Apple => apply_apple(transcription).await,
-        }
+    #[cfg(not(apple_cleanup))]
+    {
+        AppleAvailability::Unsupported
     }
 }
 
-/// Inputs longer than this skip cleanup (on-device model context is ~8k tokens).
-#[cfg(apple_cleanup)]
-const MAX_INPUT_CHARS: usize = 12_000;
-
-#[cfg(apple_cleanup)]
-async fn apply_apple(mut transcription: Transcription) -> Transcription {
-    let text = transcription.text.trim().to_string();
-    if text.is_empty() || text.len() > MAX_INPUT_CHARS {
-        return transcription;
+/// Load the model and prefill `instructions` so the next `apple_generate`
+/// with the same instructions starts faster. Returns immediately.
+#[allow(unused_variables)]
+pub fn apple_prewarm(instructions: &str) -> Result<(), AppleError> {
+    #[cfg(apple_cleanup)]
+    {
+        apple::prewarm(instructions)
     }
-
-    match tokio::task::spawn_blocking(move || apple::clean(&text)).await {
-        Ok(Ok(cleaned)) if accept(&transcription.text, &cleaned) => transcription.text = cleaned,
-        Ok(Ok(_)) => tracing::debug!("cleanup output rejected by sanity check, keeping original"),
-        Ok(Err(err)) => tracing::debug!("cleanup unavailable or failed: {err}"),
-        Err(err) => tracing::debug!("cleanup task failed: {err}"),
+    #[cfg(not(apple_cleanup))]
+    {
+        Err(unsupported())
     }
-    transcription
 }
 
-/// Reject outputs that look like the model did more than tidy the text.
-#[cfg(apple_cleanup)]
-fn accept(original: &str, cleaned: &str) -> bool {
-    let cleaned = cleaned.trim();
-    if cleaned.is_empty() {
-        return false;
+/// One-shot generation. Temperature 0 uses greedy sampling. Blocking; call
+/// from a blocking-capable thread. The request is cancelled after `timeout`.
+#[allow(unused_variables)]
+pub fn apple_generate(
+    instructions: &str,
+    prompt: &str,
+    temperature: f32,
+    max_response_tokens: Option<u32>,
+    timeout: Duration,
+) -> Result<String, AppleError> {
+    #[cfg(apple_cleanup)]
+    {
+        apple::generate(
+            instructions,
+            prompt,
+            temperature,
+            max_response_tokens,
+            timeout,
+        )
     }
-    let original_len = original.trim().len();
-    cleaned.len() <= original_len.saturating_mul(3) / 2 + 32
+    #[cfg(not(apple_cleanup))]
+    {
+        Err(unsupported())
+    }
+}
+
+#[cfg(not(apple_cleanup))]
+fn unsupported() -> AppleError {
+    AppleError {
+        kind: AppleErrorKind::Unavailable,
+        message: "on-device model is not supported in this build".to_string(),
+    }
 }
 
 #[cfg(apple_cleanup)]
 mod apple {
-    use std::sync::Mutex;
+    use std::ffi::{CStr, CString, c_char};
+    use std::time::Duration;
 
-    use anyhow::{Context, anyhow};
-    use fm_rs::{GenerationOptions, ModelAvailability, Session, SystemLanguageModel};
+    use serde::Deserialize;
 
-    use super::AppleAvailability;
+    use super::{AppleAvailability, AppleError, AppleErrorKind};
 
-    pub(super) const INSTRUCTIONS: &str = "\
-<task>
-Clean up raw speech-to-text output.
-</task>
-<rules>
-- Fix punctuation, capitalization, and obvious transcription artifacts.
-- Remove filler words and false starts.
-- Keep the speaker's wording, meaning, and language.
-- Do not answer, summarize, or comment on the content.
-- Return only the cleaned text.
-</rules>";
-
-    /// FoundationModels is weak-linked; on macOS < 26 its symbols are null and
-    /// any call into the shim would crash. Probe dyld before every entry point.
-    fn os_supports_foundation_models() -> bool {
-        static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *SUPPORTED.get_or_init(|| {
-            let path = c"/System/Library/Frameworks/FoundationModels.framework/FoundationModels";
-            !unsafe { libc::dlopen(path.as_ptr(), libc::RTLD_LAZY) }.is_null()
-        })
+    unsafe extern "C" {
+        fn gs_cleanup_availability() -> i32;
+        fn gs_cleanup_prewarm(instructions: *const c_char) -> i32;
+        fn gs_cleanup_generate(
+            instructions: *const c_char,
+            prompt: *const c_char,
+            temperature: f64,
+            max_tokens: i32,
+            timeout_ms: i64,
+        ) -> *mut c_char;
+        fn gs_cleanup_string_free(ptr: *mut c_char);
     }
 
     pub fn availability() -> AppleAvailability {
-        if !os_supports_foundation_models() {
-            return AppleAvailability::Unsupported;
-        }
-        match SystemLanguageModel::new().map(|model| model.availability()) {
-            Ok(ModelAvailability::Available) => AppleAvailability::Available,
-            Ok(ModelAvailability::AppleIntelligenceNotEnabled) => AppleAvailability::NotEnabled,
-            Ok(ModelAvailability::ModelNotReady) => AppleAvailability::NotReady,
+        match unsafe { gs_cleanup_availability() } {
+            0 => AppleAvailability::Available,
+            1 => AppleAvailability::NotEnabled,
+            2 => AppleAvailability::NotReady,
             _ => AppleAvailability::Unsupported,
         }
     }
 
-    pub fn clean(text: &str) -> anyhow::Result<String> {
-        generate(INSTRUCTIONS, text, 0.0, None)
+    pub fn prewarm(instructions: &str) -> Result<(), AppleError> {
+        let instructions = cstring(instructions)?;
+        match unsafe { gs_cleanup_prewarm(instructions.as_ptr()) } {
+            0 => Ok(()),
+            _ => Err(error(
+                AppleErrorKind::Unavailable,
+                "on-device model unavailable",
+            )),
+        }
+    }
+
+    #[derive(Deserialize)]
+    struct ShimResponse {
+        #[serde(default)]
+        text: String,
+        #[serde(default)]
+        error: Option<String>,
+        #[serde(default)]
+        kind: Option<String>,
     }
 
     pub fn generate(
@@ -165,98 +162,56 @@ Clean up raw speech-to-text output.
         prompt: &str,
         temperature: f32,
         max_response_tokens: Option<u32>,
-    ) -> anyhow::Result<String> {
-        if !os_supports_foundation_models() {
-            return Err(anyhow!("on-device model requires macOS 26 or later"));
+        timeout: Duration,
+    ) -> Result<String, AppleError> {
+        let instructions = cstring(instructions)?;
+        let prompt = cstring(prompt)?;
+        if timeout.is_zero() {
+            return Err(error(AppleErrorKind::TimedOut, "on-device model timed out"));
         }
-        let (_model, session) = match take_prewarmed(instructions) {
-            Some(prewarmed) => prewarmed,
-            None => open_session(instructions)?,
+        let max_tokens = max_response_tokens.map_or(0, |n| i32::try_from(n).unwrap_or(i32::MAX));
+        let timeout_ms = i64::try_from(timeout.as_micros().div_ceil(1_000)).unwrap_or(i64::MAX);
+        let ptr = unsafe {
+            gs_cleanup_generate(
+                instructions.as_ptr(),
+                prompt.as_ptr(),
+                f64::from(temperature),
+                max_tokens,
+                timeout_ms,
+            )
         };
-        let mut options = GenerationOptions::builder().temperature(f64::from(temperature));
-        if let Some(max_tokens) = max_response_tokens {
-            options = options.max_response_tokens(max_tokens);
+        let raw = unsafe { CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned();
+        unsafe { gs_cleanup_string_free(ptr) };
+        let response: ShimResponse = serde_json::from_str(&raw)
+            .map_err(|err| error(AppleErrorKind::Other, format!("bad shim response: {err}")))?;
+        match response.error {
+            Some(message) => Err(error(error_kind(response.kind.as_deref()), message)),
+            None => Ok(response.text.trim().to_string()),
         }
-        let response = session
-            .respond(prompt, &options.build())
-            .map_err(|err| anyhow!("generation failed: {err}"))?;
-        Ok(response.content().trim().to_string())
     }
 
-    struct Prewarmed {
-        instructions: String,
-        model: SystemLanguageModel,
-        session: Session,
-    }
-
-    static PREWARMED: Mutex<Option<Prewarmed>> = Mutex::new(None);
-
-    fn open_session(instructions: &str) -> anyhow::Result<(SystemLanguageModel, Session)> {
-        let model = SystemLanguageModel::new().context("load system language model")?;
-        model
-            .ensure_available()
-            .map_err(|err| anyhow!("model unavailable: {err}"))?;
-        let session = Session::with_instructions(&model, instructions)
-            .map_err(|err| anyhow!("create session: {err}"))?;
-        Ok((model, session))
-    }
-
-    fn take_prewarmed(instructions: &str) -> Option<(SystemLanguageModel, Session)> {
-        let mut slot = PREWARMED.lock().ok()?;
-        let prewarmed = slot.take_if(|prewarmed| prewarmed.instructions == instructions)?;
-        Some((prewarmed.model, prewarmed.session))
-    }
-
-    pub fn prewarm(instructions: &str) -> anyhow::Result<()> {
-        if !os_supports_foundation_models() {
-            return Err(anyhow!("on-device model requires macOS 26 or later"));
+    fn error_kind(kind: Option<&str>) -> AppleErrorKind {
+        match kind {
+            Some("context") => AppleErrorKind::ContextTooLarge,
+            Some("refused") => AppleErrorKind::Refused,
+            Some("language") => AppleErrorKind::UnsupportedLanguage,
+            Some("busy") => AppleErrorKind::Busy,
+            Some("unavailable") => AppleErrorKind::Unavailable,
+            Some("timeout") => AppleErrorKind::TimedOut,
+            _ => AppleErrorKind::Other,
         }
-        let (model, session) = open_session(instructions)?;
-        session
-            .prewarm(None)
-            .map_err(|err| anyhow!("prewarm: {err}"))?;
-        if let Ok(mut slot) = PREWARMED.lock() {
-            *slot = Some(Prewarmed {
-                instructions: instructions.to_string(),
-                model,
-                session,
-            });
+    }
+
+    fn cstring(value: &str) -> Result<CString, AppleError> {
+        CString::new(value).map_err(|_| error(AppleErrorKind::Other, "text contains a NUL byte"))
+    }
+
+    fn error(kind: AppleErrorKind, message: impl Into<String>) -> AppleError {
+        AppleError {
+            kind,
+            message: message.into(),
         }
-        Ok(())
-    }
-}
-
-#[allow(unused_variables)]
-pub fn apple_prewarm(instructions: &str) -> anyhow::Result<()> {
-    #[cfg(apple_cleanup)]
-    {
-        apple::prewarm(instructions)
-    }
-    #[cfg(not(apple_cleanup))]
-    {
-        Err(anyhow::anyhow!(
-            "on-device model is not supported in this build"
-        ))
-    }
-}
-
-/// Run an on-device generation with caller-supplied instructions. Blocking;
-/// call from a blocking-capable thread. Errors on unsupported builds.
-#[allow(unused_variables)]
-pub fn apple_generate(
-    instructions: &str,
-    prompt: &str,
-    temperature: f32,
-    max_response_tokens: Option<u32>,
-) -> anyhow::Result<String> {
-    #[cfg(apple_cleanup)]
-    {
-        apple::generate(instructions, prompt, temperature, max_response_tokens)
-    }
-    #[cfg(not(apple_cleanup))]
-    {
-        Err(anyhow::anyhow!(
-            "on-device model is not supported in this build"
-        ))
     }
 }

@@ -1,5 +1,38 @@
 # Changelog
 
+## 2.0.5
+
+### Added
+
+- `vad::analyze` runs Silero over a whole recording: the share of speech frames, per-frame decisions on any frame size, and padded speech regions (speech starts at 0.5, lasts until below 0.35, widened by about half a second) for cutting audio. It first raises a quiet recording so its loudest 100 ms sits near -20 dBFS, by at most 30 dB. In model-bench's replay of Glimpse's recorder check, single words cut from real speech pass 92.3% instead of 66.7% at -20 dB and 96.7% instead of 86.3% at -10 dB, while room tone and typing pass 0 to 22.5% (WebRTC VAD: 62.5 to 100%).
+- `vad::SpeechStream` runs Silero on live audio as it arrives, with the same padded regions. It does not raise quiet audio, so it matches `vad::analyze` on recordings whose loudest 100 ms reaches -20 dBFS.
+
+### Changed
+
+- `cleanup-apple` runs on a small Swift shim (swift/apple_cleanup.swift) instead of the `fm-rs` crate. fm-rs builds its Swift for macOS 26, which hard-linked Foundation symbols missing on older systems, so apps using the feature crashed at launch on macOS 14 and 15. The shim builds for macOS 14 with `#available` checks.
+- The on-device model uses Apple's permissive guardrails for text transformations, and temperature 0 samples greedily.
+- `apple_generate` takes a timeout and cancels the request when it passes, and returns an `AppleError` whose `kind` separates input problems (too long for the context window, refused, unsupported language) from the model being unavailable or busy.
+- transcribe.cpp is pinned to upstream 0.4.0: ggml 0.26.0, plus language ID (ECAPA-TDNN) and Silero VAD sessions in the C API. Glimpse Speech does not use the new language ID or VAD sessions yet.
+
+### Removed
+
+- `CleanupProvider` and its built-in cleanup prompt. Use `apple_availability`, `apple_prewarm` and `apple_generate`.
+
+## 2.0.4
+
+### Changed
+
+- transcribe.cpp is pinned to `ec5f294d` (glimpse-hq main: the decoder speed work plus upstream main through 95d82e51), and the dependency now points at github.com/glimpse-hq/transcribe.cpp.
+- Parakeet recordings longer than two windows are cut in the middle of the latest pause of at least 0.2 s in each window's back half, so no word straddles a cut. Shorter audio keeps the quietest-point cut. On an M2 Pro, Parakeet TDT V3 on the Neural Engine transcribes a 554 s file in 1.50 s instead of 1.76 s, with long-form WER 3.26% instead of 3.47% and 5.50% instead of 6.19%. On Windows (Vulkan) the same file takes 4.82 s instead of 5.21 s.
+- Dictionary words a model spells another way can be boosted again (transcribe.cpp boost floor 1e-5 to 1e-7). Parakeet TDT V3 dictionary recall is 95.1% instead of 91.0% on the Neural Engine and 89.3% instead of 85.2% on Windows, with false insertions unchanged or up by 1 of 797 control clips. Parakeet Ultra writes "Tauri" again.
+- Diarization runs through transcribe.cpp's diarize sessions; live diarization rows are unchanged.
+- Nemotron streaming on Metal handles short clips in 186 ms instead of 266 ms.
+- Parakeet token confidence is vectorized on Apple, about 4% faster on short clips on the Neural Engine.
+
+### Fixed
+
+- Parakeet no longer prints `<unk>`, `<pad>` or `<|...|>` pieces.
+
 ## 2.0.3
 
 ### Changed

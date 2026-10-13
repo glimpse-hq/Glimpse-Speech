@@ -20,11 +20,20 @@ fn fixture() -> Option<(PathBuf, PathBuf)> {
 #[ignore = "requires GLIMPSE_SPEECH_TRANSCRIBE_MODEL and GLIMPSE_SPEECH_TRANSCRIBE_WAV"]
 fn transcribes_english_with_and_without_companion() {
     let (model, wav) = fixture().expect("set both model and WAV fixture paths");
-    let companion = TranscribeEngine::companion_for(&model);
-    let mut encoders = vec![None];
-    if let Some(companion) = companion {
+    let decoder_only = model
+        .file_stem()
+        .is_some_and(|stem| stem.to_string_lossy().ends_with("-decoder"));
+    let mut encoders = Vec::new();
+    if !decoder_only {
+        encoders.push(None);
+    }
+    if let Some(companion) = TranscribeEngine::companion_for(&model) {
         encoders.push(Some(companion));
     }
+    assert!(
+        !encoders.is_empty(),
+        "a decoder-only model needs its Core ML encoder"
+    );
     for coreml_encoder in encoders {
         let mut engine = TranscribeEngine::new();
         engine
