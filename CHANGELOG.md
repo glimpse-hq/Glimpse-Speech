@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.0.6
+
+### Added
+
+- Whisper runs from a decoder-only GGUF next to its Core ML encoder, like Parakeet TDT V3 and Qwen3-ASR: `whisper-<family>-<quant>-decoder.gguf` finds `whisper-<family>-encoder.mlmodelc` beside it (Distil-Whisper finds its teacher's). The GGUF leaves out the encoder weights the Neural Engine path never used: Whisper Large V3 Turbo Q8_0 is 187 MB instead of 886 MB, and stays at about 410 MB resident instead of 1.1 GB. Decoder tensors are byte for byte the full GGUF's, and transcripts match.
+
+### Changed
+
+- transcribe.cpp is pinned to `95e3eff8` (glimpse-hq main: decoder-only Whisper GGUFs on top of upstream 0.4.0).
+
 ## 2.0.5
 
 ### Added
