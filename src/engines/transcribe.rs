@@ -106,14 +106,15 @@ impl TranscribeEngine {
             return None;
         }
         let stem = model_path.file_stem()?.to_str()?;
+        let base = stem.strip_suffix("-decoder").unwrap_or(stem);
         // One Whisper encoder serves every quantization of a family.
         let candidates = if model_path.extension().is_some_and(|ext| ext == "bin") {
             let family = distil_teacher(strip_quant_suffix(stem.strip_prefix("ggml-")?));
             vec![format!("whisper-{family}")]
-        } else if stem.starts_with("whisper-") {
-            vec![strip_quant_suffix(stem).to_string(), stem.to_string()]
-        } else if stem.starts_with("distil-") {
-            let family = distil_teacher(strip_quant_suffix(stem));
+        } else if base.starts_with("whisper-") {
+            vec![strip_quant_suffix(base).to_string(), base.to_string()]
+        } else if base.starts_with("distil-") {
+            let family = distil_teacher(strip_quant_suffix(base));
             vec![format!("whisper-{family}")]
         } else {
             [Some(stem), stem.strip_suffix("-decoder")]
@@ -1163,6 +1164,32 @@ mod tests {
             TranscribeEngine::companion_for(&dir.join("Model-Q8_0-decoder.gguf")),
             expected
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn whisper_decoder_uses_family_companion() {
+        let dir = std::env::temp_dir().join(format!(
+            "glimpse-speech-whisper-companion-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let companion = dir.join("whisper-large-v3-encoder.mlmodelc");
+        std::fs::create_dir_all(&companion).unwrap();
+        std::fs::write(companion.join("coremldata.bin"), b"x").unwrap();
+        let expected = cfg!(all(target_os = "macos", target_arch = "aarch64")).then_some(companion);
+        for name in [
+            "whisper-large-v3-Q8_0-decoder.gguf",
+            "whisper-large-v3-Q8_0.gguf",
+            "distil-large-v3.5-Q8_0-decoder.gguf",
+        ] {
+            assert_eq!(
+                TranscribeEngine::companion_for(&dir.join(name)),
+                expected,
+                "{name}"
+            );
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }
