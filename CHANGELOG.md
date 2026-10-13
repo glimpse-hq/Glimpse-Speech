@@ -2,6 +2,11 @@
 
 ## 2.0.5
 
+### Added
+
+- `vad::analyze` runs Silero over a whole recording: the share of speech frames, per-frame decisions on any frame size, and padded speech regions (speech starts at 0.5, lasts until below 0.35, widened by about half a second) for cutting audio.
+- `vad::SpeechStream` runs Silero on live audio as it arrives, with the same padded regions. Its results match `vad::analyze` on the same audio.
+
 ### Changed
 
 - transcribe.cpp is pinned to upstream 0.4.0: ggml 0.26.0, plus language ID (ECAPA-TDNN) and Silero VAD sessions in the C API. Glimpse Speech does not use the new language ID or VAD sessions yet.

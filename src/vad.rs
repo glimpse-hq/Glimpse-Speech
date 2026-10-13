@@ -177,53 +177,75 @@ impl Silero {
     // Speech probability per 512-sample frame of 16 kHz mono audio in [-1, 1].
     // A trailing partial frame is dropped.
     fn frame_probs(&self, samples: &[f32]) -> Vec<f32> {
-        let (mut h, mut c) = ([0.0f32; HIDDEN], [0.0f32; HIDDEN]);
+        let mut state = State::new();
+        samples
+            .chunks_exact(WINDOW)
+            .map(|chunk| self.step(&mut state, chunk))
+            .collect()
+    }
+
+    fn step(&self, state: &mut State, chunk: &[f32]) -> f32 {
+        let State { h, c, x, a, b } = state;
         // Previous frame's last 64 samples, the frame, then a 64-sample right
         // reflection pad, as the ONNX graph builds its STFT input.
-        let mut x = [0.0f32; CONTEXT + WINDOW + CONTEXT];
-        let (mut a, mut b) = (Vec::new(), Vec::new());
-        let mut gates = [0.0f32; 4 * HIDDEN];
-        let mut probs = Vec::with_capacity(samples.len() / WINDOW);
-        for chunk in samples.chunks_exact(WINDOW) {
-            x.copy_within(WINDOW..WINDOW + CONTEXT, 0);
-            x[CONTEXT..CONTEXT + WINDOW].copy_from_slice(chunk);
-            let end = CONTEXT + WINDOW;
-            for i in 0..CONTEXT {
-                x[end + i] = x[end - 2 - i];
-            }
-
-            a.clear();
-            for frame in x.windows(N_FFT).step_by(HOP) {
-                self.stft.magnitudes(frame, &mut a);
-            }
-            for conv in &self.encoder {
-                conv.run(&a, &mut b);
-                std::mem::swap(&mut a, &mut b);
-            }
-
-            for (r, gate) in gates.iter_mut().enumerate() {
-                let row = r * HIDDEN..(r + 1) * HIDDEN;
-                *gate = self.b_ih[r]
-                    + self.b_hh[r]
-                    + dot(&self.w_ih[row.clone()], &a)
-                    + dot(&self.w_hh[row], &h);
-            }
-            for j in 0..HIDDEN {
-                let input = sigmoid(gates[j]);
-                let forget = sigmoid(gates[HIDDEN + j]);
-                let cell = gates[2 * HIDDEN + j].tanh();
-                let output = sigmoid(gates[3 * HIDDEN + j]);
-                c[j] = forget * c[j] + input * cell;
-                h[j] = output * c[j].tanh();
-            }
-            let logit = self
-                .w_out
-                .iter()
-                .zip(&h)
-                .fold(self.b_out, |acc, (w, v)| acc + w * v.max(0.0));
-            probs.push(sigmoid(logit));
+        x.copy_within(WINDOW..WINDOW + CONTEXT, 0);
+        x[CONTEXT..CONTEXT + WINDOW].copy_from_slice(chunk);
+        let end = CONTEXT + WINDOW;
+        for i in 0..CONTEXT {
+            x[end + i] = x[end - 2 - i];
         }
-        probs
+
+        a.clear();
+        for frame in x.windows(N_FFT).step_by(HOP) {
+            self.stft.magnitudes(frame, a);
+        }
+        for conv in &self.encoder {
+            conv.run(a, b);
+            std::mem::swap(a, b);
+        }
+
+        let mut gates = [0.0f32; 4 * HIDDEN];
+        for (r, gate) in gates.iter_mut().enumerate() {
+            let row = r * HIDDEN..(r + 1) * HIDDEN;
+            *gate = self.b_ih[r]
+                + self.b_hh[r]
+                + dot(&self.w_ih[row.clone()], a)
+                + dot(&self.w_hh[row], &h[..]);
+        }
+        for j in 0..HIDDEN {
+            let input = sigmoid(gates[j]);
+            let forget = sigmoid(gates[HIDDEN + j]);
+            let cell = gates[2 * HIDDEN + j].tanh();
+            let output = sigmoid(gates[3 * HIDDEN + j]);
+            c[j] = forget * c[j] + input * cell;
+            h[j] = output * c[j].tanh();
+        }
+        let logit = self
+            .w_out
+            .iter()
+            .zip(h.iter())
+            .fold(self.b_out, |acc, (w, v)| acc + w * v.max(0.0));
+        sigmoid(logit)
+    }
+}
+
+struct State {
+    h: [f32; HIDDEN],
+    c: [f32; HIDDEN],
+    x: [f32; CONTEXT + WINDOW + CONTEXT],
+    a: Vec<f32>,
+    b: Vec<f32>,
+}
+
+impl State {
+    fn new() -> Self {
+        Self {
+            h: [0.0; HIDDEN],
+            c: [0.0; HIDDEN],
+            x: [0.0; CONTEXT + WINDOW + CONTEXT],
+            a: Vec::new(),
+            b: Vec::new(),
+        }
     }
 }
 
@@ -359,9 +381,197 @@ pub fn speech_regions(samples: &[i16], sample_rate: u32) -> Option<Vec<(f32, f32
     Some(mask_to_regions(&mask))
 }
 
+const REGION_EXIT: f32 = 0.35;
+const REGION_PAD_FRAMES: usize = 16; // 512 ms
+const STREAM_HISTORY_FRAMES: usize = 64;
+
+/// Silero's speech probability for each 32 ms frame of a recording.
+pub struct Speech {
+    probs: Vec<f32>,
+    samples: usize,
+}
+
+/// Runs Silero over a whole recording. `None` if the model is unavailable.
+pub fn analyze(samples: &[i16], sample_rate: u32) -> Option<Speech> {
+    if sample_rate > crate::audio::MAX_SAMPLE_RATE {
+        return None;
+    }
+    let audio = crate::audio::resample_i16_to_f32(samples, sample_rate, 16_000);
+    let vad = VAD.get_or_init(Silero::load).as_ref()?;
+    Some(Speech {
+        probs: vad.frame_probs(&audio),
+        samples: audio.len(),
+    })
+}
+
+impl Speech {
+    /// Share of 32 ms frames that are speech, 0 to 100.
+    pub fn percentage(&self) -> f32 {
+        if self.probs.is_empty() {
+            return 0.0;
+        }
+        let speech = self
+            .probs
+            .iter()
+            .filter(|&&p| p >= SPEECH_THRESHOLD)
+            .count();
+        speech as f32 * 100.0 / self.probs.len() as f32
+    }
+
+    /// Whether each whole frame of `frame` 16 kHz samples is speech.
+    pub fn frames(&self, frame: usize) -> Vec<bool> {
+        let mask: Vec<bool> = self.probs.iter().map(|&p| p >= SPEECH_THRESHOLD).collect();
+        on_frames(&mask, 0, 0, frame, self.samples / frame)
+    }
+
+    /// Speech for cutting audio: starts at 0.5, ends below 0.35, padded by
+    /// about half a second on both sides.
+    pub fn regions(&self, frame: usize) -> Vec<bool> {
+        on_frames(
+            &regions_mask(&self.probs),
+            0,
+            0,
+            frame,
+            self.samples / frame,
+        )
+    }
+}
+
+/// Silero over live 16 kHz audio. Positions count samples since the stream
+/// was created or last reset.
+pub struct SpeechStream {
+    vad: &'static Silero,
+    state: State,
+    pending: Vec<f32>,
+    probs: Vec<f32>,
+    first: usize,
+}
+
+impl SpeechStream {
+    pub fn new() -> Option<Self> {
+        Some(Self {
+            vad: VAD.get_or_init(Silero::load).as_ref()?,
+            state: State::new(),
+            pending: Vec::new(),
+            probs: Vec::new(),
+            first: 0,
+        })
+    }
+
+    pub fn push(&mut self, samples: &[f32]) {
+        self.pending.extend_from_slice(samples);
+        let whole = self.pending.len() / WINDOW * WINDOW;
+        for chunk in self.pending[..whole].chunks_exact(WINDOW) {
+            self.probs.push(self.vad.step(&mut self.state, chunk));
+        }
+        self.pending.drain(..whole);
+    }
+
+    /// [`Speech::regions`] from sample `from` on, as far as audio has arrived.
+    /// Earlier frames can turn into speech as later audio arrives.
+    pub fn regions(&self, from: u64, frame: usize) -> Vec<bool> {
+        let end = (self.first + self.probs.len()) * WINDOW;
+        let count = (end as u64).saturating_sub(from) as usize / frame;
+        on_frames(&regions_mask(&self.probs), self.first, from, frame, count)
+    }
+
+    /// Drops analysis no longer needed for frames from `sample` on.
+    pub fn forget_before(&mut self, sample: u64) {
+        let keep_from = (sample as usize / WINDOW).saturating_sub(STREAM_HISTORY_FRAMES);
+        let drop = keep_from.saturating_sub(self.first).min(self.probs.len());
+        self.probs.drain(..drop);
+        self.first += drop;
+    }
+
+    pub fn reset(&mut self) {
+        self.state = State::new();
+        self.pending.clear();
+        self.probs.clear();
+        self.first = 0;
+    }
+}
+
+fn regions_mask(probs: &[f32]) -> Vec<bool> {
+    let mut speech = false;
+    let core: Vec<bool> = probs
+        .iter()
+        .map(|&p| {
+            speech = p
+                >= if speech {
+                    REGION_EXIT
+                } else {
+                    SPEECH_THRESHOLD
+                };
+            speech
+        })
+        .collect();
+    let mut mask = core.clone();
+    for (i, _) in core.iter().enumerate().filter(|(_, s)| **s) {
+        let lo = i.saturating_sub(REGION_PAD_FRAMES);
+        let hi = (i + REGION_PAD_FRAMES + 1).min(mask.len());
+        mask[lo..hi].fill(true);
+    }
+    mask
+}
+
+fn on_frames(mask: &[bool], first: usize, from: u64, frame: usize, count: usize) -> Vec<bool> {
+    (0..count)
+        .map(|k| {
+            let mid = from as usize + k * frame + frame / 2;
+            (mid / WINDOW)
+                .checked_sub(first)
+                .and_then(|i| mask.get(i))
+                .copied()
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{BRIDGE_FRAMES, FRAME_S, PAD_S, SPEECH_THRESHOLD, Silero, WINDOW, mask_to_regions};
+    use super::{
+        BRIDGE_FRAMES, FRAME_S, PAD_S, REGION_PAD_FRAMES, SPEECH_THRESHOLD, Silero, SpeechStream,
+        WINDOW, analyze, mask_to_regions, regions_mask,
+    };
+
+    fn reference_audio() -> Vec<f32> {
+        include_bytes!("vad_reference.pcm")
+            .chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32_768.0)
+            .collect()
+    }
+
+    #[test]
+    fn stream_matches_whole_recording() {
+        let audio = reference_audio();
+        let pcm: Vec<i16> = audio.iter().map(|v| (v * 32_768.0) as i16).collect();
+        let whole = analyze(&pcm, 16_000).expect("silero weights");
+        let mut stream = SpeechStream::new().expect("silero weights");
+        for chunk in audio.chunks(480) {
+            stream.push(chunk);
+        }
+        assert_eq!(
+            stream.regions(0, 480),
+            whole.regions(480)[..stream.regions(0, 480).len()]
+        );
+        assert_eq!(stream.regions(4800, 480), stream.regions(0, 480)[10..]);
+        stream.forget_before(4800);
+        assert_eq!(
+            stream.regions(4800, 480),
+            whole.regions(480)[10..10 + stream.regions(4800, 480).len()]
+        );
+    }
+
+    #[test]
+    fn regions_hold_through_dips_and_pad_both_sides() {
+        let mut probs = vec![0.1; 40];
+        probs[20] = 0.9;
+        probs[21] = 0.4;
+        probs[22] = 0.2;
+        let mask = regions_mask(&probs);
+        assert!(mask[21] && mask[20 - REGION_PAD_FRAMES] && mask[21 + REGION_PAD_FRAMES]);
+        assert!(!mask[20 - REGION_PAD_FRAMES - 1] && !mask[21 + REGION_PAD_FRAMES + 1]);
+    }
 
     #[test]
     fn bridges_short_gaps_and_pads_regions() {
@@ -399,11 +609,9 @@ mod tests {
             0.031314, 0.037638, 0.343341, 0.945989, 0.932934, 0.857259, 0.972762, 0.988260,
             0.990164, 0.989361, 0.995614, 0.993969, 0.982173, 0.994392, 0.994515, 0.994812,
         ];
-        let audio: Vec<f32> = include_bytes!("vad_reference.pcm")
-            .chunks_exact(2)
-            .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32_768.0)
-            .collect();
-        let probs = Silero::load().expect("silero weights").frame_probs(&audio);
+        let probs = Silero::load()
+            .expect("silero weights")
+            .frame_probs(&reference_audio());
         assert_eq!(probs.len(), REFERENCE.len());
         for (p, r) in probs.iter().zip(REFERENCE) {
             assert!((p - r).abs() < 1e-4, "{p} vs {r}");
