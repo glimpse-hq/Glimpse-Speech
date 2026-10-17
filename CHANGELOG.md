@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Removed
+
+- The `cleanup-apple` feature, the `cleanup` module and its Swift shim. Apple's on-device model moved to [Glimpse Language](https://github.com/glimpse-hq/Glimpse-Language) with the same API: enable its `apple` feature and use `glimpse_language::apple` instead of `glimpse_speech::cleanup`. Glimpse Speech no longer weak-links FoundationModels.
+
 ## 2.0.6
 
 ### Added

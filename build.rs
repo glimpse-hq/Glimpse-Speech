@@ -9,25 +9,17 @@ fn main() {
 
     let whisper = feature("WHISPER");
     let apple_speech = macos_arm && feature("APPLE_SPEECH");
-    let apple_cleanup = macos_arm && feature("CLEANUP_APPLE");
     let transcribe = feature("TRANSCRIBE");
 
     // Named cfgs so source files can gate on capabilities instead of
     // repeating feature and target predicates.
     emit_cfg("apple_speech_engine", apple_speech);
-    emit_cfg("apple_cleanup", apple_cleanup);
     emit_cfg("transcribe_engine", transcribe);
     emit_cfg("local_engines", whisper || apple_speech || transcribe);
     emit_cfg("streaming_engines", apple_speech || transcribe);
 
-    if apple_cleanup || apple_speech {
-        println!("cargo::rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
-        // Weak-link so binaries still launch on macOS < 26, where the
-        // framework is absent. The shims guard every call with #available.
-        println!("cargo::rustc-link-arg=-Wl,-weak_framework,FoundationModels");
-    }
-
     if apple_speech {
+        println!("cargo::rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
         compile_swift_shim("apple_speech");
         println!("cargo::rustc-link-lib=framework=AVFoundation");
         println!("cargo::rustc-link-lib=framework=CoreMedia");
@@ -35,10 +27,6 @@ fn main() {
         // them; the framework link is safe on macOS 14, and the new symbols are
         // weak because the shim's deployment target is 14 with #available guards.
         println!("cargo::rustc-link-lib=framework=Speech");
-    }
-
-    if apple_cleanup {
-        compile_swift_shim("apple_cleanup");
     }
 }
 
