@@ -1,7 +1,6 @@
 #[cfg(feature = "api")]
 pub mod api;
 pub mod audio;
-pub mod cleanup;
 #[cfg(feature = "cli")]
 pub mod cli;
 #[cfg(transcribe_engine)]

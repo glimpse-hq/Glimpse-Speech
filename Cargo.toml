@@ -18,7 +18,6 @@ transcribe = ["dep:transcribe-cpp"]
 all = ["whisper", "transcribe"]
 api = ["dep:axum", "dep:tower-http"]
 remote = ["reqwest/multipart", "dep:flacenc", "dep:base64", "dep:httpdate"]
-cleanup-apple = []
 apple-speech = []
 cli = ["api", "dep:clap", "dep:directories"]
 
@@ -63,10 +62,6 @@ transcribe-cpp = { git = "https://github.com/glimpse-hq/transcribe.cpp.git", rev
 
 [target.'cfg(target_os = "linux")'.dependencies]
 transcribe-cpp = { git = "https://github.com/glimpse-hq/transcribe.cpp.git", rev = "95e3eff8b2b58361b51d96a4f2077ed770aee9f0", default-features = false, features = ["vulkan"], optional = true }
-
-[[example]]
-name = "cleanup"
-required-features = ["cleanup-apple"]
 
 [[example]]
 name = "apple_speech"

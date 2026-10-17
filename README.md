@@ -21,7 +21,6 @@ Parakeet and Nemotron boost dictionary words during decoding.
 | `remote` | Proxying to a remote OpenAI-compatible endpoint, with local fallback |
 | `cli` | The `glimpse-speech` binary (implies `api`) |
 | `apple-speech` | `engines::apple`, the macOS 26 SpeechAnalyzer engine (Apple Silicon) |
-| `cleanup-apple` | Transcript cleanup with Apple's on-device Foundation Models (Apple Silicon) |
 | `all` | `whisper` + `transcribe` |
 
 ## Installation
