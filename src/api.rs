@@ -1562,8 +1562,21 @@ mod tests {
                  --{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.{extension}\"\r\n\r\n"
             )
             .into_bytes();
-            body.extend_from_slice(b"RIFF\r\n");
-            body.extend_from_slice(format!("--{BOUNDARY}--\r\n").as_bytes());
+            // Audio that decodes, so the request gets as far as the engine.
+            let mut wav = std::io::Cursor::new(Vec::new());
+            let spec = hound::WavSpec {
+                channels: 1,
+                sample_rate: 16_000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            };
+            let mut writer = hound::WavWriter::new(&mut wav, spec).unwrap();
+            for _ in 0..1_600 {
+                writer.write_sample(0i16).unwrap();
+            }
+            writer.finalize().unwrap();
+            body.extend_from_slice(wav.get_ref());
+            body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
 
             // The engine is busy, so the transcription queues behind it.
             let engine = service.hold_engine();

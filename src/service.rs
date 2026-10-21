@@ -312,6 +312,8 @@ impl SpeechService {
             timestamps,
             timestamp_granularity,
         } = request;
+        // Reject a bad model id before spending time decoding.
+        self.resolve(&requested_model)?;
         let decode_slot = self
             .decode_slot
             .lock()
