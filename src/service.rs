@@ -54,6 +54,18 @@ impl AudioInput {
             } => Some(samples.len() as f32 / *sample_rate as f32),
         }
     }
+
+    // Decodes a file before the engine lock, so another request isn't held
+    // up behind ffmpeg or resampling.
+    #[cfg(local_engines)]
+    fn decoded(self) -> Result<Self> {
+        match self {
+            Self::WavPath(path) => crate::audio::read_audio_samples(&path)
+                .map(Self::Samples16Khz)
+                .map_err(boxed_error),
+            other => Ok(other),
+        }
+    }
 }
 
 // Audio shorter than this stays on the loaded CPU engine: on short clips the
@@ -232,6 +244,11 @@ impl SpeechService {
         let total_started = Instant::now();
         let requested_language = request.language.clone();
         let requested_model = request.model_id.clone();
+        #[cfg(local_engines)]
+        let request = TranscribeRequest {
+            audio: request.audio.decoded()?,
+            ..request
+        };
         let mut guard = self.ensure_loaded(&requested_model)?;
         let loaded = loaded_engine(&mut guard)?;
         let resolved_id = loaded.model_id.clone();
