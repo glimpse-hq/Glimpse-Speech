@@ -318,6 +318,7 @@ impl SpeechService {
             .decode_slot
             .lock()
             .map_err(|_| anyhow!("speech service lock poisoned"))?;
+        check_deadline(deadline, &requested_model)?;
         let audio = prepare_audio(audio)?;
         let mut guard = self.ensure_loaded_before(&requested_model, deadline)?;
         drop(decode_slot);
@@ -509,11 +510,7 @@ impl SpeechService {
         let lock_started = Instant::now();
         let mut guard = self.lock_loaded()?;
         let lock_wait = lock_started.elapsed();
-        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            return Err(anyhow!(
-                "The transcription timed out waiting for the engine (model {model_id})"
-            ));
-        }
+        check_deadline(deadline, model_id)?;
         let should_reload = guard
             .as_ref()
             .is_none_or(|loaded| loaded.model_id != resolved.id || loaded.path != resolved.path);
@@ -688,6 +685,15 @@ fn load_engine(
             }
         }
     }
+}
+
+fn check_deadline(deadline: Option<Instant>, model_id: &str) -> Result<()> {
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        return Err(anyhow!(
+            "The transcription timed out waiting for the engine (model {model_id})"
+        ));
+    }
+    Ok(())
 }
 
 #[cfg_attr(not(local_engines), allow(unused_variables))]
