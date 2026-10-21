@@ -7,7 +7,6 @@ fn main() {
     let macos = target_os == "macos";
     let macos_arm = macos && target_arch == "aarch64";
 
-    let whisper = feature("WHISPER");
     let apple_speech = macos_arm && feature("APPLE_SPEECH");
     let transcribe = feature("TRANSCRIBE");
 
@@ -15,7 +14,8 @@ fn main() {
     // repeating feature and target predicates.
     emit_cfg("apple_speech_engine", apple_speech);
     emit_cfg("transcribe_engine", transcribe);
-    emit_cfg("local_engines", whisper || apple_speech || transcribe);
+    // `whisper` implies `transcribe`, so it needs no check of its own.
+    emit_cfg("local_engines", apple_speech || transcribe);
     emit_cfg("streaming_engines", apple_speech || transcribe);
 
     if apple_speech {

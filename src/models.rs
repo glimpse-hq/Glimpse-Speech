@@ -19,6 +19,10 @@ use tokio_util::sync::CancellationToken;
 
 const MAX_STREAM_RETRIES: usize = 4;
 const DOWNLOAD_REQUEST_TIMEOUT: Duration = Duration::from_secs(60 * 60 * 24);
+// A stalled connection fails after this long without data, so the download
+// retries and resumes instead of hanging until DOWNLOAD_REQUEST_TIMEOUT.
+const DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const DOWNLOAD_READ_TIMEOUT: Duration = Duration::from_secs(60);
 const RETRY_BACKOFF_BASE_MS: u64 = 300;
 const WRITE_BUFFER_BYTES: usize = 1024 * 1024;
 const PROGRESS_EMIT_STEP_BYTES: u64 = 1024 * 1024;
@@ -117,6 +121,24 @@ pub struct ModelDownloadProgress {
 
 pub type ProgressCallback<'a> = dyn Fn(ModelDownloadProgress) + Send + Sync + 'a;
 
+/// A model id that names no usable model. The API answers these with a 400,
+/// other errors with a 500.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ModelError {
+    #[error("Unknown model: {0}")]
+    UnknownModel(String),
+    #[error("Invalid model id: {0}")]
+    InvalidModelId(String),
+    #[error("{id} is not fully installed. Missing: {}", missing.join(", "))]
+    NotInstalled { id: String, missing: Vec<String> },
+    #[error("{engine} models require a GGUF file: {reference}")]
+    NotGguf {
+        engine: ModelEngine,
+        reference: String,
+    },
+}
+
 #[derive(Debug)]
 struct DownloadCancelled;
 
@@ -141,13 +163,17 @@ pub struct ModelInstallManager {
 }
 
 impl ModelInstallManager {
+    /// Downloads with a 30 second connect timeout and a 60 second read
+    /// timeout, so a stalled connection retries and resumes.
     pub fn new(cache_dir: impl Into<PathBuf>) -> Self {
         Self {
             cache_dir: cache_dir.into(),
-            client: Client::new(),
+            client: download_client(),
         }
     }
 
+    /// Downloads with `client`, whose timeouts decide when a stalled
+    /// connection gives up.
     pub fn with_client(cache_dir: impl Into<PathBuf>, client: Client) -> Self {
         Self {
             cache_dir: cache_dir.into(),
@@ -189,11 +215,11 @@ impl ModelInstallManager {
         }
         let status = self.status(spec)?;
         if !status.installed {
-            return Err(anyhow!(
-                "{} is not fully installed. Missing: {}",
-                spec.id,
-                status.missing_files.join(", ")
-            ));
+            return Err(ModelError::NotInstalled {
+                id: spec.id.clone(),
+                missing: status.missing_files,
+            }
+            .into());
         }
 
         Ok(ResolvedModel {
@@ -220,16 +246,56 @@ impl ModelInstallManager {
                 .into_iter()
                 .find(|candidate| candidate.is_file())
                 .or_else(|| single_file_in_dir(&self.cache_dir.join(reference)))
-                .ok_or_else(|| anyhow!("Unknown model: {reference}"))?,
+                .ok_or_else(|| ModelError::UnknownModel(reference.to_string()))?,
             ModelEngine::Transcribe => [PathBuf::from(reference), self.cache_dir.join(reference)]
                 .into_iter()
                 .find(|candidate| candidate.is_file())
                 .or_else(|| gguf_in_dir(&self.cache_dir.join(reference)))
-                .ok_or_else(|| anyhow!("{engine} models require a GGUF file: {reference}"))?,
+                .ok_or_else(|| ModelError::NotGguf {
+                    engine,
+                    reference: reference.to_string(),
+                })?,
             ModelEngine::Apple => unreachable!("handled above"),
         };
         Ok(ResolvedModel {
             id: reference.to_string(),
+            path,
+            engine,
+            variant: None,
+        })
+    }
+
+    /// Like [`resolve_loose`](Self::resolve_loose), but `name` must be a plain
+    /// model id naming a file or model directory directly inside the cache.
+    /// Paths, separators and `..` are rejected before any disk access, so a
+    /// request-supplied name can't reach outside the cache. The one exception
+    /// is Apple Speech, whose model the OS owns: `apple` and `apple_speech`
+    /// resolve to it without a cache lookup.
+    pub fn resolve_cached(
+        &self,
+        name: &str,
+        fallback_engine: ModelEngine,
+    ) -> Result<ResolvedModel> {
+        let unknown = || ModelError::UnknownModel(name.to_string());
+        validate_model_id(name).map_err(|_| unknown())?;
+        let engine = infer_engine(name).unwrap_or(fallback_engine);
+        if engine == ModelEngine::Apple {
+            return if is_apple_speech_id(name) {
+                resolve_apple(name, None)
+            } else {
+                Err(unknown().into())
+            };
+        }
+        let candidate = self.cache_dir.join(name);
+        let path = if candidate.is_file() {
+            candidate
+        } else if engine == ModelEngine::Transcribe {
+            gguf_in_dir(&candidate).ok_or_else(unknown)?
+        } else {
+            single_file_in_dir(&candidate).ok_or_else(unknown)?
+        };
+        Ok(ResolvedModel {
+            id: name.to_string(),
             path,
             engine,
             variant: None,
@@ -316,6 +382,12 @@ impl ModelInstallManager {
         }
 
         Ok(status)
+    }
+
+    /// Whether `id` is a valid model id naming a directory directly inside
+    /// the cache.
+    pub fn is_cached_model_dir(&self, id: &str) -> bool {
+        validate_model_id(id).is_ok() && self.model_dir(id).is_dir()
     }
 
     pub fn delete(&self, id: &str) -> Result<ModelStatus> {
@@ -550,11 +622,10 @@ impl ModelInstallManager {
                     Err(err) => {
                         if !can_retry(&mut retries) {
                             let _ = output.flush().await;
-                            return Err(anyhow!(
+                            return Err(anyhow::Error::from(err).context(format!(
                                 "Network interrupted while downloading {}",
                                 file.path
-                            )
-                            .context(err));
+                            )));
                         }
                         wait_before_retry(retries).await;
                         let _ = output.flush().await;
@@ -566,6 +637,14 @@ impl ModelInstallManager {
             }
         }
     }
+}
+
+fn download_client() -> Client {
+    Client::builder()
+        .connect_timeout(DOWNLOAD_CONNECT_TIMEOUT)
+        .read_timeout(DOWNLOAD_READ_TIMEOUT)
+        .build()
+        .expect("the HTTP client needs a TLS backend")
 }
 
 /// The OS owns the Apple model, so resolution only checks runtime support.
@@ -589,24 +668,32 @@ fn resolve_apple(id: &str, variant: Option<&str>) -> Result<ResolvedModel> {
     }
 }
 
+/// Ids that name the OS's Apple Speech model rather than a file.
+const APPLE_SPEECH_IDS: [&str; 2] = ["apple", "apple_speech"];
+
+fn is_apple_speech_id(name: &str) -> bool {
+    APPLE_SPEECH_IDS
+        .iter()
+        .any(|id| name.eq_ignore_ascii_case(id))
+}
+
 /// Best-effort engine guess from a model id, for the loose CLI path where no
 /// catalog spec names the engine. `None` when the id carries no known marker.
+/// Only `apple` and `apple_speech` are Apple Speech; other names containing
+/// "apple" are files like any other.
 pub fn infer_engine(reference: &str) -> Option<ModelEngine> {
-    const MARKERS: [ModelEngine; 3] = [
-        ModelEngine::Apple,
-        ModelEngine::Whisper,
-        ModelEngine::Transcribe,
-    ];
-
     let name = Path::new(reference)
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or(reference);
+    if is_apple_speech_id(name) {
+        return Some(ModelEngine::Apple);
+    }
     let lower = name.to_ascii_lowercase();
     if lower.ends_with(".gguf") || lower.contains("parakeet") || lower.contains("nemotron") {
         return Some(ModelEngine::Transcribe);
     }
-    MARKERS
+    [ModelEngine::Whisper, ModelEngine::Transcribe]
         .into_iter()
         .find(|engine| lower.contains(engine.as_str()))
 }
@@ -631,7 +718,7 @@ fn validate_model_id(id: &str) -> Result<()> {
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
     {
-        return Err(anyhow!("Invalid model id: {id}"));
+        return Err(ModelError::InvalidModelId(id.to_string()).into());
     }
     Ok(())
 }
@@ -1206,6 +1293,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_stalled_download_times_out_with_a_readable_error() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/ggml-test.bin", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            // Headers, then nothing, on connections that stay open.
+            let mut open = Vec::new();
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = socket.read(&mut buf).await;
+                let head = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 100\r\n\r\n";
+                let _ = socket.write_all(head.as_bytes()).await;
+                open.push(socket);
+            }
+        });
+
+        let root =
+            std::env::temp_dir().join(format!("glimpse-speech-stalled-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let client = Client::builder()
+            .read_timeout(Duration::from_millis(100))
+            .build()
+            .unwrap();
+        let manager = ModelInstallManager::with_client(&root, client);
+        let mut spec = whisper_spec("whisper_stalled", "ggml-test.bin", Some(100));
+        spec.files[0].url = url;
+
+        let err = tokio::time::timeout(
+            Duration::from_secs(30),
+            manager.install(&spec, Default::default()),
+        )
+        .await
+        .expect("a stall must not hang the install")
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "Network interrupted while downloading ggml-test.bin"
+        );
+        assert!(
+            err.chain().count() > 1,
+            "keeps the network error as the cause"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
     async fn interrupted_download_resumes_from_part_file() {
         let root =
             std::env::temp_dir().join(format!("glimpse-speech-resume-{}", std::process::id()));
@@ -1302,6 +1437,12 @@ mod tests {
             Some(ModelEngine::Transcribe)
         );
         assert_eq!(infer_engine("apple"), Some(ModelEngine::Apple));
+        assert_eq!(infer_engine("Apple_Speech"), Some(ModelEngine::Apple));
+        assert_eq!(
+            infer_engine("pineapple-whisper"),
+            Some(ModelEngine::Whisper)
+        );
+        assert_eq!(infer_engine("ggml-apple.bin"), None);
         assert_eq!(infer_engine("ggml-turbo.bin"), None);
         assert_eq!(infer_engine("/models/parakeet/ggml-small.bin"), None);
         assert_eq!(
@@ -1404,6 +1545,58 @@ mod tests {
             .resolve_loose("ggml-arbitrary.bin", ModelEngine::Whisper)
             .unwrap();
         assert_eq!(by_name.path, model_path);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolve_cached_stays_inside_the_cache() {
+        let root =
+            std::env::temp_dir().join(format!("glimpse-speech-cached-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let cache = root.join("models");
+        fs::create_dir_all(cache.join("whisper_base")).unwrap();
+        fs::write(cache.join("whisper_base/ggml-base.bin"), b"ggml").unwrap();
+        fs::write(cache.join("ggml-tiny.bin"), b"ggml").unwrap();
+        let outside = root.join("planted.bin");
+        fs::write(&outside, b"not a model").unwrap();
+        let manager = ModelInstallManager::new(&cache);
+
+        let by_dir = manager
+            .resolve_cached("whisper_base", ModelEngine::Whisper)
+            .unwrap();
+        assert_eq!(by_dir.path, cache.join("whisper_base/ggml-base.bin"));
+        let by_file = manager
+            .resolve_cached("ggml-tiny.bin", ModelEngine::Whisper)
+            .unwrap();
+        assert_eq!(by_file.path, cache.join("ggml-tiny.bin"));
+
+        // Only Apple Speech's own ids skip the cache.
+        fs::write(cache.join("ggml-apple.bin"), b"ggml").unwrap();
+        assert_eq!(
+            manager
+                .resolve_cached("ggml-apple.bin", ModelEngine::Whisper)
+                .unwrap()
+                .path,
+            cache.join("ggml-apple.bin")
+        );
+
+        for reference in [
+            outside.to_str().unwrap(),
+            "../planted.bin",
+            "whisper_base/ggml-base.bin",
+            "..",
+            "missing",
+            "pineapple",
+        ] {
+            let err = manager
+                .resolve_cached(reference, ModelEngine::Whisper)
+                .unwrap_err();
+            assert!(
+                err.to_string().starts_with("Unknown model:"),
+                "{reference}: {err}"
+            );
+        }
 
         let _ = fs::remove_dir_all(&root);
     }

@@ -2,9 +2,38 @@
 
 ## Unreleased
 
+### Breaking
+
+- `SpeechService::new` no longer loads a model id its resolver doesn't know as a file path. It returns `Unknown model: <id>`, a 400 from the API, so a request's `model` field can't point the engine at any file on disk. `SpeechConfig::loose` and `SpeechService::new_loose_with_engine` still resolve paths.
+- `SpeechConfig` has a new `loose_paths` field, set by `SpeechConfig::loose`. A service resolves ids outside its catalog as paths only when it is true, so configs built as struct literals need `loose_paths: false`.
+- `SpeechService::streaming_configure` returns `Result<()>`. When the model fails to load it returns the error, where it used to drop it and leave the next stream unconfigured.
+- `SpeechService::delete` (and `DELETE /v1/models/{id}`) looks the id up first: a catalog service deletes only catalog models, a service with `only_cached_models` only model directories in the cache. Anything else is `Unknown model`, where it used to remove any directory in the models dir with a valid name.
+
+### Added
+
+- `SpeechService::only_cached_models(pinned)`: request ids must name a model file or directory directly inside the cache; only `pinned` may be a path. `glimpse-speech serve` uses it, so requests can't load paths and only its `--model` may be one.
+- `ModelInstallManager::resolve_cached` and `ModelInstallManager::is_cached_model_dir`.
+- `api::ApiLimits` and `api::serve_with_limits`, and `serve`'s `--max-upload-mib`, `--max-queued` and `--request-timeout`.
+- `SpeechService::transcribe_before` and `SpeechProvider::transcribe_before`: a transcription still waiting for the engine when its deadline passes fails instead of starting.
+- `models::ModelError`, returned (inside the `anyhow::Error`) when a model id names no usable model: `UnknownModel`, `InvalidModelId`, `NotInstalled` and `NotGguf`. The messages are unchanged.
+
+### Changed
+
+- `models::infer_engine` only takes `apple` and `apple_speech` as Apple Speech. Other names containing "apple" used to resolve to the OS model without a cache lookup; now they are files like any other, and `resolve_cached` rejects them unless the cache has them.
+- Parakeet TDT's dropped-speech check runs Silero once over the whole recording, reading the samples in place, instead of a minute at a time through a 16-bit copy. Silero no longer restarts every minute, where it missed the first few hundred milliseconds of speech after each minute mark; on two 10 minute recordings the regions changed by 1.2 and 2.3 seconds in total, mostly there, at the same speed.
+
 ### Removed
 
 - The `cleanup-apple` feature, the `cleanup` module and its Swift shim. Apple's on-device model moved to [Glimpse Language](https://github.com/glimpse-hq/Glimpse-Language) with the same API: enable its `apple` feature and use `glimpse_language::apple` instead of `glimpse_speech::cleanup`. Glimpse Speech no longer weak-links FoundationModels.
+
+### Fixed
+
+- The transcription endpoint limits what a request can take. Audio uploads stop at 768 MiB (an hour of 48 kHz stereo 16-bit WAV is about 660 MiB) instead of 1 GiB, each text field (`prompt`, `dictionary`, ...) at 64 KiB and all of them at 256 KiB, each a 413. At most 4 transcriptions are accepted at once, uploads included, and more get a 429. A request has 15 minutes: 408 while uploading, 504 after. `serve` and `serve_with_shutdown` use these defaults.
+- A transcription request naming an invalid model id, a catalog model that isn't fully installed or a transcribe.cpp model that isn't a GGUF got a 500. Like `Unknown model`, these are now a 400 `invalid_request_error`, decided by the error's type rather than its text.
+- `ModelInstallManager::new` downloads with a 30 second connect timeout and a 60 second read timeout, so a stalled connection retries and resumes instead of hanging for up to 24 hours.
+- A download that keeps failing reports "Network interrupted while downloading <file>" with the network error as its cause; the readable message used to be buried under the network error.
+- Whole Nemotron recordings decide between the CPU engine and the GPU copy by the decoded audio's length, so long MP3, M4A, Ogg and FLAC uploads (decoded by ffmpeg) use the GPU copy like WAV does. The audio is decoded once instead of opening a WAV a second time, and PCM with a sample rate of 0 no longer counts as long.
+- A transcription on Nemotron's GPU copy no longer marks the CPU engine as warmed, so `preload_and_warm` still warms it.
 
 ## 2.0.6
 

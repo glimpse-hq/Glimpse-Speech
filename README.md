@@ -16,18 +16,18 @@ Parakeet and Nemotron boost dictionary words during decoding.
 | Feature | Enables |
 | --- | --- |
 | `transcribe` | `engines::transcribe::TranscribeEngine`, `diarization` (`diarize` and `LiveDiarizer` with [Nemotron-3 Diarization](https://huggingface.co/Glimpse-Dictation/Nemotron-3-Diarization-gguf), up to 8 speakers; `diarize` also takes Sortformer v2.1), and Silero VAD (`vad`, pure Rust, Intel Macs included). Builds transcribe.cpp from source: CMake and a C++ toolchain, plus the Vulkan SDK on Windows and Linux |
-| `whisper` | Whisper as the default loose engine (implies `transcribe`) |
+| `whisper` | Compatibility alias for `transcribe`, which runs Whisper too |
 | `api` | The OpenAI-compatible HTTP server (`api::serve`) |
 | `remote` | Proxying to a remote OpenAI-compatible endpoint, with local fallback |
 | `cli` | The `glimpse-speech` binary (implies `api`) |
 | `apple-speech` | `engines::apple`, the macOS 26 SpeechAnalyzer engine (Apple Silicon) |
-| `all` | `whisper` + `transcribe` |
+| `all` | Compatibility alias for `transcribe` |
 
 ## Installation
 
 ```toml
 [dependencies]
-glimpse-speech = { git = "https://github.com/glimpse-hq/Glimpse-Speech.git", tag = "2.0.6", features = ["whisper"] }
+glimpse-speech = { git = "https://github.com/glimpse-hq/Glimpse-Speech.git", tag = "2.0.6", features = ["transcribe"] }
 ```
 
 The transcribe.cpp dependency is pinned to an exact Git revision, including its
@@ -42,11 +42,12 @@ cargo check --manifest-path src-tauri/Cargo.toml \
 
 Long audio is decoded in chunks split at quiet boundaries, without overlap or
 omitted samples: 28 seconds for Whisper, 15 seconds for Qwen3-ASR and for
-Parakeet with a Core ML encoder (the encoder's capacity). Input-length and
-output-truncation errors retry smaller chunks; other errors propagate normally.
-Partial transcripts are never reported as complete. Parakeet TDT re-decodes
-stretches of detected speech that came back without words, which can happen
-after long pauses.
+Parakeet with a Core ML encoder (the encoder's capacity), and 60 seconds for
+Parakeet without one (faster than whole recordings, with a lower long-form
+error rate). Input-length and output-truncation errors retry smaller chunks;
+other errors propagate normally. Partial transcripts are never reported as
+complete. Parakeet TDT re-decodes stretches of detected speech that came back
+without words, which can happen after long pauses.
 
 Parakeet TDT V3 supports either a full GGUF for CPU/GPU inference or a compact
 decoder-only GGUF paired with its matching Core ML encoder on Apple Silicon.
@@ -63,14 +64,20 @@ search when words are set, while Nemotron and streaming decode greedily.
 
 Core ML companions accelerate the encoder only. A Whisper encoder serves every
 quantization of its family, and distil-Whisper models use their teacher's
-encoder. A Whisper encoder marked as still compiling (`.<name>.compiling` beside
-it) is skipped unless the service was built with
+encoder. An encoder marked as still compiling (`.<name>.compiling` beside it)
+is skipped when its model can run without it (a full GGUF or Whisper file,
+not a decoder-only one) unless the service was built with
 `SpeechService::loading_compiling_encoders()`; `TranscribeEngine::is_compiling`
-and `TranscribeEngine::companion_for` expose the same checks. Nemotron runs on
-the CPU. Installing a
-companion beside an already-loaded model requires `SpeechService::unload()`
-before loading or warming it again. The service cache tracks model id and path,
-not changes to companion files.
+and `TranscribeEngine::companion_for` expose the same checks.
+
+A Nemotron model whose catalog `variant` starts with `nemotron-` streams, and
+transcribes audio shorter than 30 seconds, on the CPU. Whole recordings of 30
+seconds or more run on a GPU copy of the model, loaded by the first one, when
+Metal or Vulkan is available; Nemotron 3.5 keeps them on the CPU on Metal.
+
+Installing a companion beside an already-loaded model requires
+`SpeechService::unload()` before loading or warming it again. The service cache
+tracks model id and path, not changes to companion files.
 
 ## CLI
 
@@ -119,6 +126,14 @@ curl -F file=@audio.wav -F model=<model> -F response_format=verbose_json \
 
 Word timestamps from Whisper come from cross-attention alignment, computed only when word granularity is requested.
 
+A request's `model` must name a model directory in the cache, as `GET /v1/models` lists (it must hold exactly one model file, or one GGUF for transcribe.cpp models), or a model file directly in the cache, or be the `--model` value, which alone may be a path. The one name that needs no file is `apple` (or `apple_speech`), the OS's Apple Speech model, on builds with `apple-speech`. Anything else is a 400 `Unknown model`.
+
+Limits (`api::ApiLimits` for `api::serve_with_limits`):
+
+- `--max-upload-mib` (default 768, which fits an hour of 48 kHz stereo 16-bit WAV); text fields stop at 64 KiB each. Too large is a 413
+- `--max-queued` (default 4): transcription requests accepted at once, uploading, queued or running. More get a 429
+- `--request-timeout` (default 900 seconds, `0` for none), upload included: 408 while uploading, 504 after
+
 Auth and networking:
 
 - Loopback by default; binding to LAN requires `--api-key`
@@ -133,6 +148,8 @@ With `--remote-endpoint` set, transcription requests proxy to the remote service
 ### Service layer
 
 `SpeechService` manages the model cache, engine loading, and warmup. `api::serve` and the CLI are built on it.
+
+`SpeechService::new` takes a catalog resolver and rejects ids it doesn't know, unless the `SpeechConfig` sets `loose_paths` (as `SpeechConfig::loose` does). `new_loose_with_engine` resolves any file path, for ids the local user chose; call `only_cached_models` on it before resolving ids from requests.
 
 ```rust
 use glimpse_speech::service::{AudioInput, SpeechService, TranscribeRequest};

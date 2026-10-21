@@ -11,8 +11,9 @@ use directories::ProjectDirs;
 use crate::{
     TimestampGranularity, Transcription,
     api::{
-        ApiConfig, ApiEventSink, ApiModelInfo, ResponseFormat, format_srt, format_vtt,
-        verbose_response,
+        ApiConfig, ApiEventSink, ApiLimits, ApiModelInfo, DEFAULT_MAX_QUEUED_TRANSCRIPTIONS,
+        DEFAULT_MAX_UPLOAD_MIB, DEFAULT_REQUEST_TIMEOUT_SECS, ResponseFormat, format_srt,
+        format_vtt, verbose_response,
     },
     models::{
         InstallSpec, ModelEngine, ModelInstallManager, ModelStatus, ModelStorage, RemoteFile,
@@ -112,6 +113,15 @@ struct ServeArgs {
     cors: bool,
     #[arg(long = "no-cors", hide = true)]
     no_cors: bool,
+    /// Largest audio upload, in MiB.
+    #[arg(long, default_value_t = DEFAULT_MAX_UPLOAD_MIB, value_parser = clap::value_parser!(u64).range(1..))]
+    max_upload_mib: u64,
+    /// Transcription requests accepted at once, uploading, queued or running; more get a 429.
+    #[arg(long, default_value_t = DEFAULT_MAX_QUEUED_TRANSCRIPTIONS, value_parser = clap::value_parser!(u16).range(1..).map(usize::from))]
+    max_queued: usize,
+    /// Seconds a transcription request may take, upload included. 0 for no limit.
+    #[arg(long, default_value_t = DEFAULT_REQUEST_TIMEOUT_SECS)]
+    request_timeout: u64,
 }
 
 #[derive(Debug, Subcommand)]
@@ -189,7 +199,17 @@ async fn serve(args: ServeArgs, cache_dir: PathBuf) -> anyhow::Result<()> {
         remote_model,
         cors,
         no_cors,
+        max_upload_mib,
+        max_queued,
+        request_timeout,
     } = args;
+    let limits = ApiLimits {
+        max_upload_bytes: max_upload_mib.saturating_mul(1024 * 1024),
+        max_queued_transcriptions: max_queued,
+        request_timeout: (request_timeout > 0)
+            .then(|| std::time::Duration::from_secs(request_timeout)),
+        ..ApiLimits::default()
+    };
     let cors_enabled = cors && !no_cors;
     let remote_endpoint = remote_endpoint
         .as_deref()
@@ -208,7 +228,10 @@ async fn serve(args: ServeArgs, cache_dir: PathBuf) -> anyhow::Result<()> {
         cors_enabled,
     });
     let installed_models_dir = cache_dir.clone();
-    let service = Arc::new(SpeechService::new_loose_with_engine(cache_dir, engine));
+    // Requests may only name models in the cache; a path comes from `--model`.
+    let service = Arc::new(
+        SpeechService::new_loose_with_engine(cache_dir, engine).only_cached_models(model.clone()),
+    );
 
     if !remote_enabled && let Some(model_id) = model.clone() {
         let warm = Arc::clone(&service);
@@ -242,30 +265,34 @@ async fn serve(args: ServeArgs, cache_dir: PathBuf) -> anyhow::Result<()> {
         None => None,
     };
 
-    crate::api::serve(ApiConfig {
-        host,
-        port,
-        service,
-        api_key,
-        event_sink: Some(event_sink),
-        cors: cors_enabled,
-        transcription_provider,
-        local_models: Vec::new(),
-        local_model_source: Some(Arc::new(move || {
-            installed_model_ids(&installed_models_dir)
-                .into_iter()
-                .map(|id| {
-                    ApiModelInfo::new(
-                        id.clone(),
-                        id,
-                        "Installed in the local model cache.".to_string(),
-                        vec!["Local".to_string()],
-                        Vec::new(),
-                    )
-                })
-                .collect()
-        })),
-    })
+    crate::api::serve_with_limits(
+        ApiConfig {
+            host,
+            port,
+            service,
+            api_key,
+            event_sink: Some(event_sink),
+            cors: cors_enabled,
+            transcription_provider,
+            local_models: Vec::new(),
+            local_model_source: Some(Arc::new(move || {
+                installed_model_ids(&installed_models_dir)
+                    .into_iter()
+                    .map(|id| {
+                        ApiModelInfo::new(
+                            id.clone(),
+                            id,
+                            "Installed in the local model cache.".to_string(),
+                            vec!["Local".to_string()],
+                            Vec::new(),
+                        )
+                    })
+                    .collect()
+            })),
+        },
+        limits,
+        std::future::pending::<()>(),
+    )
     .await
 }
 
@@ -457,6 +484,14 @@ mod tests {
         assert_eq!(json["segments"][0]["text"], "hello world");
         assert_eq!(json["segments"][0]["start"], 0.0);
         assert_eq!(json["segments"][0]["end"], 1.5);
+    }
+
+    #[test]
+    fn serve_limits_reject_zero_sizes() {
+        let parse = |args: &[&str]| Cli::try_parse_from([&["glimpse", "serve"], args].concat());
+        assert!(parse(&["--max-upload-mib", "0"]).is_err());
+        assert!(parse(&["--max-queued", "0"]).is_err());
+        assert!(parse(&["--max-upload-mib", "1", "--request-timeout", "0"]).is_ok());
     }
 
     #[test]

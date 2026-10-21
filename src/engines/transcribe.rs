@@ -22,7 +22,7 @@ use transcribe_cpp::{
 use crate::{
     TranscriptionEngine, TranscriptionResult, TranscriptionSegment,
     dictionary::{build_dictionary_prompt, sanitize_dictionary_entries},
-    engines::io_error,
+    io_error, transcribe_error,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -175,7 +175,7 @@ impl TranscribeEngine {
                 Ok(stream) => self.stream = Some(stream),
                 Err((error, session)) => {
                     self.session = Some(session);
-                    return Err(transcribe_error(error));
+                    return Err(transcribe_error(error).into());
                 }
             }
         }
@@ -249,7 +249,8 @@ impl TranscriptionEngine for TranscribeEngine {
             return Err(io_error(format!(
                 "transcribe.cpp model file not found: {}",
                 model_path.display()
-            )));
+            ))
+            .into());
         }
         crate::silence_transcribe_cpp_logs();
         let model = Model::load_with(
@@ -390,7 +391,18 @@ impl TranscriptionEngine for TranscribeEngine {
         self.reset();
         let params = params.unwrap_or_default();
         let wants_timestamps = params.timestamps || params.word_timestamps;
-        let mut language = self.language_hint(params.language.as_deref());
+        // English-only Whisper rejects any language hint and always
+        // transcribes English.
+        let (run_language, reported_language) = match self.family {
+            Family::Whisper {
+                multilingual: false,
+                ..
+            } => (None, Some("en".to_string())),
+            _ => {
+                let hint = self.language_hint(params.language.as_deref());
+                (hint.clone(), hint)
+            }
+        };
         let session = self
             .session
             .as_mut()
@@ -404,14 +416,7 @@ impl TranscriptionEngine for TranscribeEngine {
                 }),
                 auto_timestamps(wants_timestamps),
             ),
-            Family::Whisper {
-                words,
-                multilingual,
-            } => {
-                // English-only Whisper rejects any other language hint.
-                if !multilingual {
-                    language = None;
-                }
+            Family::Whisper { words, .. } => {
                 let timestamps = if params.word_timestamps && words {
                     TimestampKind::Word
                 } else {
@@ -439,7 +444,7 @@ impl TranscriptionEngine for TranscribeEngine {
         };
         let mut options = RunOptions {
             family,
-            language: language.clone(),
+            language: run_language,
             // The dropped-speech check needs words; Parakeet times come with its tokens.
             timestamps: if self.checks_dropped_speech {
                 TimestampKind::Auto
@@ -448,13 +453,6 @@ impl TranscriptionEngine for TranscribeEngine {
             },
             ..Default::default()
         };
-        if let Family::Whisper {
-            multilingual: false,
-            ..
-        } = self.family
-        {
-            language = Some("en".to_string());
-        }
         let batch = self.batches_chunks;
         let boundary = self.boundary;
         let (chunks, speech) = std::thread::scope(|scope| {
@@ -520,7 +518,7 @@ impl TranscriptionEngine for TranscribeEngine {
             text: result.text,
             segments: non_empty(result.segments),
             words: non_empty(result.words),
-            language: language.or(result.language),
+            language: reported_language.or(result.language),
         })
     }
 }
@@ -581,24 +579,17 @@ fn assemble(chunks: Vec<(usize, Transcript)>, end: usize) -> TranscriptionResult
     }
 }
 
-// Silero's padded speech regions as merged sample ranges. The audio goes in by
-// the minute so a long recording never needs a second full copy.
+// Silero's padded speech regions as merged sample ranges. Silero reads the
+// samples in place, with one state across the whole recording.
 fn speech_ranges(samples: &[f32]) -> Option<Vec<Range<usize>>> {
-    const PIECE: usize = 60 * SAMPLE_RATE;
+    let sample = |seconds: f32| ((seconds * SAMPLE_RATE as f32) as usize).min(samples.len());
     let mut ranges: Vec<Range<usize>> = Vec::new();
-    for (index, piece) in samples.chunks(PIECE).enumerate() {
-        let pcm: Vec<i16> = piece.iter().map(|&s| (s * 32_768.0) as i16).collect();
-        let offset = index * PIECE;
-        for (start, end) in crate::vad::speech_regions(&pcm, SAMPLE_RATE as u32)? {
-            let sample = |seconds: f32| {
-                (offset + (seconds * SAMPLE_RATE as f32) as usize).min(offset + piece.len())
-            };
-            let (start, end) = (sample(start), sample(end));
-            match ranges.last_mut() {
-                Some(last) if start <= last.end => last.end = last.end.max(end),
-                _ if start < end => ranges.push(start..end),
-                _ => {}
-            }
+    for (start, end) in crate::vad::speech_regions_16k(samples)? {
+        let (start, end) = (sample(start), sample(end));
+        match ranges.last_mut() {
+            Some(last) if start <= last.end => last.end = last.end.max(end),
+            _ if start < end => ranges.push(start..end),
+            _ => {}
         }
     }
     Some(ranges)
@@ -782,8 +773,11 @@ fn strip_quant_suffix(stem: &str) -> &str {
     }
 }
 
-// Match Qwen's reference splitter: use a quiet boundary and preserve every
-// sample exactly once. Search only before the limit so ANE capacity is respected.
+// Where to cut `samples` so the first piece is at most `limit` long: the
+// middle of the quietest 100 ms in the last 3 seconds before the limit (never
+// before half of it), the latest one on a tie. The caller keeps every sample
+// exactly once, and no chunk outgrows what the model, or its Core ML encoder,
+// takes. Adapted from Qwen3-ASR's splitter:
 // https://github.com/QwenLM/Qwen3-ASR/blob/main/qwen_asr/inference/utils.py
 fn quiet_boundary(samples: &[f32], limit: usize) -> usize {
     let start = limit.saturating_sub(3 * SAMPLE_RATE).max(limit / 2);
@@ -965,13 +959,131 @@ fn decode_spans(
     Ok(results)
 }
 
-fn transcribe_error(error: impl std::fmt::Display) -> Box<dyn std::error::Error> {
-    io_error(format!("transcribe.cpp error: {error}"))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::TranscribeEngine;
+    use super::{
+        SAMPLE_RATE, TranscribeEngine, TranscriptionResult, TranscriptionSegment, assemble,
+        dropped_speech, speech_between_long_pauses, splice,
+    };
+
+    fn span(start: f32, end: f32, text: &str) -> TranscriptionSegment {
+        TranscriptionSegment {
+            start,
+            end,
+            text: text.to_string(),
+        }
+    }
+
+    fn seconds(value: f32) -> usize {
+        (value * SAMPLE_RATE as f32) as usize
+    }
+
+    #[test]
+    fn assemble_offsets_and_clamps_each_chunk() {
+        let chunk = |text: &str, t1_ms, language: Option<&str>| transcribe_cpp::Transcript {
+            text: text.into(),
+            language: language.map(Into::into),
+            segments: vec![transcribe_cpp::Segment {
+                t0_ms: 0,
+                t1_ms,
+                text: text.into(),
+                ..Default::default()
+            }],
+            words: vec![transcribe_cpp::Word {
+                t0_ms: 0,
+                t1_ms,
+                text: text.into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let result = assemble(
+            vec![
+                (0, chunk(" hello ", 1000, Some("en"))),
+                (seconds(2.0), chunk(" ", 0, None)),
+                // TDT can time a word past the end of its chunk.
+                (seconds(2.5), chunk("world", 5000, Some("de"))),
+            ],
+            seconds(3.0),
+        );
+        assert_eq!(result.text, "hello world");
+        assert_eq!(
+            result.segments.unwrap(),
+            vec![span(0.0, 1.0, "hello"), span(2.5, 3.0, "world")]
+        );
+        assert_eq!(result.words.unwrap().len(), 2);
+        assert_eq!(result.language.as_deref(), Some("en"));
+    }
+
+    #[test]
+    fn dropped_speech_finds_long_stretches_without_words() {
+        let speech = [0..seconds(5.0), seconds(8.0)..seconds(12.0)];
+        let words = [
+            span(0.0, 1.0, "a"),
+            span(4.0, 5.0, "b"),
+            // Outside every speech range, so it covers nothing.
+            span(6.0, 7.0, "c"),
+            span(8.0, 9.0, "d"),
+            // 1 second after "d": too short to count.
+            span(10.0, 10.5, "e"),
+        ];
+        assert_eq!(
+            dropped_speech(&words, &speech),
+            // 1 s to 4 s, and 10.5 s to the end of the second range.
+            vec![seconds(1.0), seconds(10.5)]
+        );
+        assert!(dropped_speech(&[span(0.0, 5.0, "all")], &speech[..1]).is_empty());
+    }
+
+    #[test]
+    fn speech_splits_only_at_long_pauses_and_covers_the_whole_input() {
+        let speech = [
+            seconds(1.0)..seconds(2.0),
+            seconds(2.25)..seconds(3.0),
+            seconds(4.0)..seconds(5.0),
+        ];
+        assert_eq!(
+            speech_between_long_pauses(&speech, seconds(6.0)),
+            vec![0..seconds(3.0), seconds(4.0)..seconds(6.0)]
+        );
+        assert!(speech_between_long_pauses(&[], seconds(6.0)).is_empty());
+    }
+
+    #[test]
+    fn splice_replaces_the_words_a_retry_decoded() {
+        let first = TranscriptionResult {
+            text: "a b c".to_string(),
+            segments: Some(vec![span(0.0, 3.0, "a b c"), span(3.0, 4.0, "d")]),
+            words: Some(vec![
+                span(0.0, 1.0, "a"),
+                span(1.0, 2.0, "b"),
+                span(2.0, 3.0, "c"),
+                span(3.0, 4.0, "d"),
+            ]),
+            language: Some("en".to_string()),
+        };
+        let retry = TranscriptionResult {
+            text: "B".to_string(),
+            segments: Some(vec![span(1.0, 2.0, "B")]),
+            words: Some(vec![span(1.1, 1.9, "B")]),
+            language: Some("de".to_string()),
+        };
+        let result = splice(first, vec![(retry, seconds(1.0)..seconds(2.0))]);
+        assert_eq!(result.text, "a B c d");
+        // The segment around the retried span splits on either side of it.
+        assert_eq!(
+            result.segments.unwrap(),
+            vec![
+                span(0.0, 1.0, "a"),
+                span(1.0, 2.0, "B"),
+                span(2.0, 3.0, "c"),
+                span(3.0, 4.0, "d"),
+            ]
+        );
+        let words: Vec<_> = result.words.unwrap().into_iter().map(|w| w.text).collect();
+        assert_eq!(words, ["a", "B", "c", "d"]);
+        assert_eq!(result.language.as_deref(), Some("en"));
+    }
 
     // Tone bursts ("speech") separated by silent gaps at the given seconds.
     fn speech_with_gaps(seconds: f32, gaps: &[(f32, f32)]) -> Vec<f32> {

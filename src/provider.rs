@@ -1,4 +1,4 @@
-use std::{error::Error as StdError, fmt, sync::Arc};
+use std::{error::Error as StdError, fmt, sync::Arc, time::Instant};
 
 use anyhow::anyhow;
 
@@ -109,10 +109,21 @@ impl SpeechProvider {
         &self,
         request: TranscribeRequest,
     ) -> Result<Transcription, TranscribeError> {
+        self.transcribe_before(request, None).await
+    }
+
+    /// Like [`transcribe`](Self::transcribe), but a local transcription still
+    /// waiting for the engine at `deadline` gives up instead of starting; see
+    /// [`SpeechService::transcribe_before`].
+    pub async fn transcribe_before(
+        &self,
+        request: TranscribeRequest,
+        deadline: Option<Instant>,
+    ) -> Result<Transcription, TranscribeError> {
         match self {
             Self::Local(service) => {
                 let service = Arc::clone(service);
-                tokio::task::spawn_blocking(move || service.transcribe(request))
+                tokio::task::spawn_blocking(move || service.transcribe_before(request, deadline))
                     .await
                     .map_err(|err| {
                         TranscribeError::Local(anyhow!("transcription task failed: {err}"))
@@ -120,7 +131,7 @@ impl SpeechProvider {
                     .map_err(TranscribeError::Local)
             }
             #[cfg(feature = "remote")]
-            Self::Remote(upstream) => Box::pin(upstream.transcribe(request)).await,
+            Self::Remote(upstream) => Box::pin(upstream.transcribe(request, deadline)).await,
         }
     }
 
@@ -148,10 +159,11 @@ impl RemoteUpstream {
     async fn transcribe(
         &self,
         request: TranscribeRequest,
+        deadline: Option<Instant>,
     ) -> Result<Transcription, TranscribeError> {
         let AudioInput::WavPath(audio_path) = &request.audio else {
             return match &self.fallback {
-                Some(fallback) => transcribe_via_fallback(fallback, request).await,
+                Some(fallback) => transcribe_via_fallback(fallback, request, deadline).await,
                 None => Err(TranscribeError::Remote(crate::remote::config_error(
                     "Remote provider requires an audio file upload",
                 ))),
@@ -191,7 +203,7 @@ impl RemoteUpstream {
                             "Remote speech temporarily unavailable, falling back to local: {}",
                             err.user_message()
                         );
-                        Box::pin(fallback.transcribe(request))
+                        Box::pin(fallback.transcribe_before(request, deadline))
                             .await
                             .map_err(|local| {
                                 tracing::warn!("Local fallback failed: {local:?}");
@@ -210,9 +222,10 @@ impl RemoteUpstream {
 async fn transcribe_via_fallback(
     fallback: &SpeechProvider,
     request: TranscribeRequest,
+    deadline: Option<Instant>,
 ) -> Result<Transcription, TranscribeError> {
     match local_fallback_request(fallback, request) {
-        Some(request) => Box::pin(fallback.transcribe(request)).await,
+        Some(request) => Box::pin(fallback.transcribe_before(request, deadline)).await,
         None => Err(TranscribeError::Local(anyhow!(
             "No local transcription model is installed for fallback"
         ))),

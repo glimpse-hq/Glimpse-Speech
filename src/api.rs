@@ -9,7 +9,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -27,12 +27,12 @@ use axum::{
     routing::{delete, get, post},
 };
 use serde::Serialize;
-use tokio::io::AsyncWriteExt;
+use tokio::{io::AsyncWriteExt, sync::Semaphore, time::Instant};
 use tower_http::cors::CorsLayer;
 
 use crate::{
     TimestampGranularity, Transcription, UnsupportedValue,
-    models::{InstallOptions, ModelDownloadProgress},
+    models::{InstallOptions, ModelDownloadProgress, ModelError},
     provider::{SpeechProvider, TranscribeError},
     service::{AudioInput, SpeechService, TranscribeRequest},
 };
@@ -52,6 +52,55 @@ pub struct ApiConfig {
     pub transcription_provider: Option<Arc<SpeechProvider>>,
     pub local_models: Vec<ApiModelInfo>,
     pub local_model_source: Option<ApiModelSource>,
+}
+
+pub(crate) const DEFAULT_MAX_UPLOAD_MIB: u64 = 768;
+pub(crate) const DEFAULT_MAX_QUEUED_TRANSCRIPTIONS: usize = 4;
+pub(crate) const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 15 * 60;
+const DEFAULT_MAX_TEXT_FIELD_BYTES: usize = 64 * 1024;
+// All text fields of a request together, since `dictionary` may repeat.
+const TEXT_FIELDS_PER_REQUEST: usize = 4;
+
+/// Resource limits for [`serve_with_limits`]. [`serve`] and
+/// [`serve_with_shutdown`] use [`ApiLimits::default`].
+#[derive(Debug, Clone)]
+pub struct ApiLimits {
+    /// Largest audio upload in bytes. The default, 768 MiB, fits an hour of
+    /// 48 kHz stereo 16-bit WAV (about 660 MiB); compressed audio fits many hours.
+    pub max_upload_bytes: u64,
+    /// Largest text field (`prompt`, `dictionary`, `model`, ...) in bytes, 64
+    /// KiB by default. A request's text fields together get four times this.
+    pub max_text_field_bytes: usize,
+    /// Transcription requests accepted at once, uploading, waiting for the
+    /// engine or running. Further requests get a 429. Default 4; 0 counts as 1.
+    pub max_queued_transcriptions: usize,
+    /// Time a transcription request may take, upload included: 408 while
+    /// uploading, 504 after. Default 15 minutes; `None` for no limit.
+    pub request_timeout: Option<Duration>,
+}
+
+impl Default for ApiLimits {
+    fn default() -> Self {
+        Self {
+            max_upload_bytes: DEFAULT_MAX_UPLOAD_MIB * 1024 * 1024,
+            max_text_field_bytes: DEFAULT_MAX_TEXT_FIELD_BYTES,
+            max_queued_transcriptions: DEFAULT_MAX_QUEUED_TRANSCRIPTIONS,
+            request_timeout: Some(Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS)),
+        }
+    }
+}
+
+impl ApiLimits {
+    /// What all of a request's text fields may take together.
+    fn text_budget(&self) -> usize {
+        self.max_text_field_bytes
+            .saturating_mul(TEXT_FIELDS_PER_REQUEST)
+    }
+
+    fn transcription_permits(&self) -> usize {
+        self.max_queued_transcriptions
+            .clamp(1, Semaphore::MAX_PERMITS)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -93,6 +142,8 @@ struct ApiState {
     event_sink: Option<ApiEventSink>,
     local_models: Arc<Vec<ApiModelInfo>>,
     local_model_source: Option<ApiModelSource>,
+    limits: ApiLimits,
+    transcriptions: Arc<Semaphore>,
 }
 
 pub type ApiEventSink = Arc<dyn Fn(ApiEvent) + Send + Sync + 'static>;
@@ -245,6 +296,14 @@ pub async fn serve_with_shutdown(
     config: ApiConfig,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
+    serve_with_limits(config, ApiLimits::default(), shutdown).await
+}
+
+pub async fn serve_with_limits(
+    config: ApiConfig,
+    limits: ApiLimits,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> Result<()> {
     let addr = SocketAddr::new(parse_host(&config.host)?, config.port);
     let api_key = config.api_key.filter(|key| !key.trim().is_empty());
     if !addr.ip().is_loopback() && api_key.is_none() {
@@ -266,16 +325,36 @@ pub async fn serve_with_shutdown(
         event_sink: config.event_sink,
         local_models: Arc::new(config.local_models),
         local_model_source: config.local_model_source,
+        transcriptions: Arc::new(Semaphore::new(limits.transcription_permits())),
+        limits,
     };
     state.log("info", format!("Local API listening on http://{addr}"));
+
+    axum::serve(listener, router(state))
+        .with_graceful_shutdown(shutdown)
+        .await?;
+    Ok(())
+}
+
+fn router(state: ApiState) -> Router {
     let model_management_enabled =
         !state.local_models.is_empty() || state.local_model_source.is_some();
+    let cors_enabled = state.cors;
+    // A backstop for the whole body; the upload and text fields are checked
+    // against their own limits as they stream in.
+    let body_limit = state
+        .limits
+        .max_upload_bytes
+        .saturating_add(state.limits.text_budget() as u64)
+        .saturating_add(1024 * 1024);
 
     let mut app = Router::new()
         .route("/health", get(health))
         .route("/v1/models", get(list_models))
         .route("/v1/audio/transcriptions", post(transcribe))
-        .layer(DefaultBodyLimit::max(1024 * 1024 * 1024));
+        .layer(DefaultBodyLimit::max(
+            usize::try_from(body_limit).unwrap_or(usize::MAX),
+        ));
 
     if model_management_enabled {
         app = app
@@ -288,11 +367,7 @@ pub async fn serve_with_shutdown(
     if cors_enabled {
         app = app.layer(CorsLayer::permissive());
     }
-
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
-        .await?;
-    Ok(())
+    app
 }
 
 fn parse_host(host: &str) -> Result<IpAddr> {
@@ -399,19 +474,69 @@ async fn transcribe(
         )));
     }
 
+    // Taken before the upload, so it also bounds concurrent uploads.
+    let Ok(permit) = Arc::clone(&state.transcriptions).try_acquire_owned() else {
+        state.log(
+            "warn",
+            "Rejected a transcription: too many in progress".to_string(),
+        );
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(typed_error_body(
+                "Too many transcriptions in progress, try again shortly",
+                "rate_limit_error",
+            )),
+        ));
+    };
+    let deadline = state
+        .limits
+        .request_timeout
+        .and_then(|timeout| Instant::now().checked_add(timeout));
+    let timeout = describe_duration(state.limits.request_timeout.unwrap_or_default());
+
     let (
         ParsedTranscriptionRequest {
             request,
             response_format,
             timestamp_granularities,
         },
-        _upload,
-    ) = transcribe_request_from_multipart(request, &state).await?;
-
-    state
-        .provider
-        .transcribe(request)
+        upload,
+    ) = before(deadline, transcribe_request_from_multipart(request, &state))
         .await
+        .ok_or_else(|| {
+            (
+                StatusCode::REQUEST_TIMEOUT,
+                Json(error_body(format!(
+                    "The upload did not finish within {timeout}"
+                ))),
+            )
+        })??;
+
+    // Once the engine starts it can't be interrupted, so the task keeps its
+    // queue slot and the upload until it finishes, even after the request
+    // times out. A request still queued for the engine at the deadline gives
+    // up instead of starting.
+    let provider = Arc::clone(&state.provider);
+    let engine_deadline = deadline.map(Instant::into_std);
+    let task = tokio::spawn(async move {
+        let result = provider.transcribe_before(request, engine_deadline).await;
+        drop((permit, upload));
+        result
+    });
+    let result = before(deadline, task)
+        .await
+        .ok_or_else(|| {
+            (
+                StatusCode::GATEWAY_TIMEOUT,
+                Json(typed_error_body(
+                    format!("The transcription did not finish within {timeout}"),
+                    "server_error",
+                )),
+            )
+        })?
+        .map_err(|err| map_server_error(anyhow!("transcription task failed: {err}")))?;
+
+    result
         .map(|response| {
             state.log_model(
                 "info",
@@ -421,6 +546,34 @@ async fn transcribe(
             format_transcription_response(response, response_format, &timestamp_granularities)
         })
         .map_err(map_transcribe_error)
+}
+
+/// "15 minutes", "90 seconds", "1.5 seconds" or "100 ms".
+fn describe_duration(duration: Duration) -> String {
+    let secs = duration.as_secs();
+    if duration.subsec_nanos() == 0 && secs > 0 {
+        match secs {
+            1 => "1 second".to_string(),
+            60 => "1 minute".to_string(),
+            secs if secs % 60 == 0 => format!("{} minutes", secs / 60),
+            secs => format!("{secs} seconds"),
+        }
+    } else if secs == 0 {
+        format!("{} ms", duration.as_millis().max(1))
+    } else {
+        format!(
+            "{} seconds",
+            (duration.as_secs_f64() * 1000.0).round() / 1000.0
+        )
+    }
+}
+
+/// Runs `future` until `deadline`, or to completion without one.
+async fn before<F: Future>(deadline: Option<Instant>, future: F) -> Option<F::Output> {
+    match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline, future).await.ok(),
+        None => Some(future.await),
+    }
 }
 
 impl ApiState {
@@ -777,6 +930,11 @@ async fn transcribe_request_from_multipart(
     let mut timestamps = false;
     let mut stream = false;
     let mut uploaded_file: Option<TempUpload> = None;
+    let mut text = TextBudget {
+        field_limit: state.limits.max_text_field_bytes,
+        total_limit: state.limits.text_budget(),
+        remaining: state.limits.text_budget(),
+    };
 
     while let Some(mut field) = multipart.next_field().await.map_err(map_multipart_error)? {
         let Some(name) = field.name().map(str::to_string) else {
@@ -785,35 +943,45 @@ async fn transcribe_request_from_multipart(
 
         match name.as_str() {
             "file" | "audio" => {
+                if uploaded_file.is_some() {
+                    return Err(map_error(anyhow!("Send one audio file per request")));
+                }
                 let extension = field.file_name().and_then(|name| {
                     PathBuf::from(name)
                         .extension()
                         .map(std::ffi::OsStr::to_owned)
                 });
-                uploaded_file = Some(write_temp_audio(extension.as_deref(), &mut field).await?);
+                uploaded_file = Some(
+                    write_temp_audio(
+                        extension.as_deref(),
+                        &mut field,
+                        state.limits.max_upload_bytes,
+                    )
+                    .await?,
+                );
             }
-            "model" => model = Some(field_text(field).await?),
+            "model" => model = Some(text.read(field).await?),
             "language" => {
-                let value = field_text(field).await?;
+                let value = text.read(field).await?;
                 if !value.trim().is_empty() {
                     language = Some(value);
                 }
             }
             "prompt" => {
-                let value = field_text(field).await?;
+                let value = text.read(field).await?;
                 if !value.trim().is_empty() {
                     prompt = Some(value);
                 }
             }
-            "response_format" => response_format = Some(field_text(field).await?),
+            "response_format" => response_format = Some(text.read(field).await?),
             "dictionary" | "dictionary[]" | "glimpse_dictionary" => {
-                dictionary.extend(split_field_values(&field_text(field).await?));
+                dictionary.extend(split_field_values(&text.read(field).await?));
             }
             "timestamp_granularities" | "timestamp_granularities[]" => {
-                timestamp_granularities.extend(split_field_values(&field_text(field).await?));
+                timestamp_granularities.extend(split_field_values(&text.read(field).await?));
             }
-            "timestamps" => timestamps = parse_bool(&field_text(field).await?),
-            "stream" => stream = parse_bool(&field_text(field).await?),
+            "timestamps" => timestamps = parse_bool(&text.read(field).await?),
+            "stream" => stream = parse_bool(&text.read(field).await?),
             _ => {}
         }
     }
@@ -837,8 +1005,42 @@ async fn transcribe_request_from_multipart(
     Ok((parsed, upload))
 }
 
-async fn field_text(field: axum::extract::multipart::Field<'_>) -> Result<String, ApiError> {
-    field.text().await.map_err(map_multipart_error)
+/// Text fields are read into memory, so each has a size limit, and so do all
+/// of a request's text fields together.
+struct TextBudget {
+    field_limit: usize,
+    total_limit: usize,
+    remaining: usize,
+}
+
+impl TextBudget {
+    async fn read(
+        &mut self,
+        mut field: axum::extract::multipart::Field<'_>,
+    ) -> Result<String, ApiError> {
+        let name = field.name().unwrap_or_default().to_string();
+        let limit = self.field_limit.min(self.remaining);
+        let mut bytes = Vec::new();
+        while let Some(chunk) = field.chunk().await.map_err(map_multipart_error)? {
+            if bytes.len().saturating_add(chunk.len()) > limit {
+                return Err(payload_too_large(if limit < self.field_limit {
+                    format!(
+                        "Text fields are larger than {} bytes in total",
+                        self.total_limit
+                    )
+                } else {
+                    format!("`{name}` is larger than {} bytes", self.field_limit)
+                }));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        self.remaining -= bytes.len();
+        String::from_utf8(bytes).map_err(|_| map_error(anyhow!("`{name}` is not valid UTF-8")))
+    }
+}
+
+fn payload_too_large(message: String) -> ApiError {
+    (StatusCode::PAYLOAD_TOO_LARGE, Json(error_body(message)))
 }
 
 fn map_multipart_error(error: MultipartError) -> ApiError {
@@ -881,9 +1083,16 @@ fn map_transcribe_error(error: TranscribeError) -> ApiError {
 }
 
 fn map_local_transcribe_error(error: anyhow::Error) -> ApiError {
-    let message = error.to_string();
-    if message.starts_with("Unknown model:") || message.starts_with("Invalid model id:") {
+    if error.chain().any(|cause| cause.is::<ModelError>()) {
         map_error(error)
+    } else if error
+        .chain()
+        .any(|cause| cause.is::<crate::service::DeadlinePassed>())
+    {
+        (
+            StatusCode::GATEWAY_TIMEOUT,
+            Json(typed_error_body(error.to_string(), "server_error")),
+        )
     } else {
         map_server_error(error)
     }
@@ -936,6 +1145,7 @@ fn typed_error_body(message: impl Into<String>, error_type: &'static str) -> Err
 async fn write_temp_audio(
     extension: Option<&OsStr>,
     field: &mut axum::extract::multipart::Field<'_>,
+    max_bytes: u64,
 ) -> Result<TempUpload, ApiError> {
     for _ in 0..16 {
         let path = temp_audio_path(extension);
@@ -957,7 +1167,15 @@ async fn write_temp_audio(
 
         let upload = TempUpload(path);
         let mut writer = tokio::io::BufWriter::new(file);
+        let mut written = 0u64;
         while let Some(chunk) = field.chunk().await.map_err(map_multipart_error)? {
+            written += chunk.len() as u64;
+            if written > max_bytes {
+                return Err(payload_too_large(format!(
+                    "The audio file is larger than {} MiB",
+                    max_bytes.div_ceil(1024 * 1024)
+                )));
+            }
             writer
                 .write_all(&chunk)
                 .await
@@ -1100,6 +1318,8 @@ mod tests {
             event_sink: None,
             local_models: Arc::new(Vec::new()),
             local_model_source: None,
+            limits: ApiLimits::default(),
+            transcriptions: Arc::new(Semaphore::new(1)),
         };
         let headers = |name: &'static str, value: &'static str| {
             let mut headers = HeaderMap::new();
@@ -1112,6 +1332,399 @@ mod tests {
         assert!(authorize(&state, &headers("authorization", "Bearer secre")).is_err());
         assert!(authorize(&state, &headers("authorization", "Basic secret")).is_err());
         assert!(authorize(&state, &HeaderMap::new()).is_err());
+    }
+
+    mod limits {
+        use std::{
+            pin::Pin,
+            task::{Context, Poll},
+        };
+
+        use axum::body::{Bytes, HttpBody};
+        use tower::ServiceExt;
+
+        use super::*;
+
+        const BOUNDARY: &str = "glimpse-test-boundary";
+
+        pub(super) fn state(limits: ApiLimits) -> ApiState {
+            // A catalog that knows no models: every id is unknown.
+            let service = Arc::new(SpeechService::new(crate::service::SpeechConfig {
+                model_cache_dir: std::env::temp_dir().join("glimpse-speech-api-limits"),
+                resolver: Arc::new(|_| None),
+                loose_paths: false,
+            }));
+            ApiState {
+                provider: Arc::new(SpeechProvider::Local(Arc::clone(&service))),
+                service,
+                api_key: None,
+                loopback: false,
+                cors: false,
+                event_sink: None,
+                local_models: Arc::new(Vec::new()),
+                local_model_source: None,
+                transcriptions: Arc::new(Semaphore::new(limits.transcription_permits())),
+                limits,
+            }
+        }
+
+        fn multipart(fields: &[(&str, &[u8])]) -> Vec<u8> {
+            let mut body = Vec::new();
+            for (name, value) in fields {
+                let filename = if *name == "file" {
+                    "; filename=\"audio.wav\""
+                } else {
+                    ""
+                };
+                body.extend_from_slice(
+                    format!(
+                        "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"{name}\"{filename}\r\n\r\n"
+                    )
+                    .as_bytes(),
+                );
+                body.extend_from_slice(value);
+                body.extend_from_slice(b"\r\n");
+            }
+            body.extend_from_slice(format!("--{BOUNDARY}--\r\n").as_bytes());
+            body
+        }
+
+        fn request(body: Body) -> Request<Body> {
+            Request::post("/v1/audio/transcriptions")
+                .header(
+                    CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={BOUNDARY}"),
+                )
+                .body(body)
+                .unwrap()
+        }
+
+        async fn send(state: &ApiState, body: Body) -> (StatusCode, serde_json::Value) {
+            let response = router(state.clone()).oneshot(request(body)).await.unwrap();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (status, serde_json::from_slice(&bytes).unwrap_or_default())
+        }
+
+        /// A body whose first bytes arrive and the rest never does.
+        struct Stalled(Option<Bytes>);
+
+        impl HttpBody for Stalled {
+            type Data = Bytes;
+            type Error = std::convert::Infallible;
+
+            fn poll_frame(
+                mut self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+            ) -> Poll<Option<Result<http_body::Frame<Bytes>, Self::Error>>> {
+                match self.0.take() {
+                    Some(bytes) => Poll::Ready(Some(Ok(http_body::Frame::data(bytes)))),
+                    None => Poll::Pending,
+                }
+            }
+        }
+
+        fn stalled_upload() -> Body {
+            Body::new(Stalled(Some(Bytes::from(format!(
+                "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\n\r\nRIFF"
+            )))))
+        }
+
+        #[tokio::test]
+        async fn unknown_model_is_a_400() {
+            let state = state(ApiLimits::default());
+            let body = multipart(&[("model", b"/etc/hosts"), ("file", b"RIFF")]);
+            let (status, json) = send(&state, Body::from(body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(json["error"]["message"], "Unknown model: /etc/hosts");
+        }
+
+        #[tokio::test]
+        async fn a_model_that_is_not_installed_is_a_400() {
+            let mut state = state(ApiLimits::default());
+            let service = Arc::new(SpeechService::new(crate::service::SpeechConfig {
+                model_cache_dir: std::env::temp_dir().join("glimpse-speech-api-not-installed"),
+                resolver: Arc::new(|id| {
+                    (id == "known").then(|| crate::models::InstallSpec {
+                        id: id.to_string(),
+                        engine: crate::models::ModelEngine::Whisper,
+                        storage: crate::models::ModelStorage::Directory,
+                        files: vec![crate::models::RemoteFile {
+                            url: "https://example.test/ggml-known.bin".to_string(),
+                            path: "ggml-known.bin".to_string(),
+                            size_bytes: None,
+                            sha256: None,
+                            extract: false,
+                        }],
+                        variant: None,
+                    })
+                }),
+                loose_paths: false,
+            }));
+            state.provider = Arc::new(SpeechProvider::Local(Arc::clone(&service)));
+            state.service = service;
+            let body = multipart(&[("model", b"known"), ("file", b"RIFF")]);
+            let (status, json) = send(&state, Body::from(body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+            assert_eq!(json["error"]["type"], "invalid_request_error");
+            assert_eq!(
+                json["error"]["message"],
+                "known is not fully installed. Missing: ggml-known.bin"
+            );
+        }
+
+        #[tokio::test]
+        async fn oversized_text_fields_are_rejected() {
+            let state = state(ApiLimits {
+                max_text_field_bytes: 16,
+                ..ApiLimits::default()
+            });
+            let body = multipart(&[("prompt", &[b'a'; 17]), ("file", b"RIFF")]);
+            let (status, json) = send(&state, Body::from(body)).await;
+            assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{json}");
+
+            // Each field fits, but repeated fields add up past four times the limit.
+            let entry = [b'a'; 16];
+            let fields = vec![("dictionary", &entry[..]); TEXT_FIELDS_PER_REQUEST + 1];
+            let (status, json) = send(&state, Body::from(multipart(&fields))).await;
+            assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{json}");
+        }
+
+        #[tokio::test]
+        async fn oversized_uploads_are_rejected() {
+            let state = state(ApiLimits {
+                max_upload_bytes: 16,
+                ..ApiLimits::default()
+            });
+            let body = multipart(&[("model", b"m"), ("file", &[0u8; 17])]);
+            let (status, json) = send(&state, Body::from(body)).await;
+            assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{json}");
+        }
+
+        #[tokio::test]
+        async fn a_second_audio_file_is_rejected() {
+            let state = state(ApiLimits::default());
+            let body = multipart(&[("file", b"RIFF"), ("audio", b"RIFF")]);
+            let (status, _) = send(&state, Body::from(body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+        }
+
+        #[tokio::test]
+        async fn a_full_queue_answers_429() {
+            let state = state(ApiLimits {
+                max_queued_transcriptions: 1,
+                ..ApiLimits::default()
+            });
+            let stalled = tokio::spawn({
+                let state = state.clone();
+                async move { send(&state, stalled_upload()).await }
+            });
+            while state.transcriptions.available_permits() > 0 {
+                tokio::task::yield_now().await;
+            }
+
+            let body = multipart(&[("model", b"m"), ("file", b"RIFF")]);
+            let (status, json) = send(&state, Body::from(body)).await;
+            assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(json["error"]["type"], "rate_limit_error");
+
+            stalled.abort();
+            let _ = stalled.await;
+            assert_eq!(state.transcriptions.available_permits(), 1);
+        }
+
+        #[tokio::test]
+        async fn a_timed_out_transcription_frees_its_permit_and_upload_once_it_ends() {
+            let cache = std::env::temp_dir()
+                .join(format!("glimpse-speech-api-timeout-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&cache);
+            std::fs::create_dir_all(&cache).unwrap();
+            std::fs::write(cache.join("ggml-held.bin"), b"never loaded").unwrap();
+            let service = Arc::new(
+                SpeechService::new_loose_with_engine(
+                    cache.clone(),
+                    crate::models::ModelEngine::Whisper,
+                )
+                .only_cached_models(None),
+            );
+            let mut state = state(ApiLimits {
+                max_queued_transcriptions: 2,
+                request_timeout: Some(Duration::from_millis(100)),
+                ..ApiLimits::default()
+            });
+            state.provider = Arc::new(SpeechProvider::Local(Arc::clone(&service)));
+            state.service = Arc::clone(&service);
+            // A unique extension finds this test's upload among the temp files.
+            let extension = format!("held{}", std::process::id());
+            let uploads = || {
+                std::fs::read_dir(std::env::temp_dir())
+                    .unwrap()
+                    .flatten()
+                    .filter(|entry| entry.path().extension() == Some(OsStr::new(&extension)))
+                    .count()
+            };
+            let mut body = format!(
+                "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nggml-held.bin\r\n\
+                 --{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.{extension}\"\r\n\r\n"
+            )
+            .into_bytes();
+            // Audio that decodes, so the request gets as far as the engine.
+            let mut wav = std::io::Cursor::new(Vec::new());
+            let spec = hound::WavSpec {
+                channels: 1,
+                sample_rate: 16_000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            };
+            let mut writer = hound::WavWriter::new(&mut wav, spec).unwrap();
+            for _ in 0..1_600 {
+                writer.write_sample(0i16).unwrap();
+            }
+            writer.finalize().unwrap();
+            body.extend_from_slice(wav.get_ref());
+            body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
+
+            // The engine is busy, so the transcription queues behind it.
+            let engine = service.hold_engine();
+            let (status, json) = send(&state, Body::from(body)).await;
+            assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{json}");
+            assert_eq!(json["error"]["type"], "server_error");
+            assert_eq!(
+                json["error"]["message"],
+                "The transcription did not finish within 100 ms"
+            );
+            assert_eq!(state.transcriptions.available_permits(), 1);
+            assert_eq!(uploads(), 1);
+
+            // Past its deadline, the queued transcription gives up as soon as
+            // it gets the engine, and releases both.
+            drop(engine);
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while state.transcriptions.available_permits() < 2 {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("the permit comes back");
+            assert_eq!(uploads(), 0);
+            assert!(!service.is_loaded());
+            let _ = std::fs::remove_dir_all(&cache);
+        }
+
+        #[tokio::test]
+        async fn delete_removes_only_cached_model_directories() {
+            let cache = std::env::temp_dir()
+                .join(format!("glimpse-speech-api-delete-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&cache);
+            std::fs::create_dir_all(cache.join("whisper_base")).unwrap();
+            std::fs::write(cache.join("whisper_base/ggml-base.bin"), b"ggml").unwrap();
+            std::fs::write(cache.join("ggml-tiny.bin"), b"ggml").unwrap();
+            let service = Arc::new(
+                SpeechService::new_loose_with_engine(
+                    cache.clone(),
+                    crate::models::ModelEngine::Whisper,
+                )
+                .only_cached_models(None),
+            );
+            let mut state = state(ApiLimits::default());
+            state.provider = Arc::new(SpeechProvider::Local(Arc::clone(&service)));
+            state.service = service;
+            state.local_model_source = Some(Arc::new(Vec::new));
+            let delete = |id: &str| {
+                let request = Request::delete(format!("/v1/models/{id}"))
+                    .body(Body::empty())
+                    .unwrap();
+                let app = router(state.clone());
+                async move {
+                    let response = app.oneshot(request).await.unwrap();
+                    let status = response.status();
+                    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                        .await
+                        .unwrap();
+                    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    (status, json)
+                }
+            };
+
+            for id in ["ggml-tiny.bin", "missing", "%2E%2E"] {
+                let (status, json) = delete(id).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{id}: {json}");
+            }
+            assert!(cache.join("ggml-tiny.bin").is_file());
+
+            let (status, json) = delete("whisper_base").await;
+            assert_eq!(status, StatusCode::OK, "{json}");
+            assert_eq!(json["id"], "whisper_base");
+            assert_eq!(json["installed"], false);
+            assert!(!cache.join("whisper_base").exists());
+            assert!(cache.is_dir());
+            let _ = std::fs::remove_dir_all(&cache);
+        }
+
+        #[tokio::test]
+        async fn a_stalled_upload_times_out() {
+            let state = state(ApiLimits {
+                request_timeout: Some(Duration::from_millis(50)),
+                ..ApiLimits::default()
+            });
+            let (status, _) = send(&state, stalled_upload()).await;
+            assert_eq!(status, StatusCode::REQUEST_TIMEOUT);
+            assert_eq!(state.transcriptions.available_permits(), 4);
+        }
+    }
+
+    #[test]
+    fn describes_timeouts() {
+        let cases = [
+            (Duration::from_secs(900), "15 minutes"),
+            (Duration::from_secs(60), "1 minute"),
+            (Duration::from_secs(90), "90 seconds"),
+            (Duration::from_secs(1), "1 second"),
+            (Duration::from_millis(1500), "1.5 seconds"),
+            (Duration::from_millis(50), "50 ms"),
+            (Duration::from_micros(10), "1 ms"),
+        ];
+        for (duration, text) in cases {
+            assert_eq!(describe_duration(duration), text);
+        }
+    }
+
+    #[test]
+    fn huge_limits_saturate() {
+        let huge = ApiLimits {
+            max_upload_bytes: u64::MAX,
+            max_text_field_bytes: usize::MAX,
+            max_queued_transcriptions: usize::MAX,
+            request_timeout: None,
+        };
+        assert_eq!(huge.text_budget(), usize::MAX);
+        assert_eq!(huge.transcription_permits(), Semaphore::MAX_PERMITS);
+        assert_eq!(
+            ApiLimits {
+                max_queued_transcriptions: 0,
+                ..ApiLimits::default()
+            }
+            .transcription_permits(),
+            1
+        );
+        // Neither the body limit nor the semaphore overflows.
+        let _ = router(limits::state(huge));
+    }
+
+    #[test]
+    fn only_model_errors_are_client_errors() {
+        let wrapped = anyhow::Error::from(ModelError::InvalidModelId("a/b".to_string()))
+            .context("load the model");
+        assert_eq!(
+            map_local_transcribe_error(wrapped).0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            map_local_transcribe_error(anyhow!("Unknown model: lookalike")).0,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 
     #[test]
