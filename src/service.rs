@@ -54,6 +54,18 @@ impl AudioInput {
             } => Some(samples.len() as f32 / *sample_rate as f32),
         }
     }
+
+    // Decodes a file before the engine lock, so another request isn't held
+    // up behind ffmpeg or resampling.
+    #[cfg(local_engines)]
+    fn decoded(self) -> Result<Self> {
+        match self {
+            Self::WavPath(path) => crate::audio::read_audio_samples(&path)
+                .map(Self::Samples16Khz)
+                .map_err(boxed_error),
+            other => Ok(other),
+        }
+    }
 }
 
 // Audio shorter than this stays on the loaded CPU engine: on short clips the
@@ -77,6 +89,9 @@ pub struct SpeechService {
     loose_engine: ModelEngine,
     load_compiling_encoders: bool,
     loaded: Mutex<Option<LoadedEngine>>,
+    // One request decodes ahead while another transcribes; the rest wait
+    // without holding decoded audio.
+    decode_slot: Mutex<()>,
 }
 
 struct TranscriptionWithDuration {
@@ -179,6 +194,7 @@ impl SpeechService {
             loose_engine,
             load_compiling_encoders: false,
             loaded: Mutex::new(None),
+            decode_slot: Mutex::new(()),
         }
     }
 
@@ -232,7 +248,17 @@ impl SpeechService {
         let total_started = Instant::now();
         let requested_language = request.language.clone();
         let requested_model = request.model_id.clone();
+        let decode_slot = self
+            .decode_slot
+            .lock()
+            .map_err(|_| anyhow!("speech service lock poisoned"))?;
+        #[cfg(local_engines)]
+        let request = TranscribeRequest {
+            audio: request.audio.decoded()?,
+            ..request
+        };
         let mut guard = self.ensure_loaded(&requested_model)?;
+        drop(decode_slot);
         let loaded = loaded_engine(&mut guard)?;
         let resolved_id = loaded.model_id.clone();
         let long = request
@@ -463,6 +489,7 @@ impl Clone for SpeechService {
             loose_engine: self.loose_engine,
             load_compiling_encoders: self.load_compiling_encoders,
             loaded: Mutex::new(None),
+            decode_slot: Mutex::new(()),
         }
     }
 }

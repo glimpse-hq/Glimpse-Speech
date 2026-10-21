@@ -413,10 +413,9 @@ async fn transcribe(
         .transcribe(request)
         .await
         .map(|response| {
-            state.log("info", format!("Transcribed with {}", response.model_id));
             state.log_model(
                 "info",
-                format!("Loaded model {}", response.model_id),
+                format!("Transcribed with {}", response.model_id),
                 &response.model_id,
             );
             format_transcription_response(response, response_format, &timestamp_granularities)
@@ -882,7 +881,8 @@ fn map_transcribe_error(error: TranscribeError) -> ApiError {
 }
 
 fn map_local_transcribe_error(error: anyhow::Error) -> ApiError {
-    if error.to_string().starts_with("Unknown model:") {
+    let message = error.to_string();
+    if message.starts_with("Unknown model:") || message.starts_with("Invalid model id:") {
         map_error(error)
     } else {
         map_server_error(error)
