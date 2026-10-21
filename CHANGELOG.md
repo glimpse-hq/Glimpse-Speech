@@ -34,6 +34,7 @@
 - A download that keeps failing reports "Network interrupted while downloading <file>" with the network error as its cause; the readable message used to be buried under the network error.
 - Whole Nemotron recordings decide between the CPU engine and the GPU copy by the decoded audio's length, so long MP3, M4A, Ogg and FLAC uploads (decoded by ffmpeg) use the GPU copy like WAV does. The audio is decoded once instead of opening a WAV a second time, and PCM with a sample rate of 0 no longer counts as long.
 - A transcription on Nemotron's GPU copy no longer marks the CPU engine as warmed, so `preload_and_warm` still warms it.
+- `vad::analyze` sets its level boost from the loudest 100 ms windows after skipping the top tenth, instead of from the single loudest one. A few clicks or bumps in a quiet recording no longer hold back the gain, so Silero hears quiet speech around them.
 
 ## 2.0.6
 

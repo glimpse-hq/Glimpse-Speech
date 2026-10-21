@@ -442,6 +442,7 @@ const STREAM_HISTORY_FRAMES: usize = 64;
 const LOUDNESS_WINDOW: usize = 1_600; // 100 ms
 const GAIN_TARGET: f32 = 0.1; // -20 dBFS
 const MAX_GAIN: f32 = 31.62; // +30 dB
+const LOUD_SKIP: f64 = 0.1;
 
 /// Silero's speech probability for each 32 ms frame of a recording.
 pub struct Speech {
@@ -463,20 +464,21 @@ pub fn analyze(samples: &[i16], sample_rate: u32) -> Option<Speech> {
     })
 }
 
-/// Raises a quiet recording so its loudest 100 ms sits near -20 dBFS, by at
-/// most 30 dB. Silero misses quiet single words at their recorded level.
+/// Raises a quiet recording so its loud 100 ms windows sit near -20 dBFS, by
+/// at most 30 dB. Silero misses quiet single words at their recorded level.
+/// The level skips the loudest tenth of windows, so a few clicks or bumps do
+/// not hold back the gain for the speech around it.
 fn even_out(audio: &mut [f32]) {
-    let window = LOUDNESS_WINDOW.min(audio.len());
-    if window == 0 {
+    let mut energies: Vec<f64> = audio
+        .chunks(LOUDNESS_WINDOW)
+        .map(|w| w.iter().map(|&s| f64::from(s * s)).sum::<f64>() / w.len() as f64)
+        .collect();
+    if energies.is_empty() {
         return;
     }
-    let mut energy: f64 = audio[..window].iter().map(|&s| f64::from(s * s)).sum();
-    let mut loudest = energy;
-    for i in window..audio.len() {
-        energy += f64::from(audio[i] * audio[i]) - f64::from(audio[i - window] * audio[i - window]);
-        loudest = loudest.max(energy);
-    }
-    let rms = (loudest.max(0.0) / window as f64).sqrt() as f32;
+    energies.sort_by(f64::total_cmp);
+    let index = energies.len() - 1 - (energies.len() as f64 * LOUD_SKIP) as usize;
+    let rms = energies[index].max(0.0).sqrt() as f32;
     if rms <= 0.0 {
         return;
     }
