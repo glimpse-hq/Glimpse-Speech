@@ -1085,6 +1085,14 @@ fn map_transcribe_error(error: TranscribeError) -> ApiError {
 fn map_local_transcribe_error(error: anyhow::Error) -> ApiError {
     if error.chain().any(|cause| cause.is::<ModelError>()) {
         map_error(error)
+    } else if error
+        .chain()
+        .any(|cause| cause.is::<crate::service::DeadlinePassed>())
+    {
+        (
+            StatusCode::GATEWAY_TIMEOUT,
+            Json(typed_error_body(error.to_string(), "server_error")),
+        )
     } else {
         map_server_error(error)
     }

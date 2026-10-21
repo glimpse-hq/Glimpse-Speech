@@ -687,11 +687,14 @@ fn load_engine(
     }
 }
 
+/// A queued transcription whose deadline passed before it started.
+#[derive(Debug, thiserror::Error)]
+#[error("The transcription timed out waiting for the engine (model {0})")]
+pub(crate) struct DeadlinePassed(String);
+
 fn check_deadline(deadline: Option<Instant>, model_id: &str) -> Result<()> {
     if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-        return Err(anyhow!(
-            "The transcription timed out waiting for the engine (model {model_id})"
-        ));
+        return Err(DeadlinePassed(model_id.to_string()).into());
     }
     Ok(())
 }
