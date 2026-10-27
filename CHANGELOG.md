@@ -19,6 +19,7 @@
 
 ### Changed
 
+- transcribe.cpp is pinned to `352b27fb` (glimpse-hq main: upstream 0.4.1 with decoder-only Whisper GGUFs). Model weights are memory-mapped on macOS, so loaded models use less memory.
 - `models::infer_engine` only takes `apple` and `apple_speech` as Apple Speech. Other names containing "apple" used to resolve to the OS model without a cache lookup; now they are files like any other, and `resolve_cached` rejects them unless the cache has them.
 - Parakeet TDT's dropped-speech check runs Silero once over the whole recording, reading the samples in place, instead of a minute at a time through a 16-bit copy. Silero no longer restarts every minute, where it missed the first few hundred milliseconds of speech after each minute mark; on two 10 minute recordings the regions changed by 1.2 and 2.3 seconds in total, mostly there, at the same speed.
 
@@ -44,7 +45,7 @@
 
 ### Changed
 
-- transcribe.cpp is pinned to `352b27fb` (glimpse-hq main: upstream 0.4.1 with decoder-only Whisper GGUFs). Model weights are memory-mapped on macOS, so loaded models use less memory.
+- transcribe.cpp is pinned to `95e3eff8` (glimpse-hq main: decoder-only Whisper GGUFs on top of upstream 0.4.0).
 
 ## 2.0.5
 
