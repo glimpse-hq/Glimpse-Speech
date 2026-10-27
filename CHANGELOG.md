@@ -8,6 +8,7 @@
 - `SpeechConfig` has a new `loose_paths` field, set by `SpeechConfig::loose`. A service resolves ids outside its catalog as paths only when it is true, so configs built as struct literals need `loose_paths: false`.
 - `SpeechService::streaming_configure` returns `Result<()>`. When the model fails to load it returns the error, where it used to drop it and leave the next stream unconfigured.
 - `SpeechService::delete` (and `DELETE /v1/models/{id}`) looks the id up first: a catalog service deletes only catalog models, a service with `only_cached_models` only model directories in the cache. Anything else is `Unknown model`, where it used to remove any directory in the models dir with a valid name.
+- `ApiEvent` replaces `model_id` with `kind`, an `ApiEventKind`, and is `#[non_exhaustive]`.
 
 ### Added
 
@@ -16,6 +17,7 @@
 - `api::ApiLimits` and `api::serve_with_limits`, and `serve`'s `--max-upload-mib`, `--max-queued` and `--request-timeout`.
 - `SpeechService::transcribe_before` and `SpeechProvider::transcribe_before`: a transcription still waiting for the engine when its deadline passes fails instead of starting.
 - `models::ModelError`, returned (inside the `anyhow::Error`) when a model id names no usable model: `UnknownModel`, `InvalidModelId`, `NotInstalled` and `NotGguf`. The messages are unchanged.
+- `api::ApiEventKind` (`Listening`, `Request`, `Transcribed`, `Busy`) and `api::ApiRoute`, so API event consumers don't have to match log text.
 
 ### Changed
 

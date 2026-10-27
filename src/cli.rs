@@ -11,9 +11,9 @@ use directories::ProjectDirs;
 use crate::{
     TimestampGranularity, Transcription,
     api::{
-        ApiConfig, ApiEventSink, ApiLimits, ApiModelInfo, DEFAULT_MAX_QUEUED_TRANSCRIPTIONS,
-        DEFAULT_MAX_UPLOAD_MIB, DEFAULT_REQUEST_TIMEOUT_SECS, ResponseFormat, format_srt,
-        format_vtt, verbose_response,
+        ApiConfig, ApiEventKind, ApiEventSink, ApiLimits, ApiModelInfo,
+        DEFAULT_MAX_QUEUED_TRANSCRIPTIONS, DEFAULT_MAX_UPLOAD_MIB, DEFAULT_REQUEST_TIMEOUT_SECS,
+        ResponseFormat, format_srt, format_vtt, verbose_response,
     },
     models::{
         InstallSpec, ModelEngine, ModelInstallManager, ModelStatus, ModelStorage, RemoteFile,
@@ -22,7 +22,6 @@ use crate::{
 };
 
 const CACHE_DIR_ENV: &str = "GLIMPSE_SPEECH_CACHE_DIR";
-const LISTENING_PREFIX: &str = "Local API listening on ";
 
 fn default_cache_dir() -> PathBuf {
     if let Ok(value) = std::env::var(CACHE_DIR_ENV) {
@@ -352,8 +351,8 @@ impl ServeBanner {
 
 fn serve_event_sink(banner: ServeBanner) -> ApiEventSink {
     Arc::new(move |event| {
-        if let Some(base_url) = event.message.strip_prefix(LISTENING_PREFIX) {
-            println!("{}", banner.render(base_url));
+        if let ApiEventKind::Listening { addr } = event.kind {
+            println!("{}", banner.render(&format!("http://{addr}")));
         }
     })
 }

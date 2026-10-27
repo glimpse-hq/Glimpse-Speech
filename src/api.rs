@@ -149,12 +149,37 @@ struct ApiState {
 pub type ApiEventSink = Arc<dyn Fn(ApiEvent) + Send + Sync + 'static>;
 pub type ApiModelSource = Arc<dyn Fn() -> Vec<ApiModelInfo> + Send + Sync + 'static>;
 
+/// A server event. `message` is for people; match on `kind` instead of its text.
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct ApiEvent {
     pub level: &'static str,
+    pub kind: ApiEventKind,
     pub message: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ApiEventKind {
+    /// The server accepts connections on `addr`.
+    Listening { addr: SocketAddr },
+    /// An authorized request reached `route`.
+    Request { route: ApiRoute },
+    /// A transcription request finished with `model_id`.
+    Transcribed { model_id: String },
+    /// A transcription was turned away with a 429.
+    Busy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ApiRoute {
+    ListModels,
+    InstallModel,
+    DeleteModel,
+    Transcriptions,
 }
 
 #[derive(Debug, Serialize)]
@@ -328,7 +353,11 @@ pub async fn serve_with_limits(
         transcriptions: Arc::new(Semaphore::new(limits.transcription_permits())),
         limits,
     };
-    state.log("info", format!("Local API listening on http://{addr}"));
+    state.emit(
+        "info",
+        ApiEventKind::Listening { addr },
+        format!("Local API listening on http://{addr}"),
+    );
 
     axum::serve(listener, router(state))
         .with_graceful_shutdown(shutdown)
@@ -388,7 +417,7 @@ async fn list_models(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     authorize(&state, &headers)?;
-    state.log("info", "GET /v1/models".to_string());
+    state.request(ApiRoute::ListModels, "GET /v1/models".to_string());
     if let Some(remote_ids) = state.provider.remote_model_ids().await {
         let remote_ids = remote_ids.map_err(map_transcribe_error)?;
         let data = remote_ids.into_iter().map(remote_model).collect::<Vec<_>>();
@@ -418,7 +447,10 @@ async fn install_model(
     Path(id): Path<String>,
 ) -> Result<Json<InstallResponse>, ApiError> {
     authorize(&state, &headers)?;
-    state.log("info", format!("POST /v1/models/{id}/install"));
+    state.request(
+        ApiRoute::InstallModel,
+        format!("POST /v1/models/{id}/install"),
+    );
     let progress = Arc::new(Mutex::new(Vec::new()));
     let progress_events = Arc::clone(&progress);
     let callback = |event: ModelDownloadProgress| {
@@ -452,7 +484,7 @@ async fn delete_model(
     Path(id): Path<String>,
 ) -> Result<Json<crate::models::ModelStatus>, ApiError> {
     authorize(&state, &headers)?;
-    state.log("info", format!("DELETE /v1/models/{id}"));
+    state.request(ApiRoute::DeleteModel, format!("DELETE /v1/models/{id}"));
     state.service.delete(&id).map(Json).map_err(map_error)
 }
 
@@ -462,7 +494,10 @@ async fn transcribe(
     request: Request<Body>,
 ) -> Result<Response, ApiError> {
     authorize(&state, &headers)?;
-    state.log("info", "POST /v1/audio/transcriptions".to_string());
+    state.request(
+        ApiRoute::Transcriptions,
+        "POST /v1/audio/transcriptions".to_string(),
+    );
     let content_type = headers
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
@@ -476,8 +511,9 @@ async fn transcribe(
 
     // Taken before the upload, so it also bounds concurrent uploads.
     let Ok(permit) = Arc::clone(&state.transcriptions).try_acquire_owned() else {
-        state.log(
+        state.emit(
             "warn",
+            ApiEventKind::Busy,
             "Rejected a transcription: too many in progress".to_string(),
         );
         return Err((
@@ -538,10 +574,12 @@ async fn transcribe(
 
     result
         .map(|response| {
-            state.log_model(
+            state.emit(
                 "info",
+                ApiEventKind::Transcribed {
+                    model_id: response.model_id.clone(),
+                },
                 format!("Transcribed with {}", response.model_id),
-                &response.model_id,
             );
             format_transcription_response(response, response_format, &timestamp_granularities)
         })
@@ -577,20 +615,16 @@ async fn before<F: Future>(deadline: Option<Instant>, future: F) -> Option<F::Ou
 }
 
 impl ApiState {
-    fn log(&self, level: &'static str, message: String) {
-        self.emit(level, message, None);
+    fn request(&self, route: ApiRoute, message: String) {
+        self.emit("info", ApiEventKind::Request { route }, message);
     }
 
-    fn log_model(&self, level: &'static str, message: String, model_id: &str) {
-        self.emit(level, message, Some(model_id.to_string()));
-    }
-
-    fn emit(&self, level: &'static str, message: String, model_id: Option<String>) {
+    fn emit(&self, level: &'static str, kind: ApiEventKind, message: String) {
         if let Some(sink) = &self.event_sink {
             sink(ApiEvent {
                 level,
+                kind,
                 message,
-                model_id,
             });
         }
     }
