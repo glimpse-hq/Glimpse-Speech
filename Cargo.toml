@@ -55,16 +55,16 @@ tower = { version = "0.5", features = ["util"] }
 libc = "0.2"
 
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
-transcribe-cpp = { git = "https://github.com/glimpse-hq/transcribe.cpp.git", rev = "95e3eff8b2b58361b51d96a4f2077ed770aee9f0", default-features = false, features = ["metal", "coreml"], optional = true }
+transcribe-cpp = { git = "https://github.com/glimpse-hq/transcribe.cpp.git", rev = "352b27fb1b6c552dd261ad9de988b2a909046f0a", default-features = false, features = ["metal", "coreml"], optional = true }
 
 [target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
-transcribe-cpp = { git = "https://github.com/glimpse-hq/transcribe.cpp.git", rev = "95e3eff8b2b58361b51d96a4f2077ed770aee9f0", default-features = false, features = ["metal"], optional = true }
+transcribe-cpp = { git = "https://github.com/glimpse-hq/transcribe.cpp.git", rev = "352b27fb1b6c552dd261ad9de988b2a909046f0a", default-features = false, features = ["metal"], optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-transcribe-cpp = { git = "https://github.com/glimpse-hq/transcribe.cpp.git", rev = "95e3eff8b2b58361b51d96a4f2077ed770aee9f0", default-features = false, features = ["vulkan"], optional = true }
+transcribe-cpp = { git = "https://github.com/glimpse-hq/transcribe.cpp.git", rev = "352b27fb1b6c552dd261ad9de988b2a909046f0a", default-features = false, features = ["vulkan"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-transcribe-cpp = { git = "https://github.com/glimpse-hq/transcribe.cpp.git", rev = "95e3eff8b2b58361b51d96a4f2077ed770aee9f0", default-features = false, features = ["vulkan"], optional = true }
+transcribe-cpp = { git = "https://github.com/glimpse-hq/transcribe.cpp.git", rev = "352b27fb1b6c552dd261ad9de988b2a909046f0a", default-features = false, features = ["vulkan"], optional = true }
 
 [[example]]
 name = "apple_speech"

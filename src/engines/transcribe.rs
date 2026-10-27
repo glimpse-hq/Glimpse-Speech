@@ -258,6 +258,7 @@ impl TranscriptionEngine for TranscribeEngine {
             &ModelOptions {
                 backend: params.backend,
                 device: None,
+                no_mmap: cfg!(windows), // Windows can't delete a mapped model file
             },
         )
         .map_err(transcribe_error)?;

@@ -44,7 +44,7 @@
 
 ### Changed
 
-- transcribe.cpp is pinned to `95e3eff8` (glimpse-hq main: decoder-only Whisper GGUFs on top of upstream 0.4.0).
+- transcribe.cpp is pinned to `352b27fb` (glimpse-hq main: upstream 0.4.1 with decoder-only Whisper GGUFs). Model weights are memory-mapped on macOS, so loaded models use less memory.
 
 ## 2.0.5
 

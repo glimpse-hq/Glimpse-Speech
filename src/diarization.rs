@@ -149,6 +149,7 @@ fn open_session(model_path: &Path, use_gpu: bool) -> Result<DiarizeSession, Erro
         &ModelOptions {
             backend: if use_gpu { Backend::Auto } else { Backend::Cpu },
             device: None,
+            no_mmap: cfg!(windows), // Windows can't delete a mapped model file
         },
     )
     .map_err(transcribe_error)?;
