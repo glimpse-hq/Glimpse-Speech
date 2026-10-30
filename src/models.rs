@@ -418,10 +418,6 @@ impl ModelInstallManager {
             tokio::fs::create_dir_all(parent).await?;
         }
 
-        if file_ready(target_dir, file) {
-            return Ok(false);
-        }
-
         // Bytes land beside the target and move into place only once complete,
         // so an interrupted download resumes instead of passing as installed.
         let download_path = target_dir.join(format!(
@@ -429,6 +425,11 @@ impl ModelInstallManager {
             file.path,
             if file.extract { "zip" } else { "part" }
         ));
+        if file_ready(target_dir, file) {
+            // Left behind when a copied download could not be removed.
+            let _ = fs::remove_file(&download_path);
+            return Ok(false);
+        }
         let mut downloaded = fs::metadata(&download_path).map_or(0, |m| m.len());
         let mut total_size: u64 = file.size_bytes.unwrap_or(0);
         let mut retries = 0usize;
@@ -609,14 +610,20 @@ impl ModelInstallManager {
                             }
                             _ => false,
                         };
-                        if file.extract {
-                            extract_archive(&download_path, &target_path, file, sha_verified)
-                                .with_context(|| format!("extract {}", file.path))?;
-                        } else {
-                            replace_existing_path(&download_path, &target_path).with_context(
-                                || format!("replace model file {}", target_path.display()),
-                            )?;
-                        }
+                        // Extracting or a cross-device copy must not stall the async runtime.
+                        let file = file.clone();
+                        tokio::task::spawn_blocking(move || {
+                            if file.extract {
+                                extract_archive(&download_path, &target_path, &file, sha_verified)
+                                    .with_context(|| format!("extract {}", file.path))
+                            } else {
+                                replace_existing_path(&download_path, &target_path).with_context(
+                                    || format!("replace model file {}", target_path.display()),
+                                )
+                            }
+                        })
+                        .await
+                        .map_err(|err| anyhow!("install task failed: {err}"))??;
                         return Ok(sha_verified);
                     }
                     Err(err) => {
@@ -805,6 +812,9 @@ fn missing_files(dir: &Path, spec: &InstallSpec) -> Vec<String> {
 
 fn file_ready(dir: &Path, file: &RemoteFile) -> bool {
     let path = dir.join(&file.path);
+    if copy_marker_path(&path).exists() {
+        return false;
+    }
     if file.extract {
         return path.is_dir() && verify_extracted_dir(dir, file).is_ok();
     }
@@ -1045,18 +1055,22 @@ fn extract_zip(zip_path: &Path, target_dir: &Path) -> Result<()> {
 
 fn replace_existing_path(source: &Path, target: &Path) -> io::Result<()> {
     if !target.exists() {
-        return fs::rename(source, target);
+        return move_path(source, target);
     }
 
     let backup = sibling_temp_path(target, "backup");
-    fs::rename(target, &backup)?;
-    match fs::rename(source, target) {
+    match fs::rename(target, &backup) {
+        Ok(()) => {}
+        // Only a target that failed file_ready() gets replaced, so dropping it loses nothing.
+        Err(err) if err.kind() == io::ErrorKind::CrossesDevices => {
+            remove_path(target)?;
+            return move_path(source, target);
+        }
+        Err(err) => return Err(err),
+    }
+    match move_path(source, target) {
         Ok(()) => {
-            let _ = if backup.is_dir() {
-                fs::remove_dir_all(&backup)
-            } else {
-                fs::remove_file(&backup)
-            };
+            let _ = remove_path(&backup);
             Ok(())
         }
         Err(rename_error) => {
@@ -1069,6 +1083,66 @@ fn replace_existing_path(source: &Path, target: &Path) -> io::Result<()> {
             }
             Err(rename_error)
         }
+    }
+}
+
+// MSIX file virtualization can back two paths in one folder with different
+// volumes, so the rename fails with ERROR_NOT_SAME_DEVICE. The source stays
+// until the copy is whole, and file_ready() rejects the target while the copy
+// marker exists.
+fn move_path(source: &Path, target: &Path) -> io::Result<()> {
+    let marker = copy_marker_path(target);
+    match fs::rename(source, target) {
+        Ok(()) => {
+            // Left by a copy that was cut short.
+            let _ = fs::remove_file(&marker);
+            Ok(())
+        }
+        Err(err) if err.kind() == io::ErrorKind::CrossesDevices && !target.exists() => {
+            tracing::warn!("[models] copying {} into place: {err}", target.display());
+            fs::write(&marker, b"")?;
+            if let Err(copy_error) = copy_path(source, target) {
+                let _ = remove_path(target);
+                let _ = fs::remove_file(&marker);
+                return Err(copy_error);
+            }
+            fs::remove_file(&marker)?;
+            if let Err(err) = remove_path(source) {
+                tracing::warn!("[models] could not remove {}: {err}", source.display());
+            }
+            Ok(())
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn copy_path(source: &Path, target: &Path) -> io::Result<()> {
+    if !source.is_dir() {
+        let mut output = fs::File::create_new(target)?;
+        io::copy(&mut fs::File::open(source)?, &mut output)?;
+        return output.sync_all();
+    }
+    fs::create_dir(target)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        copy_path(&entry.path(), &target.join(entry.file_name()))?;
+    }
+    Ok(())
+}
+
+fn copy_marker_path(target: &Path) -> PathBuf {
+    let name = target
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    target.with_file_name(format!(".{name}.copying"))
+}
+
+fn remove_path(path: &Path) -> io::Result<()> {
+    if path.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
     }
 }
 
