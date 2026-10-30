@@ -610,14 +610,20 @@ impl ModelInstallManager {
                             }
                             _ => false,
                         };
-                        if file.extract {
-                            extract_archive(&download_path, &target_path, file, sha_verified)
-                                .with_context(|| format!("extract {}", file.path))?;
-                        } else {
-                            replace_existing_path(&download_path, &target_path).with_context(
-                                || format!("replace model file {}", target_path.display()),
-                            )?;
-                        }
+                        // Extracting or a cross-device copy must not stall the async runtime.
+                        let file = file.clone();
+                        tokio::task::spawn_blocking(move || {
+                            if file.extract {
+                                extract_archive(&download_path, &target_path, &file, sha_verified)
+                                    .with_context(|| format!("extract {}", file.path))
+                            } else {
+                                replace_existing_path(&download_path, &target_path).with_context(
+                                    || format!("replace model file {}", target_path.display()),
+                                )
+                            }
+                        })
+                        .await
+                        .map_err(|err| anyhow!("install task failed: {err}"))??;
                         return Ok(sha_verified);
                     }
                     Err(err) => {
@@ -806,6 +812,9 @@ fn missing_files(dir: &Path, spec: &InstallSpec) -> Vec<String> {
 
 fn file_ready(dir: &Path, file: &RemoteFile) -> bool {
     let path = dir.join(&file.path);
+    if copy_marker_path(&path).exists() {
+        return false;
+    }
     if file.extract {
         return path.is_dir() && verify_extracted_dir(dir, file).is_ok();
     }
@@ -886,8 +895,6 @@ fn extract_archive(
         }
         let manifest = collect_extraction_manifest(&staged)
             .with_context(|| format!("index extracted contents of {}", file.path))?;
-        // A stale manifest could pass a partly copied directory.
-        let _ = fs::remove_file(extraction_manifest_path(target_path));
         replace_existing_path(&staged, target_path)?;
         fs::write(
             extraction_manifest_path(target_path),
@@ -1081,27 +1088,36 @@ fn replace_existing_path(source: &Path, target: &Path) -> io::Result<()> {
 
 // MSIX file virtualization can back two paths in one folder with different
 // volumes, so the rename fails with ERROR_NOT_SAME_DEVICE. The source stays
-// until the copy is whole, and file_ready() rejects a short copy of a sized file.
+// until the copy is whole, and file_ready() rejects the target while the copy
+// marker exists.
 fn move_path(source: &Path, target: &Path) -> io::Result<()> {
+    let marker = copy_marker_path(target);
     match fs::rename(source, target) {
+        Ok(()) => {
+            // Left by a copy that was cut short.
+            let _ = fs::remove_file(&marker);
+            Ok(())
+        }
         Err(err) if err.kind() == io::ErrorKind::CrossesDevices && !target.exists() => {
             tracing::warn!("[models] copying {} into place: {err}", target.display());
+            fs::write(&marker, b"")?;
             if let Err(copy_error) = copy_path(source, target) {
                 let _ = remove_path(target);
+                let _ = fs::remove_file(&marker);
                 return Err(copy_error);
             }
+            fs::remove_file(&marker)?;
             if let Err(err) = remove_path(source) {
                 tracing::warn!("[models] could not remove {}: {err}", source.display());
             }
             Ok(())
         }
-        result => result,
+        Err(err) => Err(err),
     }
 }
 
 fn copy_path(source: &Path, target: &Path) -> io::Result<()> {
     if !source.is_dir() {
-        // Written in order, so a cut-short copy stays short for file_ready().
         let mut output = fs::File::create_new(target)?;
         io::copy(&mut fs::File::open(source)?, &mut output)?;
         return output.sync_all();
@@ -1112,6 +1128,14 @@ fn copy_path(source: &Path, target: &Path) -> io::Result<()> {
         copy_path(&entry.path(), &target.join(entry.file_name()))?;
     }
     Ok(())
+}
+
+fn copy_marker_path(target: &Path) -> PathBuf {
+    let name = target
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    target.with_file_name(format!(".{name}.copying"))
 }
 
 fn remove_path(path: &Path) -> io::Result<()> {
