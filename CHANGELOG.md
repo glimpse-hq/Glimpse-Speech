@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- `ModelInstallManager::install` copies a finished download into place when the rename fails with a cross-device error, which MSIX file virtualization can return for two paths in one folder. On some Microsoft Store installs of Glimpse every model download failed this way.
+
 ## 3.0.0
 
 ### Breaking
