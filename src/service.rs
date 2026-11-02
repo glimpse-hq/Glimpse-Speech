@@ -377,6 +377,12 @@ impl SpeechService {
         })
     }
 
+    /// Loads the model without running it, so a caller can tell loading
+    /// apart from transcribing.
+    pub fn preload(&self, model_id: &str) -> Result<()> {
+        self.ensure_loaded(model_id).map(|_| ())
+    }
+
     pub fn preload_and_warm(&self, model_id: &str) -> Result<()> {
         let total_started = Instant::now();
         let mut guard = self.ensure_loaded(model_id)?;
