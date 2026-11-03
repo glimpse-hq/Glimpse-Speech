@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.0.2
+
+### Added
+
+- `SpeechService::preload` loads a model without the warm-up transcription `preload_and_warm` runs, so a caller can report loading separately from transcribing.
+
 ## 3.0.1
 
 ### Fixed
