@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.0.3
+
+### Fixed
+
+- A transcription request during live dictation no longer ends the stream and drops what was dictated so far. It runs on a second copy of the model.
+- `SpeechService::streaming_finalize` ends the stream, so the next chunk starts a new one. On transcribe.cpp models every chunk after it failed until `streaming_reset`.
+- When Apple Speech fails to finish a stream, `streaming_finalize` returns the text heard so far instead of an empty string.
+- A remote endpoint that rejects both `verbose_json` and diarization no longer gets a third request with `verbose_json`.
+
 ## 3.0.2
 
 ### Added

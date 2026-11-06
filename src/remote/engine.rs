@@ -252,14 +252,16 @@ impl RemoteEngine {
             }
             if diarize && is_diarize_unsupported(&err) {
                 diarize = false;
-                let plan = plan_request(
-                    &profile,
-                    params.timestamps,
-                    params.timestamp_granularity,
-                    false,
-                );
-                effective_format = plan.response_format;
-                granularities = plan.timestamp_granularities;
+                if effective_format == plan.response_format {
+                    let plan = plan_request(
+                        &profile,
+                        params.timestamps,
+                        params.timestamp_granularity,
+                        false,
+                    );
+                    effective_format = plan.response_format;
+                    granularities = plan.timestamp_granularities;
+                }
                 continue;
             }
             return Err(err);
