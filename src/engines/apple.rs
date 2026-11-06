@@ -169,7 +169,6 @@ impl AppleEngine {
         let Some(handle) = self.stream else {
             return Ok(self.stream_text.clone());
         };
-        // Finishing removes the session, so its text is read first.
         self.stream_text = self.get_transcript();
         self.stream = None;
         self.stream_text = Self::finish_stream(handle)?.text;

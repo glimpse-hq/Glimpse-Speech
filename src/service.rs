@@ -538,7 +538,6 @@ impl SpeechService {
         {
             self.load_gpu_copy(loaded);
         }
-        // transcribe.cpp refuses to run a model while it streams.
         let keep = batch_long.is_some_and(|long| {
             guard.as_ref().is_some_and(|loaded| {
                 let gpu_serves = long && same(loaded) && loaded.batch_engine.is_some();
