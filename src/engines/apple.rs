@@ -89,6 +89,7 @@ pub struct AppleEngine {
     stream: Option<i64>,
     stream_language: Option<String>,
     stream_dictionary: Vec<String>,
+    stream_text: String,
 }
 
 fn vocabulary_cstring(terms: &[String]) -> CString {
@@ -131,14 +132,17 @@ impl AppleEngine {
     pub fn transcribe_chunk(&mut self, chunk: &[f32]) -> Result<(), Box<dyn Error>> {
         let handle = match self.stream {
             Some(handle) => handle,
-            None => *self.stream.insert(
-                start_session(
-                    self.stream_language.as_deref(),
-                    false,
-                    &self.stream_dictionary,
+            None => {
+                self.stream_text.clear();
+                *self.stream.insert(
+                    start_session(
+                        self.stream_language.as_deref(),
+                        false,
+                        &self.stream_dictionary,
+                    )
+                    .ok_or("failed to start apple speech session")?,
                 )
-                .ok_or("failed to start apple speech session")?,
-            ),
+            }
         };
         let status = unsafe { gs_apple_stream_feed(handle, chunk.as_ptr(), chunk.len()) };
         if status != 0 {
@@ -147,24 +151,35 @@ impl AppleEngine {
         Ok(())
     }
 
+    pub fn is_streaming(&self) -> bool {
+        self.stream.is_some()
+    }
+
     pub fn get_transcript(&self) -> String {
-        self.stream
-            .and_then(|handle| take_string(unsafe { gs_apple_stream_text(handle) }))
-            .unwrap_or_default()
+        match self.stream {
+            Some(handle) => {
+                take_string(unsafe { gs_apple_stream_text(handle) }).unwrap_or_default()
+            }
+            None => self.stream_text.clone(),
+        }
     }
 
     /// Ends the stream and returns the fully finalized transcript.
     pub fn finalize(&mut self) -> Result<String, Box<dyn Error>> {
-        let Some(handle) = self.stream.take() else {
-            return Ok(String::new());
+        let Some(handle) = self.stream else {
+            return Ok(self.stream_text.clone());
         };
-        Ok(Self::finish_stream(handle)?.text)
+        self.stream_text = self.get_transcript();
+        self.stream = None;
+        self.stream_text = Self::finish_stream(handle)?.text;
+        Ok(self.stream_text.clone())
     }
 
     pub fn reset(&mut self) {
         if let Some(handle) = self.stream.take() {
             unsafe { gs_apple_stream_cancel(handle) };
         }
+        self.stream_text.clear();
     }
 }
 

@@ -129,6 +129,17 @@ enum EngineInstance {
     Transcribe(crate::engines::transcribe::TranscribeEngine),
 }
 
+impl EngineInstance {
+    fn is_streaming(&self) -> bool {
+        match *self {
+            #[cfg(apple_speech_engine)]
+            Self::Apple(ref engine) => engine.is_streaming(),
+            #[cfg(transcribe_engine)]
+            Self::Transcribe(ref engine) => engine.is_streaming(),
+        }
+    }
+}
+
 #[cfg(streaming_engines)]
 impl EngineInstance {
     fn streaming_transcribe_chunk(&mut self, chunk: &[f32]) -> Result<String> {
@@ -320,19 +331,17 @@ impl SpeechService {
             .map_err(|_| anyhow!("speech service lock poisoned"))?;
         check_deadline(deadline, &requested_model)?;
         let audio = prepare_audio(audio)?;
-        let mut guard = self.ensure_loaded_before(&requested_model, deadline)?;
-        drop(decode_slot);
-        let loaded = loaded_engine(&mut guard)?;
-        let resolved_id = loaded.model_id.clone();
         let long = audio.duration_ms >= GPU_COPY_MIN_MS;
-        if long && let Some(resolved) = loaded.gpu_copy.take() {
-            match load_engine(&resolved, self.load_compiling_encoders, true) {
-                Ok(engine) => loaded.batch_engine = Some(engine),
-                Err(error) => tracing::warn!(
-                    "[SpeechService] {} stays on the CPU, its GPU copy failed to load: {error}",
-                    resolved.id
-                ),
-            }
+        let (mut guard, mut side) =
+            self.ensure_loaded_before(&requested_model, deadline, Some(long))?;
+        drop(decode_slot);
+        let loaded = match side.as_mut() {
+            Some(side) => side,
+            None => loaded_engine(&mut guard)?,
+        };
+        let resolved_id = loaded.model_id.clone();
+        if long {
+            self.load_gpu_copy(loaded);
         }
         let on_batch_engine = long && loaded.batch_engine.is_some();
         let engine = match loaded.batch_engine.as_mut() {
@@ -387,7 +396,7 @@ impl SpeechService {
         let total_started = Instant::now();
         let mut guard = self.ensure_loaded(model_id)?;
         let loaded = loaded_engine(&mut guard)?;
-        if loaded.warmed {
+        if loaded.warmed || loaded.engine.is_streaming() {
             tracing::info!(
                 "[SpeechService] warm model={} skipped already_warmed total={:.2}s",
                 model_id,
@@ -499,16 +508,19 @@ impl SpeechService {
     }
 
     fn ensure_loaded(&self, model_id: &str) -> Result<MutexGuard<'_, Option<LoadedEngine>>> {
-        self.ensure_loaded_before(model_id, None)
+        self.ensure_loaded_before(model_id, None, None)
+            .map(|(guard, _)| guard)
     }
 
     /// Fails without loading anything when `deadline` passed while waiting
-    /// for the engine.
+    /// for the engine. A batch, `Some(long)`, that needs the loaded engine
+    /// while it streams gets a second copy beside it instead of replacing it.
     fn ensure_loaded_before(
         &self,
         model_id: &str,
         deadline: Option<Instant>,
-    ) -> Result<MutexGuard<'_, Option<LoadedEngine>>> {
+        batch_long: Option<bool>,
+    ) -> Result<(MutexGuard<'_, Option<LoadedEngine>>, Option<LoadedEngine>)> {
         let total_started = Instant::now();
         let resolve_started = Instant::now();
         let resolved = self.resolve(model_id)?;
@@ -517,9 +529,22 @@ impl SpeechService {
         let mut guard = self.lock_loaded()?;
         let lock_wait = lock_started.elapsed();
         check_deadline(deadline, model_id)?;
-        let should_reload = guard
-            .as_ref()
-            .is_none_or(|loaded| loaded.model_id != resolved.id || loaded.path != resolved.path);
+        let same =
+            |loaded: &LoadedEngine| loaded.model_id == resolved.id && loaded.path == resolved.path;
+        if batch_long == Some(true)
+            && let Some(loaded) = guard.as_mut()
+            && same(loaded)
+            && loaded.engine.is_streaming()
+        {
+            self.load_gpu_copy(loaded);
+        }
+        let keep = batch_long.is_some_and(|long| {
+            guard.as_ref().is_some_and(|loaded| {
+                let gpu_serves = long && same(loaded) && loaded.batch_engine.is_some();
+                loaded.engine.is_streaming() && !gpu_serves
+            })
+        });
+        let should_reload = keep || guard.as_ref().is_none_or(|loaded| !same(loaded));
 
         if should_reload {
             let load_started = Instant::now();
@@ -533,25 +558,31 @@ impl SpeechService {
                 resolved.path.display(),
                 bytes
             );
-            *guard = None;
+            if !keep {
+                *guard = None;
+            }
             let engine = load_engine(&resolved, self.load_compiling_encoders, false)?;
             let load_elapsed = load_started.elapsed();
-            *guard = Some(LoadedEngine {
+            let loaded = LoadedEngine {
                 model_id: resolved.id.clone(),
                 path: resolved.path.clone(),
                 warmed: false,
                 engine,
                 gpu_copy: streams_on_cpu(&resolved).then(|| resolved.clone()),
                 batch_engine: None,
-            });
+            };
             tracing::info!(
-                "[SpeechService] ensure_loaded model={} reloaded=true total={:.2}s resolve={:.2}s lock_wait={:.2}s load={:.2}s",
+                "[SpeechService] ensure_loaded model={} reloaded=true beside_stream={keep} total={:.2}s resolve={:.2}s lock_wait={:.2}s load={:.2}s",
                 resolved.id,
                 total_started.elapsed().as_secs_f32(),
                 resolve_elapsed.as_secs_f32(),
                 lock_wait.as_secs_f32(),
                 load_elapsed.as_secs_f32()
             );
+            if keep {
+                return Ok((guard, Some(loaded)));
+            }
+            *guard = Some(loaded);
         } else {
             tracing::debug!(
                 "[SpeechService] ensure_loaded model={} reloaded=false total={:.2}s resolve={:.2}s lock_wait={:.2}s",
@@ -562,7 +593,19 @@ impl SpeechService {
             );
         }
 
-        Ok(guard)
+        Ok((guard, None))
+    }
+
+    fn load_gpu_copy(&self, loaded: &mut LoadedEngine) {
+        if let Some(resolved) = loaded.gpu_copy.take() {
+            match load_engine(&resolved, self.load_compiling_encoders, true) {
+                Ok(engine) => loaded.batch_engine = Some(engine),
+                Err(error) => tracing::warn!(
+                    "[SpeechService] {} stays on the CPU, its GPU copy failed to load: {error}",
+                    resolved.id
+                ),
+            }
+        }
     }
 
     fn lock_loaded(&self) -> Result<MutexGuard<'_, Option<LoadedEngine>>> {

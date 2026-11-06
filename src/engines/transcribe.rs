@@ -172,7 +172,10 @@ impl TranscribeEngine {
                 };
             }
             match begun {
-                Ok(stream) => self.stream = Some(stream),
+                Ok(stream) => {
+                    self.stream_text.clear();
+                    self.stream = Some(stream);
+                }
                 Err((error, session)) => {
                     self.session = Some(session);
                     return Err(transcribe_error(error).into());
@@ -188,15 +191,23 @@ impl TranscribeEngine {
 
     /// Flushes the audio the stream still holds and returns the final transcript.
     pub fn finalize(&mut self) -> Result<String, Box<dyn std::error::Error>> {
-        if let Some(stream) = self.stream.as_mut() {
-            stream.finalize().map_err(transcribe_error)?;
-            self.stream_text = stream.text().full.trim().to_string();
+        if let Some(mut stream) = self.stream.take() {
+            let finalized = stream.finalize();
+            if finalized.is_ok() {
+                self.stream_text = stream.text().full.trim().to_string();
+            }
+            self.session = Some(stream.into_session());
+            finalized.map_err(transcribe_error)?;
         }
         Ok(self.stream_text.clone())
     }
 
     pub fn get_transcript(&self) -> String {
         self.stream_text.clone()
+    }
+
+    pub fn is_streaming(&self) -> bool {
+        self.stream.is_some()
     }
 
     /// Language and dictionary for the next stream.

@@ -252,14 +252,16 @@ impl RemoteEngine {
             }
             if diarize && is_diarize_unsupported(&err) {
                 diarize = false;
-                let plan = plan_request(
-                    &profile,
-                    params.timestamps,
-                    params.timestamp_granularity,
-                    false,
-                );
-                effective_format = plan.response_format;
-                granularities = plan.timestamp_granularities;
+                if effective_format == plan.response_format {
+                    let plan = plan_request(
+                        &profile,
+                        params.timestamps,
+                        params.timestamp_granularity,
+                        false,
+                    );
+                    effective_format = plan.response_format;
+                    granularities = plan.timestamp_granularities;
+                }
                 continue;
             }
             return Err(err);
@@ -951,5 +953,93 @@ mod tests {
                 .as_slice()
             )
         );
+    }
+
+    #[cfg(feature = "api")]
+    #[tokio::test]
+    async fn diarize_fallback_keeps_the_json_downgrade() {
+        use std::sync::{Arc, Mutex};
+
+        use axum::{Router, body::Bytes, http::StatusCode};
+
+        let bodies = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen = Arc::clone(&bodies);
+        let app = Router::new().fallback(move |body: Bytes| {
+            let seen = Arc::clone(&seen);
+            async move {
+                let body = String::from_utf8_lossy(&body).into_owned();
+                let rejected = if body.contains("verbose_json") {
+                    Some("response_format verbose_json is not supported")
+                } else if body.contains("name=\"diarize\"") {
+                    Some("diarize is not supported")
+                } else {
+                    None
+                };
+                seen.lock().unwrap().push(body);
+                match rejected {
+                    Some(message) => (
+                        StatusCode::BAD_REQUEST,
+                        format!(r#"{{"error":{{"message":"{message}","type":"invalid_request_error"}}}}"#),
+                    ),
+                    None => (StatusCode::OK, r#"{"text":"hello"}"#.to_string()),
+                }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let dir = std::env::temp_dir().join(format!("glimpse-speech-diarize-{}", addr.port()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav = dir.join("clip.wav");
+        let samples = [0u8; 3200];
+        let mut file = b"RIFF".to_vec();
+        file.extend((36 + samples.len() as u32).to_le_bytes());
+        file.extend(b"WAVEfmt ");
+        file.extend(16u32.to_le_bytes());
+        file.extend(1u16.to_le_bytes());
+        file.extend(1u16.to_le_bytes());
+        file.extend(16_000u32.to_le_bytes());
+        file.extend(32_000u32.to_le_bytes());
+        file.extend(2u16.to_le_bytes());
+        file.extend(16u16.to_le_bytes());
+        file.extend(b"data");
+        file.extend((samples.len() as u32).to_le_bytes());
+        file.extend(samples);
+        std::fs::write(&wav, file).unwrap();
+
+        let client = reqwest::Client::builder()
+            .resolve("api.fireworks.ai", addr)
+            .build()
+            .unwrap();
+        let engine = super::RemoteEngine::new(
+            client,
+            super::RemoteConfig {
+                endpoint: format!("http://api.fireworks.ai:{}/v1", addr.port()),
+                api_key: "key".to_string(),
+                model: None,
+            },
+        );
+        let result = engine
+            .transcribe_file_diarized(
+                &wav,
+                super::RemoteRequestParams {
+                    model: "whisper-v3",
+                    language: None,
+                    dictionary: &[],
+                    prompt: None,
+                    timestamps: true,
+                    timestamp_granularity: Some(crate::TimestampGranularity::Word),
+                },
+            )
+            .await;
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(result.unwrap().transcription.text, "hello");
+        let bodies = bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 3);
+        assert!(bodies[0].contains("verbose_json") && bodies[0].contains("name=\"diarize\""));
+        assert!(!bodies[1].contains("verbose_json") && bodies[1].contains("name=\"diarize\""));
+        assert!(!bodies[2].contains("verbose_json") && !bodies[2].contains("name=\"diarize\""));
     }
 }
