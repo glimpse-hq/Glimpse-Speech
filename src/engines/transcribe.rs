@@ -312,20 +312,13 @@ impl TranscriptionEngine for TranscribeEngine {
             session = session_with(None);
         }
         let session = session.map_err(transcribe_error)?;
-        self.compute = if uses_coreml {
-            "coreml"
-        } else {
-            match model
-                .device()
-                .map(|device| (device.kind, device.device_type))
-            {
-                Ok((_, DeviceType::Cpu | DeviceType::Accel)) => "cpu",
-                Ok((kind, DeviceType::Igpu)) if kind == "vulkan" => "vulkan_integrated",
-                Ok((kind, _)) if kind == "vulkan" => "vulkan_discrete",
-                Ok((kind, _)) if kind == "metal" => "metal",
-                _ => "other",
-            }
-        };
+        let device = model.device().ok();
+        self.compute = compute_label(
+            uses_coreml,
+            device
+                .as_ref()
+                .map(|device| (device.kind.as_str(), device.device_type)),
+        );
         tracing::info!(
             "[transcribe.cpp] loaded {} ({}) on {} coreml={uses_coreml}",
             model.variant(),
@@ -992,6 +985,19 @@ fn decode_spans(
     Ok(results)
 }
 
+/// What ran the model, for `Transcription::compute`: the device's vendor kind
+/// and type as transcribe.cpp reports them, or `None` if it couldn't say.
+fn compute_label(uses_coreml: bool, device: Option<(&str, DeviceType)>) -> &'static str {
+    match device {
+        _ if uses_coreml => "coreml",
+        Some((_, DeviceType::Cpu | DeviceType::Accel)) => "cpu",
+        Some(("vulkan", DeviceType::Igpu)) => "vulkan_integrated",
+        Some(("vulkan", _)) => "vulkan_discrete",
+        Some(("metal", _)) => "metal",
+        _ => "other",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1337,5 +1343,26 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn labels_each_device() {
+        use super::{DeviceType, compute_label};
+        for (coreml, device, label) in [
+            (true, Some(("metal", DeviceType::Gpu)), "coreml"),
+            (false, Some(("cpu", DeviceType::Cpu)), "cpu"),
+            (false, Some(("accel", DeviceType::Accel)), "cpu"),
+            (
+                false,
+                Some(("vulkan", DeviceType::Igpu)),
+                "vulkan_integrated",
+            ),
+            (false, Some(("vulkan", DeviceType::Gpu)), "vulkan_discrete"),
+            (false, Some(("metal", DeviceType::Gpu)), "metal"),
+            (false, Some(("cuda", DeviceType::Gpu)), "other"),
+            (false, None, "other"),
+        ] {
+            assert_eq!(compute_label(coreml, device), label, "{device:?}");
+        }
     }
 }
