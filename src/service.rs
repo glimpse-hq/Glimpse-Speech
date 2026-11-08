@@ -652,10 +652,17 @@ fn boxed_error(err: Box<dyn std::error::Error>) -> anyhow::Error {
     anyhow!(err.to_string())
 }
 
-// Nemotron streams on the CPU: its 560 ms chunks finished later on Vulkan
-// (RTX 4000 Ada) and less steadily behind other GPU work on an M2 Pro. Whole
-// recordings ran several times faster on the GPU, so they get a second copy,
-// except Nemotron 3.5 on Metal, which was less accurate in Hungarian there.
+// Nemotron's cache-aware streaming models stream on the CPU: their 560 ms
+// chunks finished later on Vulkan (RTX 4000 Ada) and less steadily behind other
+// GPU work on an M2 Pro. Whole recordings ran several times faster on the GPU,
+// so they get a second copy, except Nemotron 3.5 on Metal, which was less
+// accurate in Hungarian there. Nemotron Unified re-encodes its left context
+// every chunk (115 ms per chunk on an M2 Pro CPU, 39 ms on Metal), so it
+// streams on the GPU like Parakeet Unified.
+fn cache_aware_nemotron(variant: &str) -> bool {
+    variant.starts_with("nemotron-") && variant.ends_with("-streaming")
+}
+
 fn streams_on_cpu(resolved: &ResolvedModel) -> bool {
     let variant = resolved.variant.as_deref().unwrap_or_default();
     #[cfg(transcribe_engine)]
@@ -664,7 +671,7 @@ fn streams_on_cpu(resolved: &ResolvedModel) -> bool {
             && !variant.starts_with("nemotron-35-"));
     #[cfg(not(transcribe_engine))]
     let gpu = false;
-    gpu && variant.starts_with("nemotron-")
+    gpu && cache_aware_nemotron(variant)
 }
 
 #[cfg_attr(not(transcribe_engine), allow(unused_variables))]
@@ -697,7 +704,7 @@ fn load_engine(
                 let backend = if (coreml_encoder.is_some()
                     && !optional_encoder
                     && variant.starts_with("parakeet-"))
-                    || (variant.starts_with("nemotron-") && !gpu_copy)
+                    || (cache_aware_nemotron(variant) && !gpu_copy)
                 {
                     transcribe_cpp::Backend::Cpu
                 } else {

@@ -70,7 +70,7 @@ not a decoder-only one) unless the service was built with
 `SpeechService::loading_compiling_encoders()`; `TranscribeEngine::is_compiling`
 and `TranscribeEngine::companion_for` expose the same checks.
 
-A Nemotron model whose catalog `variant` starts with `nemotron-` streams, and
+A cache-aware Nemotron model, whose catalog `variant` matches `nemotron-*-streaming`, streams, and
 transcribes audio shorter than 30 seconds, on the CPU. Whole recordings of 30
 seconds or more run on a GPU copy of the model, loaded by the first one, when
 Metal or Vulkan is available; Nemotron 3.5 keeps them on the CPU on Metal.
