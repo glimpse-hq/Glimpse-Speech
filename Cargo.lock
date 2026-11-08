@@ -1881,7 +1881,7 @@ dependencies = [
 [[package]]
 name = "transcribe-cpp"
 version = "0.4.1"
-source = "git+https://github.com/glimpse-hq/transcribe.cpp.git?rev=352b27fb1b6c552dd261ad9de988b2a909046f0a#352b27fb1b6c552dd261ad9de988b2a909046f0a"
+source = "git+https://github.com/glimpse-hq/transcribe.cpp.git?rev=652cef8138df583c75344dc65411ddc4a550d065#652cef8138df583c75344dc65411ddc4a550d065"
 dependencies = [
  "log",
  "thiserror",
@@ -1891,7 +1891,7 @@ dependencies = [
 [[package]]
 name = "transcribe-cpp-sys"
 version = "0.4.1"
-source = "git+https://github.com/glimpse-hq/transcribe.cpp.git?rev=352b27fb1b6c552dd261ad9de988b2a909046f0a#352b27fb1b6c552dd261ad9de988b2a909046f0a"
+source = "git+https://github.com/glimpse-hq/transcribe.cpp.git?rev=652cef8138df583c75344dc65411ddc4a550d065#652cef8138df583c75344dc65411ddc4a550d065"
 dependencies = [
  "cmake",
  "serde_json",

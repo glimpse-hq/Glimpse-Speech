@@ -2,6 +2,14 @@
 
 ## 3.0.3
 
+### Added
+
+- Nemotron Unified ASR 0.6B (`nemotron-labs-unified-asr-0.6b`) in 25 languages, offline with an optional Core ML encoder and live through buffered streaming. transcribe.cpp is pinned to 652cef81 (glimpse-hq `nemotron-unified`), which passes the language to the model while streaming and after the Core ML encoder.
+
+### Changed
+
+- Only Nemotron's cache-aware streaming variants (`nemotron-*-streaming`) stream on the CPU with a second copy on the GPU. Other `nemotron-` variants load like any other transcribe.cpp model.
+
 ### Fixed
 
 - A transcription request during live dictation no longer ends the stream and drops what was dictated so far. It runs on a second copy of the model.
