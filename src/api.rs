@@ -1259,6 +1259,7 @@ mod tests {
             model_id: "whisper_small_q5".to_string(),
             language: Some("en".to_string()),
             duration_ms: 1250,
+            compute: None,
         }
     }
 

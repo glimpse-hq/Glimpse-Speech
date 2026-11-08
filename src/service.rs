@@ -130,6 +130,15 @@ enum EngineInstance {
 }
 
 impl EngineInstance {
+    fn compute(&self) -> &'static str {
+        match *self {
+            #[cfg(apple_speech_engine)]
+            Self::Apple(_) => "apple",
+            #[cfg(transcribe_engine)]
+            Self::Transcribe(ref engine) => engine.compute(),
+        }
+    }
+
     fn is_streaming(&self) -> bool {
         match *self {
             #[cfg(apple_speech_engine)]
@@ -355,6 +364,7 @@ impl SpeechService {
             timestamps: timestamps || timestamp_granularity.is_some(),
             word_timestamps: timestamp_granularity == Some(TimestampGranularity::Word),
         };
+        let compute = engine.compute();
         let transcribe_started = Instant::now();
         let transcription = transcribe_with_engine(engine, audio, options)?;
         let transcribe_elapsed = transcribe_started.elapsed();
@@ -383,6 +393,7 @@ impl SpeechService {
             model_id: resolved_id,
             language: language.or(requested_language),
             duration_ms: transcription.audio_duration_ms,
+            compute: Some(compute),
         })
     }
 

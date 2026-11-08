@@ -476,6 +476,7 @@ mod tests {
             model_id: "nemotron_streaming_en".to_string(),
             language: Some("en".to_string()),
             duration_ms: 1_500,
+            compute: None,
         };
 
         let json = serde_json::to_value(verbose_response(response, &[])).unwrap();

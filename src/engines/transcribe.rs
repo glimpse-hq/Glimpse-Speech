@@ -13,10 +13,10 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use transcribe_cpp::{
-    Backend, Error, ExtSlot, Model, ModelOptions, OwnedStream, ParakeetBufferedStreamOptions,
-    ParakeetRunOptions, ParakeetStreamOptions, Qwen3AsrRunOptions, RunExtension, RunOptions,
-    Session, SessionOptions, StreamExtension, StreamOptions, TimestampKind, Transcript,
-    WhisperRunOptions,
+    Backend, DeviceType, Error, ExtSlot, Model, ModelOptions, OwnedStream,
+    ParakeetBufferedStreamOptions, ParakeetRunOptions, ParakeetStreamOptions, Qwen3AsrRunOptions,
+    RunExtension, RunOptions, Session, SessionOptions, StreamExtension, StreamOptions,
+    TimestampKind, Transcript, WhisperRunOptions,
 };
 
 use crate::{
@@ -82,11 +82,18 @@ pub struct TranscribeEngine {
     // Where long audio is cut: at a pause for Parakeet, Qwen's reference
     // quiet-window splitter for everything else.
     boundary: Boundary,
+    compute: &'static str,
 }
 
 impl TranscribeEngine {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// What runs the loaded model: coreml, metal, vulkan_discrete,
+    /// vulkan_integrated, cpu, or other.
+    pub fn compute(&self) -> &'static str {
+        self.compute
     }
 
     /// Whether the app marked this encoder as still compiling for the Neural
@@ -305,6 +312,13 @@ impl TranscriptionEngine for TranscribeEngine {
             session = session_with(None);
         }
         let session = session.map_err(transcribe_error)?;
+        let device = model.device().ok();
+        self.compute = compute_label(
+            uses_coreml,
+            device
+                .as_ref()
+                .map(|device| (device.kind.as_str(), device.device_type)),
+        );
         tracing::info!(
             "[transcribe.cpp] loaded {} ({}) on {} coreml={uses_coreml}",
             model.variant(),
@@ -971,6 +985,19 @@ fn decode_spans(
     Ok(results)
 }
 
+/// What ran the model, for `Transcription::compute`: the device's vendor kind
+/// and type as transcribe.cpp reports them, or `None` if it couldn't say.
+fn compute_label(uses_coreml: bool, device: Option<(&str, DeviceType)>) -> &'static str {
+    match device {
+        _ if uses_coreml => "coreml",
+        Some((_, DeviceType::Cpu | DeviceType::Accel)) => "cpu",
+        Some(("vulkan", DeviceType::Igpu)) => "vulkan_integrated",
+        Some(("vulkan", _)) => "vulkan_discrete",
+        Some(("metal", _)) => "metal",
+        _ => "other",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1316,5 +1343,26 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn labels_each_device() {
+        use super::{DeviceType, compute_label};
+        for (coreml, device, label) in [
+            (true, Some(("metal", DeviceType::Gpu)), "coreml"),
+            (false, Some(("cpu", DeviceType::Cpu)), "cpu"),
+            (false, Some(("accel", DeviceType::Accel)), "cpu"),
+            (
+                false,
+                Some(("vulkan", DeviceType::Igpu)),
+                "vulkan_integrated",
+            ),
+            (false, Some(("vulkan", DeviceType::Gpu)), "vulkan_discrete"),
+            (false, Some(("metal", DeviceType::Gpu)), "metal"),
+            (false, Some(("cuda", DeviceType::Gpu)), "other"),
+            (false, None, "other"),
+        ] {
+            assert_eq!(compute_label(coreml, device), label, "{device:?}");
+        }
     }
 }

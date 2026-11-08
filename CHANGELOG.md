@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `Transcription::compute` says what ran the model: `coreml`, `metal`, `vulkan_discrete`, `vulkan_integrated`, `cpu`, `apple` or `other`. It is not serialized.
+
 ## 3.0.3
 
 ### Added
