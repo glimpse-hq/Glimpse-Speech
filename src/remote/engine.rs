@@ -579,6 +579,7 @@ fn parse_transcription_body(
             model_id: model.to_string(),
             language: parsed.language,
             duration_ms: duration_seconds.map_or(0, |seconds| (seconds.max(0.0) * 1000.0) as u128),
+            compute: None,
         },
         segments: diarized_segments,
     })

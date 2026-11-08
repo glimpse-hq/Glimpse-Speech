@@ -13,10 +13,10 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use transcribe_cpp::{
-    Backend, Error, ExtSlot, Model, ModelOptions, OwnedStream, ParakeetBufferedStreamOptions,
-    ParakeetRunOptions, ParakeetStreamOptions, Qwen3AsrRunOptions, RunExtension, RunOptions,
-    Session, SessionOptions, StreamExtension, StreamOptions, TimestampKind, Transcript,
-    WhisperRunOptions,
+    Backend, DeviceType, Error, ExtSlot, Model, ModelOptions, OwnedStream,
+    ParakeetBufferedStreamOptions, ParakeetRunOptions, ParakeetStreamOptions, Qwen3AsrRunOptions,
+    RunExtension, RunOptions, Session, SessionOptions, StreamExtension, StreamOptions,
+    TimestampKind, Transcript, WhisperRunOptions,
 };
 
 use crate::{
@@ -82,11 +82,18 @@ pub struct TranscribeEngine {
     // Where long audio is cut: at a pause for Parakeet, Qwen's reference
     // quiet-window splitter for everything else.
     boundary: Boundary,
+    compute: &'static str,
 }
 
 impl TranscribeEngine {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// What runs the loaded model: coreml, metal, vulkan_discrete,
+    /// vulkan_integrated, cpu, or other.
+    pub fn compute(&self) -> &'static str {
+        self.compute
     }
 
     /// Whether the app marked this encoder as still compiling for the Neural
@@ -305,6 +312,20 @@ impl TranscriptionEngine for TranscribeEngine {
             session = session_with(None);
         }
         let session = session.map_err(transcribe_error)?;
+        self.compute = if uses_coreml {
+            "coreml"
+        } else {
+            match model
+                .device()
+                .map(|device| (device.kind, device.device_type))
+            {
+                Ok((_, DeviceType::Cpu | DeviceType::Accel)) => "cpu",
+                Ok((kind, DeviceType::Igpu)) if kind == "vulkan" => "vulkan_integrated",
+                Ok((kind, _)) if kind == "vulkan" => "vulkan_discrete",
+                Ok((kind, _)) if kind == "metal" => "metal",
+                _ => "other",
+            }
+        };
         tracing::info!(
             "[transcribe.cpp] loaded {} ({}) on {} coreml={uses_coreml}",
             model.variant(),

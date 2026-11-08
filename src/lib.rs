@@ -66,6 +66,10 @@ pub struct Transcription {
     pub model_id: String,
     pub language: Option<String>,
     pub duration_ms: u128,
+    /// What ran the model, from `TranscribeEngine::compute` or "apple";
+    /// `None` for remote providers.
+    #[serde(skip)]
+    pub compute: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
