@@ -1,6 +1,6 @@
 [package]
 name = "glimpse-speech"
-version = "3.0.4"
+version = "3.0.5"
 edition = "2024"
 resolver = "3"
 rust-version = "1.88"
@@ -55,16 +55,16 @@ tower = { version = "0.5", features = ["util"] }
 libc = "0.2"
 
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
-transcribe-cpp = { git = "https://github.com/glimpse-hq/transcribe.cpp.git", rev = "652cef8138df583c75344dc65411ddc4a550d065", default-features = false, features = ["metal", "coreml"], optional = true }
+transcribe-cpp = { git = "https://github.com/glimpse-hq/transcribe.cpp.git", rev = "bfbccc66ad7b261121688cc163330c8d6f9cf47d", default-features = false, features = ["metal", "coreml"], optional = true }
 
 [target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
-transcribe-cpp = { git = "https://github.com/glimpse-hq/transcribe.cpp.git", rev = "652cef8138df583c75344dc65411ddc4a550d065", default-features = false, features = ["metal"], optional = true }
+transcribe-cpp = { git = "https://github.com/glimpse-hq/transcribe.cpp.git", rev = "bfbccc66ad7b261121688cc163330c8d6f9cf47d", default-features = false, features = ["metal"], optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-transcribe-cpp = { git = "https://github.com/glimpse-hq/transcribe.cpp.git", rev = "652cef8138df583c75344dc65411ddc4a550d065", default-features = false, features = ["vulkan"], optional = true }
+transcribe-cpp = { git = "https://github.com/glimpse-hq/transcribe.cpp.git", rev = "bfbccc66ad7b261121688cc163330c8d6f9cf47d", default-features = false, features = ["vulkan"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-transcribe-cpp = { git = "https://github.com/glimpse-hq/transcribe.cpp.git", rev = "652cef8138df583c75344dc65411ddc4a550d065", default-features = false, features = ["vulkan"], optional = true }
+transcribe-cpp = { git = "https://github.com/glimpse-hq/transcribe.cpp.git", rev = "bfbccc66ad7b261121688cc163330c8d6f9cf47d", default-features = false, features = ["vulkan"], optional = true }
 
 [[example]]
 name = "apple_speech"
