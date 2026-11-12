@@ -619,7 +619,7 @@ dependencies = [
 
 [[package]]
 name = "glimpse-speech"
-version = "3.0.4"
+version = "3.0.5"
 dependencies = [
  "anyhow",
  "axum",
@@ -1880,8 +1880,8 @@ dependencies = [
 
 [[package]]
 name = "transcribe-cpp"
-version = "0.4.1"
-source = "git+https://github.com/glimpse-hq/transcribe.cpp.git?rev=652cef8138df583c75344dc65411ddc4a550d065#652cef8138df583c75344dc65411ddc4a550d065"
+version = "0.4.2"
+source = "git+https://github.com/glimpse-hq/transcribe.cpp.git?rev=bfbccc66ad7b261121688cc163330c8d6f9cf47d#bfbccc66ad7b261121688cc163330c8d6f9cf47d"
 dependencies = [
  "log",
  "thiserror",
@@ -1890,8 +1890,8 @@ dependencies = [
 
 [[package]]
 name = "transcribe-cpp-sys"
-version = "0.4.1"
-source = "git+https://github.com/glimpse-hq/transcribe.cpp.git?rev=652cef8138df583c75344dc65411ddc4a550d065#652cef8138df583c75344dc65411ddc4a550d065"
+version = "0.4.2"
+source = "git+https://github.com/glimpse-hq/transcribe.cpp.git?rev=bfbccc66ad7b261121688cc163330c8d6f9cf47d#bfbccc66ad7b261121688cc163330c8d6f9cf47d"
 dependencies = [
  "cmake",
  "serde_json",

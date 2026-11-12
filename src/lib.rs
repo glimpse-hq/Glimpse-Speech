@@ -35,6 +35,16 @@ pub(crate) fn silence_transcribe_cpp_logs() {
     ONCE.call_once(transcribe_cpp::init_logging);
 }
 
+/// Keeps transcribe.cpp's GPU backends out of this process, so its models load
+/// on the CPU without touching a GPU driver. Must run before the first model
+/// load.
+#[cfg(transcribe_engine)]
+pub fn use_cpu_only() -> std::io::Result<()> {
+    use transcribe_cpp::{Backend, BackendMask};
+    transcribe_cpp::init_backends_with(None::<&Path>, BackendMask::for_backend(Backend::Cpu))
+        .map_err(transcribe_error)
+}
+
 /// Raw output of a transcription engine: text plus optional segments.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TranscriptionResult {
