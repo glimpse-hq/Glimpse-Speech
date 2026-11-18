@@ -1,5 +1,22 @@
 # Changelog
 
+## 3.0.5
+
+### Added
+
+- `use_cpu_only()` keeps transcribe.cpp's GPU backends out of the process, so models load on the CPU without touching a GPU driver. Call it before the first model load.
+
+### Changed
+
+- transcribe.cpp is pinned to 14a4fc94 (glimpse-hq `engine-1.5`), which merges upstream 0.4.2. Parakeet and Nemotron Unified drop the padding mel frame before the encoder as NeMo does, so a few transcripts change by a word or punctuation.
+- Short clips on Vulkan take less than half the time on Parakeet and Nemotron Unified models, and about a quarter less on Whisper: the graph scheduler is kept between runs while its buffers stay under 64 MiB.
+- On Intel graphics without cooperative matrices (Iris Xe), Parakeet on Vulkan is about 40% faster.
+- The Vulkan build compiles only the shader variants the models use, which halves the shader count.
+
+### Fixed
+
+- A logger that panics while transcribe.cpp logs no longer aborts the process. The log line is dropped instead.
+
 ## 3.0.4
 
 ### Added
