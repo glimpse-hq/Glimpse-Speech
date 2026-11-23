@@ -4,7 +4,8 @@
 //
 // Two modules: DictationTranscriber for dictation (spoken punctuation,
 // emoji, custom vocabulary), SpeechTranscriber for long-form jobs that
-// want fine-grained segment timestamps.
+// want fine-grained segment timestamps. Long-form jobs in a language
+// only DictationTranscriber supports use DictationTranscriber.
 
 import AVFoundation
 import CryptoKit
@@ -179,10 +180,10 @@ private final class GSSession: @unchecked Sendable {
     static func start(localeHint: String?, longForm: Bool, vocabulary: [String]) async -> Result<GSSession, GSError> {
         let locale = await resolveLocale(localeHint)
         let module: GSModule
-        if longForm {
+        if longForm, let longFormLocale = await SpeechTranscriber.supportedLocale(equivalentTo: locale) {
             module = .longForm(
                 SpeechTranscriber(
-                    locale: locale,
+                    locale: longFormLocale,
                     transcriptionOptions: [],
                     reportingOptions: [.volatileResults],
                     attributeOptions: [.audioTimeRange]
@@ -421,7 +422,8 @@ public func gs_apple_locale_status(_ locale: UnsafePointer<CChar>?) -> Int32 {
     }
 }
 
-// long_form selects SpeechTranscriber (fine segments, no dictation extras).
+// long_form selects SpeechTranscriber (fine segments, no dictation extras)
+// when it supports the locale.
 // vocabulary_json is a JSON array of terms; dictation sessions only.
 @_cdecl("gs_apple_stream_start")
 public func gs_apple_stream_start(
