@@ -485,7 +485,12 @@ async fn delete_model(
 ) -> Result<Json<crate::models::ModelStatus>, ApiError> {
     authorize(&state, &headers)?;
     state.request(ApiRoute::DeleteModel, format!("DELETE /v1/models/{id}"));
-    state.service.delete(&id).map(Json).map_err(map_error)
+    let service = Arc::clone(&state.service);
+    tokio::task::spawn_blocking(move || service.delete(&id))
+        .await
+        .map_err(|err| map_server_error(anyhow!("delete task failed: {err}")))?
+        .map(Json)
+        .map_err(map_error)
 }
 
 async fn transcribe(
