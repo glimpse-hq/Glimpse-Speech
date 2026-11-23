@@ -492,6 +492,7 @@ impl TranscriptionEngine for TranscribeEngine {
                 .as_ref()
                 .is_some_and(crate::service::CancelToken::is_cancelled)
         };
+        let skips_silence = matches!(self.family, Family::Whisper { .. });
         let (chunks, speech) = std::thread::scope(|scope| {
             // Silero runs while the model decodes.
             let vad = self
@@ -502,7 +503,7 @@ impl TranscriptionEngine for TranscribeEngine {
                 })
                 .and_then(Result::ok);
             let mut chunks = decode_chunks(&samples, self.chunk_samples, boundary, |chunks| {
-                run_chunks(session, chunks, &options, batch)
+                run_chunks(session, chunks, &options, batch, skips_silence, &cancelled)
             });
             // A rejected boost list must never fail dictation: decode unboosted.
             if let (Err(Error::InvalidArgument(error)), Some(RunExtension::Parakeet(_))) =
@@ -513,7 +514,7 @@ impl TranscriptionEngine for TranscribeEngine {
                 );
                 options.family = None;
                 chunks = decode_chunks(&samples, self.chunk_samples, boundary, |chunks| {
-                    run_chunks(session, chunks, &options, batch)
+                    run_chunks(session, chunks, &options, batch, skips_silence, &cancelled)
                 });
             }
             (chunks, vad.and_then(|vad| vad.join().ok().flatten()))
@@ -533,7 +534,7 @@ impl TranscriptionEngine for TranscribeEngine {
                 })
                 .collect();
             let retries = decode_spans(&samples, &spans, self.chunk_samples, boundary, |chunks| {
-                run_chunks(session, chunks, &options, batch)
+                run_chunks(session, chunks, &options, batch, skips_silence, &cancelled)
             })
             .map(|decoded| {
                 decoded
@@ -562,6 +563,9 @@ impl TranscriptionEngine for TranscribeEngine {
 }
 
 const SAMPLE_RATE: usize = 16_000;
+// Whisper windows of a longer recording with less speech than this (Silero
+// frames) are skipped, the share Glimpse's chunked transcription used.
+const MIN_WINDOW_SPEECH_PERCENT: f32 = 5.0;
 // A stretch of detected speech at least this long without a word counts as dropped.
 const DROPPED_SPEECH: usize = 3 * SAMPLE_RATE / 2;
 // Gaps at least this long between padded speech regions (about a second of
@@ -904,12 +908,21 @@ fn run_chunks(
     chunks: &[&[f32]],
     options: &RunOptions,
     batch: bool,
+    skips_silence: bool,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<Result<Transcript, Error>>, Error> {
     if batch && chunks.len() > 1 {
         return session.run_batch(chunks, options);
     }
     let mut results = Vec::with_capacity(chunks.len());
     for chunk in chunks {
+        // Whisper can write text for a window without speech, which overlaps
+        // the speech padding next to it and survives a segment filter. Once
+        // cancelled, the run below returns at once instead.
+        if skips_silence && chunks.len() > 1 && !cancelled() && is_silent(chunk) {
+            results.push(Ok(Transcript::default()));
+            continue;
+        }
         let result = session.run(chunk, options);
         let failed = result.is_err();
         results.push(result);
@@ -918,6 +931,11 @@ fn run_chunks(
         }
     }
     Ok(results)
+}
+
+fn is_silent(window: &[f32]) -> bool {
+    crate::vad::analyze_16k(window.to_vec())
+        .is_some_and(|speech| speech.percentage() < MIN_WINDOW_SPEECH_PERCENT)
 }
 
 fn decode_chunks(
@@ -1014,7 +1032,7 @@ fn compute_label(uses_coreml: bool, device: Option<(&str, DeviceType)>) -> &'sta
 mod tests {
     use super::{
         SAMPLE_RATE, TranscribeEngine, TranscriptionResult, TranscriptionSegment, assemble,
-        dropped_speech, speech_between_long_pauses, splice,
+        dropped_speech, is_silent, speech_between_long_pauses, splice,
     };
 
     fn span(start: f32, end: f32, text: &str) -> TranscriptionSegment {
@@ -1027,6 +1045,24 @@ mod tests {
 
     fn seconds(value: f32) -> usize {
         (value * SAMPLE_RATE as f32) as usize
+    }
+
+    #[test]
+    fn a_window_is_silent_only_without_speech() {
+        let speech: Vec<f32> = include_bytes!("../vad_reference.pcm")
+            .chunks_exact(2)
+            .map(|b| f32::from(i16::from_le_bytes([b[0], b[1]])) / 32_768.0)
+            .collect();
+        let window = 28 * SAMPLE_RATE;
+        let with_speech = |seconds: usize| {
+            let speech = speech.repeat(seconds * SAMPLE_RATE / speech.len() + 1);
+            let mut audio = vec![0.0; window];
+            audio[..seconds * SAMPLE_RATE].copy_from_slice(&speech[..seconds * SAMPLE_RATE]);
+            audio
+        };
+        assert!(is_silent(&vec![0.0; window]));
+        assert!(is_silent(&with_speech(0)));
+        assert!(!is_silent(&with_speech(8)));
     }
 
     #[test]

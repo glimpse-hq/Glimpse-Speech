@@ -17,6 +17,7 @@
 - ffmpeg, still used for formats Symphonia can't decode such as Opus, reads only the uploaded file. A playlist or concat file can no longer make it read other local files or URLs, or hang waiting on one.
 - `vad::speech_regions` raises quiet recordings the way `vad::analyze` does, so very quiet speech is no longer reported as silence.
 - Deleting a model over the API no longer stalls other requests while a transcription runs.
+- Whisper no longer writes text such as "Thank you." for a 28 s window of a longer recording that has almost no speech (under 5% of Silero frames): the window is skipped.
 
 ## 3.0.5
 
