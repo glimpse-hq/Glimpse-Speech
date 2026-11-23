@@ -9,6 +9,7 @@
 ### Changed
 
 - The minimum supported Rust version is 1.100.
+- transcribe.cpp is pinned to b6003b90 (glimpse-hq main), which merges upstream ggml 1.0.0 and a Windows DLL lookup fix for Cargo's new build-dir layout. Transcripts are unchanged, and Parakeet keeps its dictionary boosting.
 
 ### Fixed
 
