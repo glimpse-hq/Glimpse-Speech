@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- The minimum supported Rust version is 1.100.
+
 ### Fixed
 
 - Apple Speech long-form transcription works in the languages only DictationTranscriber supports, such as Dutch, Polish, Russian and Turkish, by using DictationTranscriber for them.
