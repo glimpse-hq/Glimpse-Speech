@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Apple Speech long-form transcription works in the languages only DictationTranscriber supports, such as Dutch, Polish, Russian and Turkish, by using DictationTranscriber for them.
+
 ## 3.0.5
 
 ### Added
