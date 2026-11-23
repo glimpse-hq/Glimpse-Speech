@@ -396,14 +396,12 @@ impl SpeechService {
             .lock()
             .map_err(|_| anyhow!("speech service lock poisoned"))?;
         check_deadline(deadline, &requested_model)?;
+        check_cancel(cancel)?;
         let audio = prepare_audio(audio)?;
         let long = audio.duration_ms >= GPU_COPY_MIN_MS;
         let (mut guard, mut side) =
-            self.ensure_loaded_before(&requested_model, deadline, Some(long))?;
+            self.ensure_loaded_before(&requested_model, deadline, cancel, Some(long))?;
         drop(decode_slot);
-        if cancel.is_some_and(CancelToken::is_cancelled) {
-            return Err(Cancelled.into());
-        }
         let loaded = match side.as_mut() {
             Some(side) => side,
             None => loaded_engine(&mut guard)?,
@@ -428,9 +426,7 @@ impl SpeechService {
         let compute = engine.compute();
         let transcribe_started = Instant::now();
         let transcription = transcribe_with_engine(engine, audio, options);
-        if cancel.is_some_and(CancelToken::is_cancelled) {
-            return Err(Cancelled.into());
-        }
+        check_cancel(cancel)?;
         let transcription = transcription?;
         let transcribe_elapsed = transcribe_started.elapsed();
         // Only the main engine serves warmups and streaming.
@@ -585,17 +581,18 @@ impl SpeechService {
     }
 
     fn ensure_loaded(&self, model_id: &str) -> Result<MutexGuard<'_, Option<LoadedEngine>>> {
-        self.ensure_loaded_before(model_id, None, None)
+        self.ensure_loaded_before(model_id, None, None, None)
             .map(|(guard, _)| guard)
     }
 
-    /// Fails without loading anything when `deadline` passed while waiting
-    /// for the engine. A batch, `Some(long)`, that needs the loaded engine
+    /// Fails without loading anything when `deadline` passed or `cancel` was
+    /// cancelled while waiting for the engine. A batch, `Some(long)`, that needs the loaded engine
     /// while it streams gets a second copy beside it instead of replacing it.
     fn ensure_loaded_before(
         &self,
         model_id: &str,
         deadline: Option<Instant>,
+        cancel: Option<&CancelToken>,
         batch_long: Option<bool>,
     ) -> Result<(MutexGuard<'_, Option<LoadedEngine>>, Option<LoadedEngine>)> {
         let total_started = Instant::now();
@@ -606,6 +603,7 @@ impl SpeechService {
         let mut guard = self.lock_loaded()?;
         let lock_wait = lock_started.elapsed();
         check_deadline(deadline, model_id)?;
+        check_cancel(cancel)?;
         let same =
             |loaded: &LoadedEngine| loaded.model_id == resolved.id && loaded.path == resolved.path;
         if batch_long == Some(true)
@@ -824,6 +822,13 @@ fn load_engine(
 #[derive(Debug, thiserror::Error)]
 #[error("The transcription timed out waiting for the engine (model {0})")]
 pub(crate) struct DeadlinePassed(String);
+
+fn check_cancel(cancel: Option<&CancelToken>) -> Result<()> {
+    if cancel.is_some_and(CancelToken::is_cancelled) {
+        return Err(Cancelled.into());
+    }
+    Ok(())
+}
 
 fn check_deadline(deadline: Option<Instant>, model_id: &str) -> Result<()> {
     if deadline.is_some_and(|deadline| Instant::now() >= deadline) {

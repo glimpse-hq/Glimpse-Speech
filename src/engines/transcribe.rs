@@ -486,12 +486,19 @@ impl TranscriptionEngine for TranscribeEngine {
         };
         let batch = self.batches_chunks;
         let boundary = self.boundary;
+        let cancelled = || {
+            params
+                .cancel
+                .as_ref()
+                .is_some_and(crate::service::CancelToken::is_cancelled)
+        };
         let (chunks, speech) = std::thread::scope(|scope| {
             // Silero runs while the model decodes.
             let vad = self
                 .checks_dropped_speech
                 .then(|| {
-                    std::thread::Builder::new().spawn_scoped(scope, || speech_ranges(&samples))
+                    std::thread::Builder::new()
+                        .spawn_scoped(scope, || speech_ranges(&samples, &cancelled))
                 })
                 .and_then(Result::ok);
             let mut chunks = decode_chunks(&samples, self.chunk_samples, boundary, |chunks| {
@@ -612,10 +619,10 @@ fn assemble(chunks: Vec<(usize, Transcript)>, end: usize) -> TranscriptionResult
 
 // Silero's padded speech regions as merged sample ranges. Silero reads the
 // samples in place, with one state across the whole recording.
-fn speech_ranges(samples: &[f32]) -> Option<Vec<Range<usize>>> {
+fn speech_ranges(samples: &[f32], stop: &dyn Fn() -> bool) -> Option<Vec<Range<usize>>> {
     let sample = |seconds: f32| ((seconds * SAMPLE_RATE as f32) as usize).min(samples.len());
     let mut ranges: Vec<Range<usize>> = Vec::new();
-    for (start, end) in crate::vad::speech_regions_16k(samples)? {
+    for (start, end) in crate::vad::speech_regions_16k(samples, stop)? {
         let (start, end) = (sample(start), sample(end));
         match ranges.last_mut() {
             Some(last) if start <= last.end => last.end = last.end.max(end),

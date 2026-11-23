@@ -178,8 +178,9 @@ impl Silero {
     }
 
     // Speech probability per 512-sample frame of 16 kHz mono audio in [-1, 1].
-    // A trailing partial frame is dropped.
-    fn frame_probs(&self, samples: &[f32]) -> Vec<f32> {
+    // A trailing partial frame is dropped. `stop` is checked between blocks;
+    // once it returns true the probabilities end there.
+    fn frame_probs(&self, samples: &[f32], stop: &dyn Fn() -> bool) -> Vec<f32> {
         let frames = samples.len() / WINDOW;
         if frames == 0 {
             return Vec::new();
@@ -191,6 +192,9 @@ impl Silero {
         let (mut h, mut c) = ([0.0f32; HIDDEN], [0.0f32; HIDDEN]);
         let mut probs = Vec::with_capacity(frames);
         for block in (0..frames).step_by(BLOCK_FRAMES) {
+            if stop() {
+                break;
+            }
             let count = BLOCK_FRAMES.min(frames - block);
             let inputs = &mut inputs[..count * 4 * HIDDEN];
             let threads = cores.min(count.div_ceil(MIN_FRAMES_PER_THREAD));
@@ -420,20 +424,24 @@ pub fn speech_regions(samples: &[i16], sample_rate: u32) -> Option<Vec<(f32, f32
     }
     let mut audio = crate::audio::resample_i16_to_f32(samples, sample_rate, 16_000);
     even_out(&mut audio);
-    speech_regions_16k(&audio)
+    speech_regions_16k(&audio, &|| false)
 }
 
 /// [`speech_regions`] for 16 kHz mono samples in [-1, 1], without a copy.
-pub(crate) fn speech_regions_16k(audio: &[f32]) -> Option<Vec<(f32, f32)>> {
+/// `None` also when `stop` ends the scan early.
+pub(crate) fn speech_regions_16k(
+    audio: &[f32],
+    stop: &dyn Fn() -> bool,
+) -> Option<Vec<(f32, f32)>> {
     if audio.len() < WINDOW {
         return Some(Vec::new());
     }
     let vad = VAD.get_or_init(Silero::load).as_ref()?;
-    let mask: Vec<bool> = vad
-        .frame_probs(audio)
-        .into_iter()
-        .map(|p| p >= SPEECH_THRESHOLD)
-        .collect();
+    let probs = vad.frame_probs(audio, stop);
+    if stop() {
+        return None;
+    }
+    let mask: Vec<bool> = probs.into_iter().map(|p| p >= SPEECH_THRESHOLD).collect();
     Some(mask_to_regions(&mask))
 }
 
@@ -460,7 +468,7 @@ pub fn analyze(samples: &[i16], sample_rate: u32) -> Option<Speech> {
     even_out(&mut audio);
     let vad = VAD.get_or_init(Silero::load).as_ref()?;
     Some(Speech {
-        probs: vad.frame_probs(&audio),
+        probs: vad.frame_probs(&audio, &|| false),
         samples: audio.len(),
     })
 }
@@ -685,7 +693,7 @@ mod tests {
             .chunks_exact(WINDOW)
             .map(|chunk| vad.step(&mut state, chunk))
             .collect();
-        assert_eq!(vad.frame_probs(&audio), stepped);
+        assert_eq!(vad.frame_probs(&audio, &|| false), stepped);
     }
 
     #[test]
@@ -751,7 +759,7 @@ mod tests {
     #[test]
     fn bundled_model_loads_and_rejects_silence() {
         let vad = Silero::load().expect("silero weights");
-        let probs = vad.frame_probs(&[0.0; 4 * WINDOW]);
+        let probs = vad.frame_probs(&[0.0; 4 * WINDOW], &|| false);
         assert_eq!(probs.len(), 4);
         assert!(probs.iter().all(|&p| p < SPEECH_THRESHOLD));
     }
@@ -767,7 +775,7 @@ mod tests {
         ];
         let probs = Silero::load()
             .expect("silero weights")
-            .frame_probs(&reference_audio());
+            .frame_probs(&reference_audio(), &|| false);
         assert_eq!(probs.len(), REFERENCE.len());
         for (p, r) in probs.iter().zip(REFERENCE) {
             assert!((p - r).abs() < 1e-4, "{p} vs {r}");
