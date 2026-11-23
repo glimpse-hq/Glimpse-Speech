@@ -16,8 +16,7 @@ use crate::io_error;
 
 const PCM16_SCALE: f32 = 32_768.0;
 pub(crate) const MAX_SAMPLE_RATE: u32 = 384_000;
-const FFMPEG_FORMATS: &str =
-    "mov,matroska,ogg,mp3,aac,flac,wav,w64,wv,aiff,caf,asf,amr,ac3,eac3,dts,mpeg,mpegts,avi,flv";
+const FFMPEG_FORMATS: &str = "mov,matroska,ogg,mp3,aac,flac,wav,w64,wv,ape,au,aiff,caf,asf,amr,ac3,eac3,dts,mpeg,mpegts,avi,flv";
 
 /// Requirements: 16 kHz, mono, PCM int16 WAV file.
 pub fn read_wav_samples(wav_path: &Path) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
