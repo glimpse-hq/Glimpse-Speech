@@ -46,6 +46,7 @@ pub struct TranscribeInferenceParams {
     /// Whisper computes word timings in an extra alignment pass, so only
     /// request them when they are used.
     pub word_timestamps: bool,
+    pub cancel: Option<crate::service::CancelToken>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -433,6 +434,10 @@ impl TranscriptionEngine for TranscribeEngine {
             .session
             .as_mut()
             .ok_or_else(|| io_error("Model not loaded. Call load_model() first."))?;
+        match &params.cancel {
+            Some(cancel) => session.set_cancel_token(&cancel.engine),
+            None => session.clear_cancel_token(),
+        }
         let (family, timestamps) = match self.family {
             Family::Qwen3Asr => (
                 build_dictionary_prompt(&params.dictionary).map(|context| {

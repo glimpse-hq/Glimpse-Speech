@@ -76,6 +76,42 @@ pub struct TranscribeRequest {
     pub timestamp_granularity: Option<TimestampGranularity>,
 }
 
+/// Stops a transcription started with
+/// [`transcribe_cancellable`](SpeechService::transcribe_cancellable). Clones
+/// share one flag, so any clone can cancel from another thread.
+#[derive(Debug, Clone, Default)]
+pub struct CancelToken {
+    #[cfg(transcribe_engine)]
+    pub(crate) engine: transcribe_cpp::CancelToken,
+    #[cfg(not(transcribe_engine))]
+    flag: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl CancelToken {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        #[cfg(transcribe_engine)]
+        self.engine.cancel();
+        #[cfg(not(transcribe_engine))]
+        self.flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        #[cfg(transcribe_engine)]
+        return self.engine.is_cancelled();
+        #[cfg(not(transcribe_engine))]
+        self.flag.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// A transcription stopped by its [`CancelToken`].
+#[derive(Debug, thiserror::Error)]
+#[error("The transcription was cancelled")]
+pub struct Cancelled;
+
 pub struct SpeechService {
     model_manager: ModelInstallManager,
     resolver: ModelResolver,
@@ -109,6 +145,7 @@ struct DecodeOptions {
     dictionary: Vec<String>,
     timestamps: bool,
     word_timestamps: bool,
+    cancel: Option<CancelToken>,
 }
 
 struct LoadedEngine {
@@ -322,6 +359,26 @@ impl SpeechService {
         request: TranscribeRequest,
         deadline: Option<Instant>,
     ) -> Result<Transcription> {
+        self.transcribe_with(request, deadline, None)
+    }
+
+    /// Like [`transcribe`](Self::transcribe), but stops with [`Cancelled`]
+    /// soon after `cancel` is cancelled, also mid-run on the transcribe.cpp
+    /// engine.
+    pub fn transcribe_cancellable(
+        &self,
+        request: TranscribeRequest,
+        cancel: &CancelToken,
+    ) -> Result<Transcription> {
+        self.transcribe_with(request, None, Some(cancel))
+    }
+
+    fn transcribe_with(
+        &self,
+        request: TranscribeRequest,
+        deadline: Option<Instant>,
+        cancel: Option<&CancelToken>,
+    ) -> Result<Transcription> {
         let total_started = Instant::now();
         let TranscribeRequest {
             audio,
@@ -344,6 +401,9 @@ impl SpeechService {
         let (mut guard, mut side) =
             self.ensure_loaded_before(&requested_model, deadline, Some(long))?;
         drop(decode_slot);
+        if cancel.is_some_and(CancelToken::is_cancelled) {
+            return Err(Cancelled.into());
+        }
         let loaded = match side.as_mut() {
             Some(side) => side,
             None => loaded_engine(&mut guard)?,
@@ -363,10 +423,15 @@ impl SpeechService {
             dictionary,
             timestamps: timestamps || timestamp_granularity.is_some(),
             word_timestamps: timestamp_granularity == Some(TimestampGranularity::Word),
+            cancel: cancel.cloned(),
         };
         let compute = engine.compute();
         let transcribe_started = Instant::now();
-        let transcription = transcribe_with_engine(engine, audio, options)?;
+        let transcription = transcribe_with_engine(engine, audio, options);
+        if cancel.is_some_and(CancelToken::is_cancelled) {
+            return Err(Cancelled.into());
+        }
+        let transcription = transcription?;
         let transcribe_elapsed = transcribe_started.elapsed();
         // Only the main engine serves warmups and streaming.
         if !on_batch_engine {
@@ -427,6 +492,7 @@ impl SpeechService {
                 dictionary: Vec::new(),
                 timestamps: false,
                 word_timestamps: false,
+                cancel: None,
             },
         )?;
         loaded.warmed = true;
@@ -790,6 +856,7 @@ fn transcribe_with_engine(
                 prompt: options.prompt,
                 timestamps: options.timestamps,
                 word_timestamps: options.word_timestamps,
+                cancel: options.cancel,
             };
             transcribe_audio(engine, audio, Some(params))
         }
