@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- `SpeechService::transcribe_cancellable` with a `CancelToken` stops a transcription when the token is cancelled. transcribe.cpp models stop within a decode step, so the engine is free again in milliseconds instead of finishing the recording. The call returns `service::Cancelled`.
+
 ### Changed
 
 - The minimum supported Rust version is 1.100.
