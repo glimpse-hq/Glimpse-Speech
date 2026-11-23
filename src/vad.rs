@@ -632,7 +632,7 @@ fn on_frames(mask: &[bool], first: usize, from: u64, frame: usize, count: usize)
 mod tests {
     use super::{
         BRIDGE_FRAMES, FRAME_S, PAD_S, REGION_PAD_FRAMES, SPEECH_THRESHOLD, Silero, SpeechStream,
-        State, WINDOW, analyze, mask_to_regions, regions_mask,
+        State, WINDOW, analyze, mask_to_regions, regions_mask, speech_regions,
     };
 
     fn reference_audio() -> Vec<f32> {
@@ -711,6 +711,36 @@ mod tests {
         assert_eq!(regions.len(), 2);
         assert_eq!(regions[0].0, 0.0);
         assert!((regions[0].1 - (19.0 * FRAME_S + PAD_S)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn quiet_speech_keeps_regions_and_quiet_noise_has_none() {
+        let quiet: Vec<i16> = reference_audio()
+            .iter()
+            .map(|v| (v * 32_768.0 / 100.0) as i16)
+            .collect();
+        assert!(
+            !speech_regions(&quiet, 16_000)
+                .expect("silero weights")
+                .is_empty()
+        );
+        let mut seed = 1u32;
+        let noise: Vec<i16> = (0..quiet.len())
+            .map(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                ((seed >> 16) % 65) as i16 - 32
+            })
+            .collect();
+        assert!(
+            speech_regions(&noise, 16_000)
+                .expect("silero weights")
+                .is_empty()
+        );
+        assert!(
+            speech_regions(&vec![0; quiet.len()], 16_000)
+                .expect("silero weights")
+                .is_empty()
+        );
     }
 
     #[test]
