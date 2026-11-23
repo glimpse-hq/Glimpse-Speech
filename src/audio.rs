@@ -1,15 +1,23 @@
 use std::{
-    fs, io,
+    fs,
     path::{Path, PathBuf},
-    process::Command,
-    sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
+    process::{Command, Stdio},
+};
+
+use symphonia::core::{
+    codecs::audio::AudioDecoderOptions,
+    errors::Error as SymphoniaError,
+    formats::{FormatOptions, TrackType, probe::Hint},
+    io::MediaSourceStream,
+    meta::MetadataOptions,
 };
 
 use crate::io_error;
 
 const PCM16_SCALE: f32 = 32_768.0;
 pub(crate) const MAX_SAMPLE_RATE: u32 = 384_000;
+const FFMPEG_FORMATS: &str =
+    "mov,matroska,ogg,mp3,aac,flac,wav,w64,wv,aiff,caf,asf,amr,ac3,eac3,dts,mpeg,mpegts,avi,flv";
 
 /// Requirements: 16 kHz, mono, PCM int16 WAV file.
 pub fn read_wav_samples(wav_path: &Path) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
@@ -44,32 +52,107 @@ pub fn read_wav_samples(wav_path: &Path) -> Result<Vec<f32>, Box<dyn std::error:
     Ok(samples)
 }
 
+/// WAV in-process with hound, other formats with Symphonia, and what Symphonia
+/// can't decode (such as Opus) with ffmpeg when it is installed.
 pub fn read_audio_samples(path: &Path) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
-    let wav_error = match read_wav(path) {
+    if let Ok(samples) = read_wav(path) {
+        return Ok(samples);
+    }
+    let decode_error = match decode(path) {
         Ok(samples) => return Ok(samples),
         Err(error) => error,
     };
 
     let ffmpeg = find_ffmpeg().ok_or_else(|| {
         io_error(format!(
-            "Audio must be a PCM or float WAV, or ffmpeg must be installed to decode {}: {wav_error}",
+            "Could not decode {} without ffmpeg: {decode_error}",
             path.display()
         ))
     })?;
-    let converted = temp_wav_path()?;
-    let status = Command::new(&ffmpeg)
-        .args(["-n", "-nostdin", "-loglevel", "error", "-i"])
+    // Only local files and single-file demuxers, so a playlist or concat file
+    // can't make ffmpeg read other files or URLs.
+    let output = Command::new(&ffmpeg)
+        .args([
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-protocol_whitelist",
+            "file",
+        ])
+        .args(["-format_whitelist", FFMPEG_FORMATS, "-i"])
         .arg(path)
-        .args(["-ar", "16000", "-ac", "1", "-sample_fmt", "s16"])
-        .arg(&converted.path)
-        .status()
+        .args(["-ar", "16000", "-ac", "1", "-f", "s16le", "pipe:1"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::inherit())
+        .output()
         .map_err(|err| io_error(format!("Failed to run ffmpeg: {err}")))?;
-
-    if !status.success() {
-        return Err(io_error(format!("ffmpeg failed to decode {}", path.display())).into());
+    if !output.status.success() || output.stdout.is_empty() {
+        return Err(io_error(format!(
+            "ffmpeg failed to decode {}: {decode_error}",
+            path.display()
+        ))
+        .into());
     }
+    Ok(output
+        .stdout
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&bytes| f32::from(i16::from_le_bytes(bytes)) / PCM16_SCALE)
+        .collect())
+}
 
-    read_wav_samples(&converted.path)
+fn decode(path: &Path) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    let source = MediaSourceStream::new(Box::new(fs::File::open(path)?), Default::default());
+    let mut hint = Hint::new();
+    if let Some(extension) = path.extension().and_then(|extension| extension.to_str()) {
+        hint.with_extension(extension);
+    }
+    let mut format = symphonia::default::get_probe().probe(
+        &hint,
+        source,
+        FormatOptions::default(),
+        MetadataOptions::default(),
+    )?;
+    let track = format
+        .default_track(TrackType::Audio)
+        .ok_or("no audio track")?;
+    let track_id = track.id;
+    let params = track
+        .codec_params
+        .as_ref()
+        .and_then(|params| params.audio())
+        .ok_or("no audio track")?;
+    let mut decoder = symphonia::default::get_codecs()
+        .make_audio_decoder(params, &AudioDecoderOptions::default())?;
+    let mut sample_rate = None;
+    let mut mono = Vec::new();
+    let mut interleaved = Vec::new();
+    while let Some(packet) = format.next_packet()? {
+        if packet.track_id != track_id {
+            continue;
+        }
+        let decoded = match decoder.decode(&packet) {
+            Ok(decoded) => decoded,
+            Err(SymphoniaError::DecodeError(_)) => continue,
+            Err(error) => return Err(error.into()),
+        };
+        // HE-AAC decodes without SBR, at half the rate its container states.
+        let rate = decoded.spec().rate();
+        if *sample_rate.get_or_insert(rate) != rate {
+            return Err("sample rate changes mid-stream".into());
+        }
+        let channels = decoded.spec().channels().count().max(1);
+        decoded.copy_to_vec_interleaved(&mut interleaved);
+        mono.extend(downmix(std::mem::take(&mut interleaved), channels));
+    }
+    if mono.is_empty() {
+        return Err("no audio decoded".into());
+    }
+    let sample_rate = sample_rate
+        .filter(|rate| (1..=MAX_SAMPLE_RATE).contains(rate))
+        .ok_or("unsupported sample rate")?;
+    Ok(resample(mono, sample_rate, 16_000))
 }
 
 fn read_wav(path: &Path) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
@@ -121,52 +204,6 @@ fn find_ffmpeg() -> Option<PathBuf> {
     std::env::split_paths(&std::env::var_os("PATH")?)
         .map(|path| path.join(binary))
         .find(|candidate| candidate.is_file())
-}
-
-static TEMP_DECODE_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-struct TempWav {
-    dir: PathBuf,
-    path: PathBuf,
-}
-
-impl Drop for TempWav {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-        let _ = fs::remove_dir(&self.dir);
-    }
-}
-
-fn temp_wav_path() -> Result<TempWav, Box<dyn std::error::Error>> {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    for _ in 0..16 {
-        let sequence = TEMP_DECODE_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "glimpse-speech-decode-{}-{timestamp}-{sequence}",
-            std::process::id(),
-        ));
-        match fs::create_dir(&dir) {
-            Ok(()) => {
-                return Ok(TempWav {
-                    path: dir.join("audio.wav"),
-                    dir,
-                });
-            }
-            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(err) => {
-                return Err(io_error(format!(
-                    "Failed to create temp decode directory {}: {err}",
-                    dir.display()
-                ))
-                .into());
-            }
-        }
-    }
-
-    Err(io_error("Failed to create a unique temp decode directory").into())
 }
 
 /// Converts PCM16 to normalized f32 and resamples to `to_rate`.
