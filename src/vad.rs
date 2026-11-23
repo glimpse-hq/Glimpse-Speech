@@ -464,7 +464,15 @@ pub fn analyze(samples: &[i16], sample_rate: u32) -> Option<Speech> {
     if sample_rate > crate::audio::MAX_SAMPLE_RATE {
         return None;
     }
-    let mut audio = crate::audio::resample_i16_to_f32(samples, sample_rate, 16_000);
+    analyze_16k(crate::audio::resample_i16_to_f32(
+        samples,
+        sample_rate,
+        16_000,
+    ))
+}
+
+/// [`analyze`] for 16 kHz mono samples in [-1, 1].
+pub(crate) fn analyze_16k(mut audio: Vec<f32>) -> Option<Speech> {
     even_out(&mut audio);
     let vad = VAD.get_or_init(Silero::load).as_ref()?;
     Some(Speech {

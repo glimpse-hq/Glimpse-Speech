@@ -492,6 +492,7 @@ impl TranscriptionEngine for TranscribeEngine {
                 .as_ref()
                 .is_some_and(crate::service::CancelToken::is_cancelled)
         };
+        let skips_silence = matches!(self.family, Family::Whisper { .. });
         let (chunks, speech) = std::thread::scope(|scope| {
             // Silero runs while the model decodes.
             let vad = self
@@ -502,7 +503,7 @@ impl TranscriptionEngine for TranscribeEngine {
                 })
                 .and_then(Result::ok);
             let mut chunks = decode_chunks(&samples, self.chunk_samples, boundary, |chunks| {
-                run_chunks(session, chunks, &options, batch)
+                run_chunks(session, chunks, &options, batch, skips_silence)
             });
             // A rejected boost list must never fail dictation: decode unboosted.
             if let (Err(Error::InvalidArgument(error)), Some(RunExtension::Parakeet(_))) =
@@ -513,7 +514,7 @@ impl TranscriptionEngine for TranscribeEngine {
                 );
                 options.family = None;
                 chunks = decode_chunks(&samples, self.chunk_samples, boundary, |chunks| {
-                    run_chunks(session, chunks, &options, batch)
+                    run_chunks(session, chunks, &options, batch, skips_silence)
                 });
             }
             (chunks, vad.and_then(|vad| vad.join().ok().flatten()))
@@ -533,7 +534,7 @@ impl TranscriptionEngine for TranscribeEngine {
                 })
                 .collect();
             let retries = decode_spans(&samples, &spans, self.chunk_samples, boundary, |chunks| {
-                run_chunks(session, chunks, &options, batch)
+                run_chunks(session, chunks, &options, batch, skips_silence)
             })
             .map(|decoded| {
                 decoded
@@ -562,6 +563,9 @@ impl TranscriptionEngine for TranscribeEngine {
 }
 
 const SAMPLE_RATE: usize = 16_000;
+// Whisper windows of a longer recording with less speech than this (Silero
+// frames) are skipped, the share Glimpse's chunked transcription used.
+const MIN_WINDOW_SPEECH_PERCENT: f32 = 5.0;
 // A stretch of detected speech at least this long without a word counts as dropped.
 const DROPPED_SPEECH: usize = 3 * SAMPLE_RATE / 2;
 // Gaps at least this long between padded speech regions (about a second of
@@ -904,12 +908,23 @@ fn run_chunks(
     chunks: &[&[f32]],
     options: &RunOptions,
     batch: bool,
+    skips_silence: bool,
 ) -> Result<Vec<Result<Transcript, Error>>, Error> {
     if batch && chunks.len() > 1 {
         return session.run_batch(chunks, options);
     }
     let mut results = Vec::with_capacity(chunks.len());
     for chunk in chunks {
+        // Whisper can write text for a window without speech, which overlaps
+        // the speech padding next to it and survives a segment filter.
+        if skips_silence
+            && chunks.len() > 1
+            && crate::vad::analyze_16k(chunk.to_vec())
+                .is_some_and(|speech| speech.percentage() < MIN_WINDOW_SPEECH_PERCENT)
+        {
+            results.push(Ok(Transcript::default()));
+            continue;
+        }
         let result = session.run(chunk, options);
         let failed = result.is_err();
         results.push(result);
