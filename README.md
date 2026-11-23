@@ -82,7 +82,7 @@ tracks model id and path, not changes to companion files.
 ## CLI
 
 ```bash
-# Transcribe a file (WAV is decoded in-process; other formats need ffmpeg)
+# Transcribe a file (decoded in-process; formats such as Opus need ffmpeg)
 glimpse-speech transcribe audio.wav --model ggml-large-v3-turbo-q8_0.bin
 glimpse-speech transcribe audio.m4a --model parakeet-tdt-0.6b-v3-Q8_0.gguf
 glimpse-speech transcribe audio.wav --model <model> --response-format srt --timestamps

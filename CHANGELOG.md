@@ -9,6 +9,8 @@
 ### Fixed
 
 - Apple Speech long-form transcription works in the languages only DictationTranscriber supports, such as Dutch, Polish, Russian and Turkish, by using DictationTranscriber for them.
+- MP3, M4A, AAC, FLAC, Ogg Vorbis, MKV, MP4 and MOV audio decode in-process with Symphonia, so they no longer fail when ffmpeg is not on PATH, as in an app opened from Finder.
+- ffmpeg, still used for formats Symphonia can't decode such as Opus, reads only the uploaded file. A playlist or concat file can no longer make it read other local files or URLs, or hang waiting on one.
 
 ## 3.0.5
 
